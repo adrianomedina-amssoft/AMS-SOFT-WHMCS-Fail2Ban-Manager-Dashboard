@@ -121,9 +121,9 @@
                         <span class="help-block">Apenas letras, números, hífen e underscore.</span>
                     </div>
                     <div class="form-group">
-                        <label>Filter</label>
-                        <select name="filter" class="form-control">
-                            <option value="">— nenhum —</option>
+                        <label>Filter <span class="text-danger">*</span></label>
+                        <select name="filter" class="form-control" id="new-jail-filter">
+                            <option value="">— selecione um filtro —</option>
                             <?php
                             $pf = $prefill_filter ?? '';
                             // Se o filtro sugerido pela IA não existe em filter.d, adiciona
@@ -136,7 +136,16 @@
                             <option value="<?= $e($f) ?>" <?= ($f === $pf) ? 'selected' : '' ?>><?= $e($f) ?></option>
                             <?php endforeach; ?>
                         </select>
-                        <span class="help-block">Filtros disponíveis em /etc/fail2ban/filter.d/.</span>
+                        <span class="help-block">
+                            Selecione o filtro de <code>/etc/fail2ban/filter.d/</code> que define as regras de detecção.
+                            Obrigatório para jails personalizadas.
+                        </span>
+                        <div id="filter-no-match-warning"
+                             style="display:none;margin-top:4px;padding:5px 10px;background:#fcf8e3;border:1px solid #faebcc;border-radius:3px;font-size:12px;color:#8a6d3b;">
+                            Sem filtro selecionado, o fail2ban procurará por
+                            <code>/etc/fail2ban/filter.d/<span id="filter-implied-name"></span>.conf</code>.
+                            Se esse arquivo não existir, a jail não carregará.
+                        </div>
                     </div>
                     <div class="form-group">
                         <label>Log Path</label>
@@ -289,6 +298,28 @@
             });
         });
     });
+
+    // Aviso inline no modal "Novo Jail" quando nenhum filtro é selecionado
+    (function () {
+        var knownFilters = <?= json_encode(array_values($available_filters)) ?>;
+        var jailInput    = document.querySelector('#modalAddJail input[name="new_jail"]');
+        var filterSel    = document.getElementById('new-jail-filter');
+        var warning      = document.getElementById('filter-no-match-warning');
+        var impliedSpan  = document.getElementById('filter-implied-name');
+
+        function updateFilterWarning() {
+            if (!jailInput || !filterSel || !warning) return;
+            var jailName   = jailInput.value.trim();
+            var filterVal  = filterSel.value;
+            // Avisa só quando: nenhum filtro explícito E o nome da jail não bate com filtro existente
+            var showWarn = filterVal === '' && jailName !== '' && knownFilters.indexOf(jailName) === -1;
+            warning.style.display = showWarn ? 'block' : 'none';
+            if (impliedSpan) { impliedSpan.textContent = jailName; }
+        }
+
+        if (jailInput)  { jailInput.addEventListener('input',  updateFilterWarning); }
+        if (filterSel)  { filterSel.addEventListener('change', updateFilterWarning); }
+    })();
 
     // Auto-abrir modal "Novo Jail" com dados pré-preenchidos
     // (acionado quando o admin vem da tela de Sugestões IA com jail inexistente)

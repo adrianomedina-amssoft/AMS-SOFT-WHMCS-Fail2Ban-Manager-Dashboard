@@ -9,6 +9,7 @@ class Fail2BanClient
 {
     private string $sudo;
     private string $clientBin;
+    private string $lastOutput = '';
 
     public function __construct(string $sudo, string $clientBin)
     {
@@ -174,6 +175,12 @@ class Fail2BanClient
     // Private helpers
     // -----------------------------------------------------------------------
 
+    /** Returns the output of the last command executed via run(). */
+    public function getLastOutput(): string
+    {
+        return $this->lastOutput;
+    }
+
     /**
      * Builds and executes: sudo fail2ban-client <cmd>
      * $cmd must be constructed from sanitized/escaped values within this class.
@@ -189,7 +196,8 @@ class Fail2BanClient
 
         $outputArr = [];
         exec($fullCmd, $outputArr, $code);
-        return implode("\n", $outputArr);
+        $this->lastOutput = implode("\n", $outputArr);
+        return $this->lastOutput;
     }
 
     private function sanitizeJail(string $jail): string

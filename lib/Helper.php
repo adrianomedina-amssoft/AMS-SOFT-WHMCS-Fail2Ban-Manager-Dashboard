@@ -53,9 +53,9 @@ class Helper
     // Flash messages
     // -----------------------------------------------------------------------
 
-    public static function setFlash(string $type, string $message): void
+    public static function setFlash(string $type, string $message, string $detail = ''): void
     {
-        $_SESSION['amssoft_fail2ban_flash'] = ['type' => $type, 'message' => $message];
+        $_SESSION['amssoft_fail2ban_flash'] = ['type' => $type, 'message' => $message, 'detail' => $detail];
     }
 
     /** Returns and clears the stored flash message. */

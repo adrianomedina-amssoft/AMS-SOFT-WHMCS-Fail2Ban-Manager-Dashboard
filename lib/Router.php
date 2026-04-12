@@ -149,9 +149,10 @@ class Router
         $warnings = [];
 
         $sudoersFile = '/etc/sudoers.d/amssoft_fail2ban';
-        $content     = @file_get_contents($sudoersFile);
 
-        if ($content === false) {
+        // Arquivos sudoers devem ser root:root 0440 — www-data não consegue lê-los.
+        // Verificamos existência e depois testamos funcionalmente via sudo ping.
+        if (!file_exists($sudoersFile)) {
             $warnings[] = [
                 'level'   => 'danger',
                 'message' => 'Arquivo de sudoers não encontrado: <code>' . $sudoersFile . '</code>. '
@@ -163,20 +164,34 @@ class Router
             return $warnings;
         }
 
-        // Verificar regras obrigatórias de cp/chmod para criação de filtros pela IA
-        $hasCp     = str_contains($content, '/bin/cp /tmp/amsfb_filter_*');
-        $hasChmod  = str_contains($content, '/bin/chmod 644 /etc/fail2ban/filter.d/amsfb-*');
+        // Verificar se as regras sudo estão funcionando (teste funcional)
+        $sudoPath        = '/usr/bin/sudo';
+        $fail2banClient  = '/usr/bin/fail2ban-client';
+        $pingOutput      = shell_exec($sudoPath . ' ' . $fail2banClient . ' ping 2>&1');
+        $sudoWorks       = ($pingOutput !== null && str_contains($pingOutput, 'pong'));
 
-        if (!$hasCp || !$hasChmod) {
+        if (!$sudoWorks) {
             $warnings[] = [
                 'level'   => 'warning',
-                'message' => 'O arquivo <code>' . $sudoersFile . '</code> está desatualizado — '
-                           . 'faltam as regras para criação de filtros pela IA (recurso v3). '
-                           . 'Sem elas, o botão "Criar Filtro" falhará.',
+                'message' => 'O arquivo <code>' . $sudoersFile . '</code> existe, mas o sudo não está funcionando corretamente. '
+                           . 'Verifique se as regras estão atualizadas e válidas.',
                 'fix'     => 'cp ' . escapeshellarg(dirname(__DIR__) . '/setup/sudoers/amssoft_fail2ban')
                            . ' ' . escapeshellarg($sudoersFile)
                            . ' &amp;&amp; chmod 0440 ' . escapeshellarg($sudoersFile)
                            . ' &amp;&amp; visudo -c',
+            ];
+        }
+
+        // Verifica permissões de jail.local — visível em todas as páginas, não só em Jails.
+        $jailLocalPath = $this->vars['jail_local_path'] ?? '/etc/fail2ban/jail.local';
+        $jailConfig    = new JailConfig($jailLocalPath);
+        $permError     = $jailConfig->checkPermissions();
+        if ($permError !== null) {
+            $warnings[] = [
+                'level'   => 'danger',
+                'message' => htmlspecialchars($permError, ENT_QUOTES, 'UTF-8'),
+                'fix'     => 'chown root:www-data ' . escapeshellarg($jailLocalPath)
+                           . ' &amp;&amp; chmod 0664 ' . escapeshellarg($jailLocalPath),
             ];
         }
 

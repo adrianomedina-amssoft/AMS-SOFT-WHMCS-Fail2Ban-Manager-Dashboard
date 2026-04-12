@@ -67,13 +67,21 @@ class JailsController
         }
 
         if ($do === 'remove') {
+            $warning = null;
             $ok = $config->removeJail($jail);
             if ($ok) {
                 $reloaded = $config->reloadAll();
                 Database::logEvent('-', $jail, 'manual_ban', 'Jail removido via WHMCS', Helper::adminId());
+                if (!$reloaded) {
+                    $output  = trim($config->getLastReloadOutput());
+                    $warning = 'Jail removido do jail.local, mas o fail2ban não pôde ser recarregado.';
+                    if ($output !== '') {
+                        $warning .= "\n\nSaída:\n" . $output;
+                    }
+                }
                 return json_encode([
                     'success' => true,
-                    'warning' => $reloaded ? null : 'Jail removido do jail.local, mas o fail2ban não foi recarregado. Execute no servidor: sudo fail2ban-client reload',
+                    'warning' => $reloaded ? null : $warning,
                 ]);
             }
             return json_encode(['success' => false, 'error' => "Não foi possível remover '{$jail}'. Verifique permissões em jail.local."]);
@@ -130,9 +138,18 @@ class JailsController
         } elseif ($do === 'remove') {
             $ok = $config->removeJail($jail);
             if ($ok) {
-                $config->reloadAll();
+                $reloaded = $config->reloadAll();
                 Database::logEvent('-', $jail, 'manual_ban', 'Jail removido via WHMCS', Helper::adminId());
-                Helper::setFlash('success', "Jail {$jail} removido.");
+                if ($reloaded) {
+                    Helper::setFlash('success', "Jail {$jail} removido e fail2ban recarregado.");
+                } else {
+                    $output = trim($config->getLastReloadOutput());
+                    Helper::setFlash(
+                        'warning',
+                        "Jail {$jail} removido, mas o fail2ban não pôde ser recarregado automaticamente.",
+                        $output !== '' ? $output : ''
+                    );
+                }
             } else {
                 Helper::setFlash('danger', "Erro ao remover jail {$jail}.");
             }
@@ -168,6 +185,29 @@ class JailsController
         $filter  = preg_replace('/[^a-zA-Z0-9_-]/', '', $_POST['filter'] ?? '');
         $enabled = isset($_POST['enabled']) ? 'true' : 'false';
 
+        // Pre-flight: valida que o filtro que vai ser usado realmente existe em filter.d.
+        // Sem filtro explícito, fail2ban usa filter.d/{jail}.conf (implied pelo nome da jail).
+        $filterDir = '/etc/fail2ban/filter.d/';
+        if ($filter === '') {
+            $impliedFilter = $filterDir . $jail . '.conf';
+            if (!file_exists($impliedFilter)) {
+                Helper::setFlash(
+                    'danger',
+                    "Nenhum filtro selecionado para o jail '{$jail}'. O fail2ban procuraria por {$impliedFilter}, mas esse arquivo não existe. Selecione um filtro da lista ou crie o arquivo de filtro antes de criar a jail."
+                );
+                Helper::redirect(($this->vars['modulelink'] ?? '') . '&action=jails');
+            }
+        } else {
+            $explicitFilter = $filterDir . $filter . '.conf';
+            if (!file_exists($explicitFilter)) {
+                Helper::setFlash(
+                    'danger',
+                    "Filtro '{$filter}' não encontrado em {$filterDir}. Selecione um filtro válido da lista."
+                );
+                Helper::redirect(($this->vars['modulelink'] ?? '') . '&action=jails');
+            }
+        }
+
         $params = [
             'enabled'  => $enabled,
             'maxretry' => (string)$maxretry,
@@ -188,10 +228,33 @@ class JailsController
             if ($reloaded) {
                 Helper::setFlash('success', "Jail {$jail} criado e fail2ban recarregado.");
             } else {
-                Helper::setFlash('warning', "Jail {$jail} criado em jail.local, mas o fail2ban não foi recarregado automaticamente. Execute no servidor: <code>sudo fail2ban-client reload</code>");
+                $output  = trim($config->getLastReloadOutput());
+                $message = "Jail {$jail} criado em jail.local, mas o fail2ban não pôde ser recarregado.";
+
+                // Detecta jails pré-existentes com logpath ausente (causa o reload falhar)
+                if (preg_match_all('/Have not found any log file for (\S+) jail/i', $output, $m)) {
+                    $broken = array_diff(array_unique($m[1]), [$jail]);
+                    if (!empty($broken)) {
+                        $message .= ' Jails sem logpath: ' . implode(', ', $broken) . '. Edite-as e adicione um logpath ou remova-as.';
+                    }
+                }
+                // Detecta jails pré-existentes com filtro ausente (puladas, mas geram erros)
+                if (preg_match_all("/Errors in jail '([^']+)'\. Skipping/i", $output, $m2)) {
+                    $noFilter = array_diff(array_unique($m2[1]), [$jail]);
+                    if (!empty($noFilter)) {
+                        $message .= ' Jails sem filtro válido: ' . implode(', ', $noFilter) . '. Edite-as e selecione um filtro ou remova-as.';
+                    }
+                }
+
+                Helper::setFlash('warning', $message, $output !== '' ? $output : '');
             }
         } else {
-            Helper::setFlash('danger', "Erro ao criar jail {$jail}. Verifique se já existe.");
+            $permErr = $config->checkPermissions();
+            if ($permErr !== null) {
+                Helper::setFlash('danger', $permErr);
+            } else {
+                Helper::setFlash('danger', "Erro ao criar jail {$jail}. Verifique se já existe.");
+            }
         }
 
         Helper::redirect(($this->vars['modulelink'] ?? '') . '&action=jails');
@@ -292,12 +355,6 @@ class JailsController
         $jailData   = [];
         $liveStatus = [];
         $error      = null;
-
-        // Check file permissions before attempting to read
-        $permError = $config->checkPermissions();
-        if ($permError !== null) {
-            $error = $permError;
-        }
 
         try {
             $jailData = $config->readJailLocal();

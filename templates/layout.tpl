@@ -111,6 +111,9 @@
             <span aria-hidden="true">&times;</span>
         </button>
         <?= $e($flash['message']) ?>
+        <?php if (!empty($flash['detail'])): ?>
+        <pre style="margin-top:6px;margin-bottom:0;font-size:11px;white-space:pre-wrap;word-break:break-all;background:rgba(0,0,0,.05);padding:6px;border-radius:3px;"><?= $e($flash['detail']) ?></pre>
+        <?php endif; ?>
     </div>
     <?php endif; ?>
 

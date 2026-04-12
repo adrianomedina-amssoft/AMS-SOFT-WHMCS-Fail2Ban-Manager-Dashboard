@@ -138,6 +138,12 @@ class JailConfig
         return $this->client->reload();
     }
 
+    /** Returns the output captured from the last reload command (useful for diagnostics on failure). */
+    public function getLastReloadOutput(): string
+    {
+        return $this->client ? $this->client->getLastOutput() : '';
+    }
+
     // -----------------------------------------------------------------------
     // Private helpers
     // -----------------------------------------------------------------------
