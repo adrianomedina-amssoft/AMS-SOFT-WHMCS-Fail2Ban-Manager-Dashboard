@@ -64,8 +64,9 @@ class JailsController
             if ($ok) {
                 $config->reloadAll();
                 Database::logEvent('-', $jail, 'manual_ban', 'Jail removido via WHMCS', Helper::adminId());
+                return json_encode(['success' => true]);
             }
-            return json_encode(['success' => $ok]);
+            return json_encode(['success' => false, 'error' => "Não foi possível remover '{$jail}'. Verifique permissões em jail.local."]);
         }
 
         return json_encode(['success' => false, 'error' => 'Unknown do']);
@@ -306,10 +307,21 @@ class JailsController
         // Remove [DEFAULT] from displayed jails
         unset($jailData['DEFAULT']);
 
+        // Collect available filters from filter.d for the "Novo Jail" modal
+        $availableFilters = [];
+        $filterDir = '/etc/fail2ban/filter.d';
+        if (is_dir($filterDir)) {
+            foreach (glob($filterDir . '/*.conf') ?: [] as $f) {
+                $availableFilters[] = basename($f, '.conf');
+            }
+            sort($availableFilters);
+        }
+
         return $this->router->render('jails', [
-            'jail_data'   => $jailData,
-            'live_status' => $liveStatus,
-            'error'       => $error,
+            'jail_data'         => $jailData,
+            'live_status'       => $liveStatus,
+            'error'             => $error,
+            'available_filters' => $availableFilters,
         ]);
     }
 }

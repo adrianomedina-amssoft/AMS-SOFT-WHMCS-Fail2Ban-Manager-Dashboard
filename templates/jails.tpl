@@ -121,9 +121,13 @@
                     </div>
                     <div class="form-group">
                         <label>Filter</label>
-                        <input type="text" name="filter" class="form-control"
-                               placeholder="ex: apache-auth, sshd, whmcs">
-                        <span class="help-block">Nome do arquivo em /etc/fail2ban/filter.d/ (sem .conf).</span>
+                        <select name="filter" class="form-control">
+                            <option value="">— nenhum —</option>
+                            <?php foreach ($available_filters as $f): ?>
+                            <option value="<?= $e($f) ?>"><?= $e($f) ?></option>
+                            <?php endforeach; ?>
+                        </select>
+                        <span class="help-block">Filtros disponíveis em /etc/fail2ban/filter.d/.</span>
                     </div>
                     <div class="form-group">
                         <label>Log Path</label>
@@ -215,6 +219,22 @@
             });
         });
     });
+    // Atualiza o CSRF do modal ao abrir — evita token stale após rotação por AJAX
+    (function () {
+        var modalEl = document.getElementById('modalAddJail');
+        if (!modalEl) return;
+        function syncCsrf() {
+            var inp = modalEl.querySelector('input[name="csrf_token"]');
+            if (inp) { inp.value = window.AMSFB.csrfToken; }
+        }
+        // Bootstrap 3 (jQuery) — usado pelo WHMCS
+        if (typeof $ !== 'undefined') {
+            $(modalEl).on('show.bs.modal', syncCsrf);
+        }
+        // Bootstrap 5 fallback
+        modalEl.addEventListener('show.bs.modal', syncCsrf);
+    })();
+
     // Remove buttons (AJAX)
     document.querySelectorAll('.amsfb-remove-btn').forEach(function (btn) {
         btn.addEventListener('click', function () {
