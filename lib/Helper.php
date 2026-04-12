@@ -188,22 +188,13 @@ class Helper
         return $plain !== false ? $plain : '';
     }
 
-    /** Deriva a chave de criptografia a partir de dados do sistema WHMCS. */
+    /** Deriva a chave de criptografia a partir de chave aleatória persistida no banco. */
     private static function getEncryptionKey(): string
     {
-        try {
-            $license = Capsule::table('tblconfiguration')
-                ->where('setting', 'License')
-                ->value('value');
-            if ($license) {
-                return hash('sha256', $license, true);
-            }
-        } catch (\Throwable $e) {
-            // fallback
-        }
-
-        // [SEC-13] Fallback seguro: gerar chave aleatória e persistir no banco,
-        // em vez de derivar do __DIR__ (caminho previsível em qualquer instalação).
+        // Chave aleatória persistida no banco — método único e confiável.
+        // (Abordagem anterior via licença WHMCS foi removida: o valor retornado
+        // pelo banco pode divergir entre contextos CLI/web, tornando a
+        // descriptografia não determinística.)
         try {
             $stored = Capsule::table('mod_amssoft_fail2ban_config')
                 ->where('key', '_enc_key')
@@ -219,7 +210,6 @@ class Helper
                 ->updateOrInsert(['key' => '_enc_key'], ['value' => base64_encode($newKey)]);
             return $newKey;
         } catch (\Throwable $e) {
-            // Último fallback: combinar dados menos previsíveis do servidor
             return hash('sha256', php_uname() . gethostname(), true);
         }
     }

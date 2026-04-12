@@ -103,17 +103,21 @@ class IpsController
             $error = $e->getMessage();
         }
 
-        // Fallback: if fail2ban is offline or returned no jails, read from jail.local
-        // so the "Banir IP" modal always has options to select from.
-        if (empty($jails)) {
-            try {
-                $config    = $this->router->makeJailConfig();
-                $jailData  = $config->readJailLocal();
-                unset($jailData['DEFAULT']);
-                $jails = array_values(array_keys($jailData));
-            } catch (\Throwable $e) {
-                // jail.local unreadable — keep empty
+        // Sempre fundir com os jails enabled=true do jail.local para que o dropdown
+        // "Banir IP" exiba todos os jails configurados, mesmo que o fail2ban ainda
+        // não tenha recarregado ou retorne uma lista parcial.
+        try {
+            $config   = $this->router->makeJailConfig();
+            $jailData = $config->readJailLocal();
+            unset($jailData['DEFAULT']);
+            foreach ($jailData as $jailName => $cfg) {
+                $enabled = !isset($cfg['enabled']) || strtolower($cfg['enabled']) !== 'false';
+                if ($enabled && !in_array($jailName, $jails, true)) {
+                    $jails[] = $jailName;
+                }
             }
+        } catch (\Throwable $e) {
+            // jail.local inacessível — usa apenas o que o fail2ban retornou
         }
 
         // Cross-reference with DB for ban time / reason

@@ -107,8 +107,14 @@ class LogPathsController
 
         try {
             $rawData  = $jailConfig->readJailLocal();
-            // Remove DEFAULT section, keep only actual jails
+            // Remove DEFAULT e stubs de desabilitação do sistema (ex: [sshd] enabled=false)
             unset($rawData['DEFAULT']);
+            foreach ($rawData as $jailName => $cfg) {
+                $keys = array_keys($cfg);
+                if ($keys === ['enabled'] && strtolower($cfg['enabled']) === 'false') {
+                    unset($rawData[$jailName]);
+                }
+            }
             $jailData = $rawData;
         } catch (\Throwable $e) {
             // jail.local might not be accessible

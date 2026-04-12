@@ -262,6 +262,7 @@
                 if (data.success) {
                     var row = document.getElementById('row-' + jail);
                     if (row) { row.parentNode.removeChild(row); }
+                    if (data.warning) { alert('⚠ ' + data.warning); }
                 } else {
                     alert('Erro ao remover jail: ' + (data.error || 'Falha desconhecida'));
                     btn.disabled    = false;

@@ -250,6 +250,7 @@
             var data = {};
             var inputs = form.querySelectorAll('input[name], select[name], textarea[name]');
             inputs.forEach(function (el) {
+                if (el.name === 'csrf_token') return; // já incluído pelo AMSFB.post via window.AMSFB.csrfToken
                 if (el.type === 'radio' && !el.checked) return;
                 if (el.type === 'checkbox') {
                     if (el.checked) data[el.name] = el.value;

@@ -62,9 +62,12 @@ class JailsController
         if ($do === 'remove') {
             $ok = $config->removeJail($jail);
             if ($ok) {
-                $config->reloadAll();
+                $reloaded = $config->reloadAll();
                 Database::logEvent('-', $jail, 'manual_ban', 'Jail removido via WHMCS', Helper::adminId());
-                return json_encode(['success' => true]);
+                return json_encode([
+                    'success' => true,
+                    'warning' => $reloaded ? null : 'Jail removido do jail.local, mas o fail2ban não foi recarregado. Execute no servidor: sudo fail2ban-client reload',
+                ]);
             }
             return json_encode(['success' => false, 'error' => "Não foi possível remover '{$jail}'. Verifique permissões em jail.local."]);
         }
@@ -173,9 +176,13 @@ class JailsController
 
         $ok = $config->addJail($jail, $params);
         if ($ok) {
-            $config->reloadAll();
+            $reloaded = $config->reloadAll();
             Database::logEvent('-', $jail, 'manual_ban', 'Jail criado via WHMCS', Helper::adminId());
-            Helper::setFlash('success', "Jail {$jail} criado com sucesso.");
+            if ($reloaded) {
+                Helper::setFlash('success', "Jail {$jail} criado e fail2ban recarregado.");
+            } else {
+                Helper::setFlash('warning', "Jail {$jail} criado em jail.local, mas o fail2ban não foi recarregado automaticamente. Execute no servidor: <code>sudo fail2ban-client reload</code>");
+            }
         } else {
             Helper::setFlash('danger', "Erro ao criar jail {$jail}. Verifique se já existe.");
         }
@@ -304,8 +311,16 @@ class JailsController
             // fail2ban offline — proceed with config-only view
         }
 
-        // Remove [DEFAULT] from displayed jails
+        // Remove [DEFAULT] e stubs de desabilitação do sistema (ex: [sshd] enabled=false)
+        // Stubs: seção com apenas a chave "enabled" definida como "false" — são overrides
+        // internos para evitar erros de reload do fail2ban, não jails gerenciáveis pelo usuário.
         unset($jailData['DEFAULT']);
+        foreach ($jailData as $jailName => $cfg) {
+            $keys = array_keys($cfg);
+            if ($keys === ['enabled'] && strtolower($cfg['enabled']) === 'false') {
+                unset($jailData[$jailName]);
+            }
+        }
 
         // Collect available filters from filter.d for the "Novo Jail" modal
         $availableFilters = [];

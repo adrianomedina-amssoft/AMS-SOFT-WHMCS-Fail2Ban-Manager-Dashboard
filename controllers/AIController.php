@@ -78,6 +78,18 @@ class AIController
         }
 
         $apiKeySet = Database::getConfig('ai_api_key', '') !== '';
+
+        // Migração: se há chave no DB mas não consegue descriptografar (chave corrompida
+        // pela troca do método de derivação da chave de criptografia), apaga para forçar
+        // re-cadastro pelo usuário.
+        if ($apiKeySet) {
+            $decrypted = Helper::decryptApiKey(Database::getConfig('ai_api_key', ''));
+            if ($decrypted === '') {
+                Database::setConfig('ai_api_key', '');
+                $apiKeySet = false;
+            }
+        }
+
         $mode      = Database::getConfig('ai_mode', 'suggestion');
         $interval  = Database::getConfig('ai_interval_minutes', '30');
         $minConf   = Database::getConfig('ai_min_confidence', '75');
@@ -142,6 +154,22 @@ class AIController
             return json_encode(['success' => false, 'error' => 'ID inválido.']);
         }
 
+        // Buscar sugestão para mensagens descritivas antes de delegar ao engine
+        $suggestion = Database::getSuggestion($id);
+        if (!$suggestion) {
+            return json_encode(['success' => false, 'error' => 'Sugestão não encontrada.']);
+        }
+        if ($suggestion['status'] !== 'pending') {
+            $label = match ($suggestion['status']) {
+                'approved'      => 'aprovada',
+                'rejected'      => 'rejeitada',
+                'auto_executed' => 'executada automaticamente',
+                default         => $suggestion['status'],
+            };
+            return json_encode(['success' => false, 'error' => "Sugestão já foi {$label}."]);
+        }
+
+        $ip      = $suggestion['ip'];
         $apiKey  = $this->decryptApiKey();
         $client  = $this->router->makeClient();
         $analyzer = new AIAnalyzer($apiKey ?: 'placeholder');
@@ -149,10 +177,36 @@ class AIController
         $adminId = Helper::adminId();
 
         $ok = $engine->approveSuggestion($id, $adminId);
-        return json_encode([
-            'success' => $ok,
-            'message' => $ok ? 'Sugestão aprovada e ban executado.' : 'Falha ao aprovar sugestão.',
-        ]);
+
+        if ($ok) {
+            return json_encode(['success' => true, 'message' => "IP {$ip} banido com sucesso."]);
+        }
+
+        // Diagnosticar causa da falha para mensagem útil ao admin
+        if (!$client->ping()) {
+            return json_encode(['success' => false, 'error' => "fail2ban está offline — não foi possível banir {$ip}."]);
+        }
+
+        // Verificar se o IP já está banido (qualquer jail) — tratar como sucesso
+        try {
+            $bannedIPs = array_column($client->getBannedIPs(), 'ip');
+            if (in_array($ip, $bannedIPs, true)) {
+                Database::updateSuggestionStatus($id, 'approved', $adminId);
+                Database::logEvent($ip, $suggestion['jail'] ?: 'unknown', 'manual_ban', 'AI: IP já estava banido — aprovação registrada', $adminId);
+                return json_encode(['success' => true, 'message' => "IP {$ip} já estava banido. Sugestão marcada como aprovada."]);
+            }
+        } catch (\Throwable $e) {}
+
+        // Verificar se o jail da sugestão existe no fail2ban
+        $jail = $suggestion['jail'] ?? '';
+        if (!empty($jail)) {
+            $activeJails = $client->getJails();
+            if (!in_array($jail, $activeJails, true)) {
+                return json_encode(['success' => false, 'error' => "Jail '{$jail}' não está ativo no fail2ban. Ative o jail e tente novamente."]);
+            }
+        }
+
+        return json_encode(['success' => false, 'error' => "Falha ao banir {$ip}. Verifique se o fail2ban está online e o jail está ativo."]);
     }
 
     // -----------------------------------------------------------------------

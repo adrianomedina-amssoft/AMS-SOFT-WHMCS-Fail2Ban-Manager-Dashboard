@@ -25,8 +25,22 @@ class LogViewerController
 
     public function handle(string $action): string
     {
-        $viewer       = new LogViewer();
-        $availableLogs = $viewer->getAvailableLogs();
+        // Coletar logpaths do jail.local para enriquecer o dropdown
+        $extra = [];
+        try {
+            $jailData = $this->router->makeJailConfig()->readJailLocal();
+            foreach ($jailData as $jail => $cfg) {
+                if ($jail === 'DEFAULT' || empty($cfg['logpath'])) {
+                    continue;
+                }
+                $extra[$cfg['logpath']] = $jail;
+            }
+        } catch (\Throwable $e) {
+            // jail.local inacessível — segue sem extra
+        }
+
+        $viewer        = new LogViewer();
+        $availableLogs = $viewer->getAvailableLogs($extra);
 
         return $this->router->render('logviewer', [
             'available_logs' => $availableLogs,
@@ -187,8 +201,19 @@ class LogViewerController
 
     private function isPathAllowed(string $path): bool
     {
-        $viewer = new LogViewer();
-        $allowed = array_column($viewer->getAvailableLogs(), 'path');
+        $extra = [];
+        try {
+            $jailData = $this->router->makeJailConfig()->readJailLocal();
+            foreach ($jailData as $jail => $cfg) {
+                if ($jail === 'DEFAULT' || empty($cfg['logpath'])) {
+                    continue;
+                }
+                $extra[$cfg['logpath']] = $jail;
+            }
+        } catch (\Throwable $e) {}
+
+        $viewer  = new LogViewer();
+        $allowed = array_column($viewer->getAvailableLogs($extra), 'path');
         return in_array($path, $allowed, true);
     }
 

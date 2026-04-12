@@ -22,30 +22,45 @@ class LogViewer
     ];
 
     /**
-     * Retorna todos os logs configurados no módulo.
-     * Lê as chaves `logpath.*` da tabela mod_amssoft_fail2ban_config.
+     * Retorna todos os logs disponíveis para visualização.
+     *
+     * Fontes (sem duplicar paths):
+     *  1. DB — chaves `logpath.*` gravadas pela tela Log Paths
+     *  2. $extra — ['path' => 'label'] vindo do jail.local (passado pelo controller)
+     *  3. /var/log/fail2ban.log sempre incluído se existir
+     *
      * Retorna: [['label' => 'sshd', 'path' => '/var/log/auth.log'], ...]
      */
-    public function getAvailableLogs(): array
+    public function getAvailableLogs(array $extra = []): array
     {
+        $logs      = [];
+        $seenPaths = [];
+
+        // 1. DB: chaves logpath.* gravadas pela tela Log Paths
         $rows = \WHMCS\Database\Capsule::table('mod_amssoft_fail2ban_config')
             ->where('key', 'like', 'logpath.%')
             ->get();
-
-        $logs = [];
         foreach ($rows as $row) {
             $jail = substr($row->key, strlen('logpath.'));
-            if ($row->value && $this->isValidPath($row->value)) {
+            if ($row->value && $this->isValidPath($row->value)
+                && !isset($seenPaths[$row->value])) {
                 $logs[] = ['label' => $jail, 'path' => $row->value];
+                $seenPaths[$row->value] = true;
             }
         }
 
-        // Se não há nenhum configurado, oferece o log padrão do fail2ban
-        if (empty($logs)) {
-            $default = '/var/log/fail2ban.log';
-            if (file_exists($default)) {
-                $logs[] = ['label' => 'fail2ban', 'path' => $default];
+        // 2. jail.local: paths de jails não cobertos pelo DB
+        foreach ($extra as $path => $label) {
+            if (!isset($seenPaths[$path]) && $this->isValidPath($path)) {
+                $logs[] = ['label' => $label, 'path' => $path];
+                $seenPaths[$path] = true;
             }
+        }
+
+        // 3. Sempre inclui fail2ban.log se existir e não estiver na lista
+        $fb = '/var/log/fail2ban.log';
+        if (file_exists($fb) && !isset($seenPaths[$fb])) {
+            $logs[] = ['label' => 'fail2ban (geral)', 'path' => $fb];
         }
 
         return $logs;
