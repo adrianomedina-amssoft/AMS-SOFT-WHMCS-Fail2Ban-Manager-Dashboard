@@ -1,0 +1,173 @@
+/**
+ * AMS Fail2Ban Manager — admin UI styles
+ * Designed to complement WHMCS Bootstrap 4 admin theme.
+ */
+
+/* ── Wrapper ─────────────────────────────────────────────────────────────── */
+#amssoft-fail2ban {
+    font-size: 14px;
+}
+
+/* ── Navigation pills ────────────────────────────────────────────────────── */
+.amsfb-nav {
+    margin-bottom: 20px;
+    border-bottom: 2px solid #dee2e6;
+    padding-bottom: 8px;
+}
+
+.amsfb-nav > li > a {
+    color: #555;
+    border-radius: 4px 4px 0 0;
+}
+
+.amsfb-nav > li.active > a,
+.amsfb-nav > li.active > a:hover,
+.amsfb-nav > li.active > a:focus {
+    background-color: #2c3e50;
+    color: #fff;
+}
+
+.amsfb-nav > li > a:hover {
+    background-color: #ecf0f1;
+}
+
+/* ── Page header ─────────────────────────────────────────────────────────── */
+.amsfb-page-header {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    margin-bottom: 20px;
+    flex-wrap: wrap;
+}
+
+.amsfb-page-header h3 {
+    margin: 0;
+    font-size: 20px;
+    font-weight: 600;
+}
+
+/* ── Flash message ───────────────────────────────────────────────────────── */
+.amsfb-flash {
+    margin-bottom: 16px;
+}
+
+/* ── KPI cards ───────────────────────────────────────────────────────────── */
+.amsfb-kpi-row {
+    margin-bottom: 8px;
+}
+
+.amsfb-kpi-card {
+    padding: 20px 16px;
+    border-radius: 6px;
+    color: #fff;
+    text-align: center;
+    margin-bottom: 16px;
+    box-shadow: 0 2px 6px rgba(0,0,0,.12);
+}
+
+.amsfb-kpi-red    { background: linear-gradient(135deg, #e74c3c, #c0392b); }
+.amsfb-kpi-orange { background: linear-gradient(135deg, #e67e22, #d35400); }
+.amsfb-kpi-blue   { background: linear-gradient(135deg, #2980b9, #1a5276); }
+.amsfb-kpi-green  { background: linear-gradient(135deg, #27ae60, #1e8449); }
+
+.amsfb-kpi-value {
+    font-size: 36px;
+    font-weight: 700;
+    line-height: 1.1;
+}
+
+.amsfb-kpi-sm {
+    font-size: 20px;
+    word-break: break-all;
+}
+
+.amsfb-kpi-label {
+    font-size: 12px;
+    text-transform: uppercase;
+    letter-spacing: .5px;
+    margin-top: 6px;
+    opacity: .9;
+}
+
+/* ── Tables ──────────────────────────────────────────────────────────────── */
+.amsfb-table {
+    font-size: 13px;
+}
+
+.amsfb-table th {
+    background-color: #f8f9fa;
+    font-weight: 600;
+    white-space: nowrap;
+}
+
+.amsfb-table-sm td,
+.amsfb-table-sm th {
+    padding: 5px 8px;
+}
+
+/* ── Search box ──────────────────────────────────────────────────────────── */
+.amsfb-search-wrap {
+    margin-bottom: 12px;
+}
+
+/* ── Inline form (unban button) ──────────────────────────────────────────── */
+.amsfb-inline-form {
+    display: inline;
+}
+
+/* ── Log path validation results ─────────────────────────────────────────── */
+.amsfb-path-result {
+    font-size: 13px;
+    padding: 4px 8px;
+    border-radius: 4px;
+}
+
+.amsfb-path-ok   { color: #155724; background: #d4edda; }
+.amsfb-path-warn { color: #856404; background: #fff3cd; }
+.amsfb-path-error{ color: #721c24; background: #f8d7da; }
+
+/* ── Jail status label ───────────────────────────────────────────────────── */
+.amsfb-jail-status-label {
+    font-size: 11px;
+    padding: 3px 7px;
+}
+
+/* ── Filter form ─────────────────────────────────────────────────────────── */
+.amsfb-filter-form {
+    background: #f8f9fa;
+    padding: 12px 16px;
+    border-radius: 6px;
+    margin-bottom: 16px;
+    gap: 8px;
+    flex-wrap: wrap;
+}
+
+.amsfb-filter-form .form-group {
+    margin-right: 8px;
+    margin-bottom: 0;
+}
+
+/* ── Responsive ──────────────────────────────────────────────────────────── */
+@media (max-width: 767px) {
+    .amsfb-kpi-card {
+        padding: 14px 10px;
+    }
+
+    .amsfb-kpi-value {
+        font-size: 26px;
+    }
+
+    .amsfb-nav > li > a {
+        padding: 6px 10px;
+        font-size: 12px;
+    }
+
+    .amsfb-filter-form {
+        display: block;
+    }
+
+    .amsfb-filter-form .form-group {
+        display: block;
+        margin-bottom: 8px;
+    }
+}

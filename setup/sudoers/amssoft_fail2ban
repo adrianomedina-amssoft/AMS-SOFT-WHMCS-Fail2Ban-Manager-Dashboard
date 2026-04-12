@@ -1,0 +1,13 @@
+# sudoers rules for AMS Fail2Ban Manager
+# Install: cp amssoft_fail2ban /etc/sudoers.d/amssoft_fail2ban
+#          chmod 0440 /etc/sudoers.d/amssoft_fail2ban
+#          visudo -c   (validate before reloading)
+
+www-data ALL=(root) NOPASSWD: /usr/bin/fail2ban-client status
+www-data ALL=(root) NOPASSWD: /usr/bin/fail2ban-client status *
+www-data ALL=(root) NOPASSWD: /usr/bin/fail2ban-client set * unbanip *
+www-data ALL=(root) NOPASSWD: /usr/bin/fail2ban-client set * banip *
+www-data ALL=(root) NOPASSWD: /usr/bin/fail2ban-client reload
+www-data ALL=(root) NOPASSWD: /usr/bin/fail2ban-client reload *
+www-data ALL=(root) NOPASSWD: /usr/bin/fail2ban-client ping
+Defaults:www-data !requiretty
