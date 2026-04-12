@@ -157,6 +157,10 @@ chown root:www-data /etc/fail2ban/jail.local
 chmod 664 /etc/fail2ban/jail.local
 chown root:www-data /etc/fail2ban
 chmod 750 /etc/fail2ban
+chown root:www-data /var/log/apache2
+chmod 750 /var/log/apache2
+chown root:www-data /var/log/apache2/*.log
+chmod 640 /var/log/apache2/*.log
 ```
 
 > ⚠️ Sem este passo, todas as operações de escrita (criar jail, editar parâmetros, remover jail) falharão com a mensagem "Erro ao criar jail".
