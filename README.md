@@ -76,7 +76,18 @@ cat /var/www/html/modules/addons/amssoft_fail2ban/setup/fail2ban/jail.whmcs.conf
 > enabled = false
 > ```
 
-### 5. Criar o arquivo de log do WHMCS
+### 5. Ajustar permissões do jail.local
+
+O painel do WHMCS (processo `www-data`) precisa ter permissão de **escrita** no `jail.local` para criar, editar e remover jails pela interface gráfica.
+
+```bash
+chown root:www-data /etc/fail2ban/jail.local
+chmod 664 /etc/fail2ban/jail.local
+```
+
+> ⚠️ Sem este passo, todas as operações de escrita (criar jail, editar parâmetros, remover jail) falharão silenciosamente com a mensagem "Erro ao criar jail". O arquivo de log e o diretório `/etc/fail2ban/` **não** precisam ser alterados.
+
+### 6. Criar o arquivo de log do WHMCS
 
 ```bash
 touch /var/log/whmcs_auth.log
@@ -141,6 +152,7 @@ https://seu-whmcs.com/admin/addonmodules.php?module=amssoft_fail2ban
 | www-data não consegue usar sudo | Verificar `/etc/sudoers.d/amssoft_fail2ban`: `chmod 0440` e `visudo -c` |
 | Arquivo de log WHMCS não existe | `touch /var/log/whmcs_auth.log && chown www-data:www-data /var/log/whmcs_auth.log` |
 | fail2ban aparece offline no dashboard | Conferir os paths em **Configurar** no painel do WHMCS |
+| "Erro ao criar/editar/remover jail" | Executar: `chown root:www-data /etc/fail2ban/jail.local && chmod 664 /etc/fail2ban/jail.local` |
 
 ---
 
