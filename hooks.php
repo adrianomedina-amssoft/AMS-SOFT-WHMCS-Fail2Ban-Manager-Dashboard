@@ -47,12 +47,7 @@ add_hook('AfterCronJob', 1, function (): void {
         return; // Tabelas ainda não existem
     }
 
-    // Não executa em modo sugestão (a análise automática é exclusiva dos modos auto/threshold)
-    // e não executa se não há chave API configurada
-    if ($mode === 'suggestion') {
-        return;
-    }
-
+    // Não executa se não há chave API configurada
     $apiKeyEnc = \AMS\Fail2Ban\Database::getConfig('ai_api_key', '');
     if (empty($apiKeyEnc)) {
         return;
