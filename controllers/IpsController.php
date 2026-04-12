@@ -136,11 +136,18 @@ class IpsController
         }
         unset($row);
 
+        // Parâmetros para pré-preencher e abrir o modal "Banir IP" automaticamente
+        // (usado quando o admin vem da tela de Sugestões IA com jail inativável).
+        $banIp        = Helper::sanitizeIp($_GET['ban_ip'] ?? '');
+        $openBanModal = !empty($_GET['open_modal']) && !empty($banIp);
+
         return $this->router->render('ips', [
             'fail2ban_online' => $fail2banOnline,
             'error'           => $error,
             'banned_ips'      => $bannedIPs,
             'jails'           => $jails,
+            'ban_ip'          => $banIp,
+            'open_ban_modal'  => $openBanModal,
         ]);
     }
 }

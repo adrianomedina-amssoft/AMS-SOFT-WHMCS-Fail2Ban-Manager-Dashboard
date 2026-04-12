@@ -248,22 +248,29 @@ $statusLabels = [
                 if (data.success) {
                     var row = document.getElementById('amsfb-row-' + id);
                     if (row) row.remove();
+                    // Remover duplicatas do mesmo IP dispensadas automaticamente
+                    if (Array.isArray(data.dismissed_ids)) {
+                        data.dismissed_ids.forEach(function (did) {
+                            var dup = document.getElementById('amsfb-row-' + did);
+                            if (dup) dup.remove();
+                        });
+                    }
                     alert('✓ ' + (data.message || 'Aprovado.'));
-                } else if (data.jail_cfg_error) {
-                    // Jail existe mas fail2ban não conseguiu ativá-lo (ex: filter ausente).
-                    // Mostrar botão "Editar Jail" para o admin corrigir a configuração pelo painel.
+                } else if (data.jail_cant_activate) {
+                    // Jail não pôde ser ativado mas há jails ativas — redirecionar para ban manual.
                     self.disabled = false;
                     var cell3 = self.closest('td');
                     var old3  = cell3.querySelector('.amsfb-jail-missing-msg');
                     if (old3) old3.remove();
+                    var banUrl = window.AMSFB.moduleLink
+                        + '&action=ips&ban_ip=' + encodeURIComponent(data.ip || '')
+                        + '&open_modal=1';
+                    var esc3 = function(s){ return String(s).replace(/[<>"&]/g,function(c){return{'<':'&lt;','>':'&gt;','"':'&quot;','&':'&amp;'}[c];}); };
                     var msg3 = document.createElement('div');
                     msg3.className = 'amsfb-jail-missing-msg';
                     msg3.style.cssText = 'margin-top:6px;display:flex;align-items:center;gap:6px;flex-wrap:wrap;';
-                    var editUrl = window.AMSFB.moduleLink
-                        + '&action=jail_edit&jail=' + encodeURIComponent(data.jail_name || '');
-                    var esc = function(s){ return String(s).replace(/[<>"&]/g,function(c){return{'<':'&lt;','>':'&gt;','"':'&quot;','&':'&amp;'}[c];}); };
-                    msg3.innerHTML = '<span style="color:#c0392b;font-size:12px;">&#9888; ' + esc(data.error) + '</span>'
-                        + '<a href="' + editUrl + '" class="btn btn-xs btn-primary">Editar Jail</a>';
+                    msg3.innerHTML = '<span style="color:#c0392b;font-size:12px;">&#9888; ' + esc3(data.error) + '</span>'
+                        + '<a href="' + banUrl + '" class="btn btn-xs btn-danger">Banir manualmente</a>';
                     cell3.appendChild(msg3);
                 } else if (data.jail_missing) {
                     // Jail inexistente: mostrar aviso inline com link para criar

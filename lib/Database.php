@@ -260,6 +260,32 @@ class Database
         return $row ? (array)$row : null;
     }
 
+    /**
+     * Marca como 'approved' todas as sugestões pending do mesmo IP (exceto $excludeId).
+     * Usado para dispensar duplicatas automaticamente ao aprovar uma sugestão.
+     * Retorna array com os IDs dispensados.
+     */
+    public static function autoDismissDuplicates(string $ip, int $excludeId, int $adminId): array
+    {
+        $ids = Capsule::table('mod_amssoft_fail2ban_ai_suggestions')
+            ->where('ip', $ip)
+            ->where('status', 'pending')
+            ->where('id', '!=', $excludeId)
+            ->pluck('id')
+            ->toArray();
+
+        if (!empty($ids)) {
+            Capsule::table('mod_amssoft_fail2ban_ai_suggestions')
+                ->whereIn('id', $ids)
+                ->update([
+                    'status'      => 'approved',
+                    'resolved_at' => Capsule::raw('NOW()'),
+                    'resolved_by' => $adminId,
+                ]);
+        }
+        return array_map('intval', $ids);
+    }
+
     /** Atualiza o status de uma sugestão. */
     public static function updateSuggestionStatus(int $id, string $status, ?int $resolvedBy = null): bool
     {

@@ -85,7 +85,8 @@
                         <label>IP</label>
                         <input type="text" name="ip" class="form-control"
                                placeholder="192.168.1.1" required
-                               pattern="^((25[0-5]|2[0-4]\d|[01]?\d\d?)\.){3}(25[0-5]|2[0-4]\d|[01]?\d\d?)$|^([0-9a-fA-F:]+)$">
+                               pattern="^((25[0-5]|2[0-4]\d|[01]?\d\d?)\.){3}(25[0-5]|2[0-4]\d|[01]?\d\d?)$|^([0-9a-fA-F:]+)$"
+                               value="<?= $e($ban_ip ?? '') ?>">
                     </div>
                     <div class="form-group">
                         <label>Jail</label>
@@ -108,6 +109,26 @@
 
 <script>
 (function () {
+    // Auto-abrir modal "Banir IP" com IP pré-preenchido
+    // (acionado quando o admin vem da tela de Sugestões IA com jail inativável)
+    <?php if (!empty($open_ban_modal) && !empty($ban_ip)): ?>
+    (function () {
+        function openBanModal() {
+            if (typeof $ !== 'undefined') {
+                $('#modalBanIP').modal('show');
+            } else if (typeof bootstrap !== 'undefined') {
+                var el = document.getElementById('modalBanIP');
+                if (el) new bootstrap.Modal(el).show();
+            }
+        }
+        if (typeof $ !== 'undefined') {
+            $(document).ready(openBanModal);
+        } else {
+            document.addEventListener('DOMContentLoaded', openBanModal);
+        }
+    })();
+    <?php endif; ?>
+
     var input = document.getElementById('ipSearch');
     if (!input) return;
     input.addEventListener('keyup', function () {

@@ -179,7 +179,8 @@ class AIController
         $ok = $engine->approveSuggestion($id, $adminId);
 
         if ($ok) {
-            return json_encode(['success' => true, 'message' => "IP {$ip} banido com sucesso."]);
+            $dismissed = Database::autoDismissDuplicates($ip, $id, $adminId);
+            return json_encode(['success' => true, 'message' => "IP {$ip} banido com sucesso.", 'dismissed_ids' => $dismissed]);
         }
 
         // Diagnosticar causa da falha para mensagem útil ao admin
@@ -193,7 +194,8 @@ class AIController
             if (in_array($ip, $bannedIPs, true)) {
                 Database::updateSuggestionStatus($id, 'approved', $adminId);
                 Database::logEvent($ip, $suggestion['jail'] ?: 'unknown', 'manual_ban', 'AI: IP já estava banido — aprovação registrada', $adminId);
-                return json_encode(['success' => true, 'message' => "IP {$ip} já estava banido. Sugestão marcada como aprovada."]);
+                $dismissed = Database::autoDismissDuplicates($ip, $id, $adminId);
+                return json_encode(['success' => true, 'message' => "IP {$ip} já estava banido. Sugestão marcada como aprovada.", 'dismissed_ids' => $dismissed]);
             }
         } catch (\Throwable $e) {}
 
@@ -219,8 +221,10 @@ class AIController
                         // Jail ativo após reload — reexecutar o ban
                         $ok2 = $engine->approveSuggestion($id, $adminId);
                         if ($ok2) {
+                            $dismissed = Database::autoDismissDuplicates($ip, $id, $adminId);
                             return json_encode(['success' => true,
-                                'message' => "IP {$ip} banido com sucesso (fail2ban recarregado automaticamente)."]);
+                                'message' => "IP {$ip} banido com sucesso (fail2ban recarregado automaticamente).",
+                                'dismissed_ids' => $dismissed]);
                         }
                     }
 
@@ -244,30 +248,40 @@ class AIController
                             if (in_array($jail, $activeAfterFix, true)) {
                                 $ok3 = $engine->approveSuggestion($id, $adminId);
                                 if ($ok3) {
+                                    $dismissed = Database::autoDismissDuplicates($ip, $id, $adminId);
                                     return json_encode(['success' => true,
-                                        'message' => "IP {$ip} banido. Filter do jail corrigido automaticamente para '{$bestFilter}'."]);
+                                        'message' => "IP {$ip} banido. Filter do jail corrigido automaticamente para '{$bestFilter}'.",
+                                        'dismissed_ids' => $dismissed]);
                                 }
                             }
                         }
 
-                        // Auto-fix falhou — oferecer edição manual pelo painel
-                        return json_encode([
-                            'success'        => false,
-                            'jail_cfg_error' => true,
-                            'jail_name'      => $jail,
-                            'error'          => "O filter '{$filterName}' não existe. "
-                                             . ($bestFilter ? "Tentativa automática com '{$bestFilter}' também falhou. " : '')
-                                             . "Edite o jail e escolha um filter válido.",
-                        ]);
+                        // Auto-fix falhou — verificar se há jails ativas para ban manual
+                        $activeJailsNow = [];
+                        try { $activeJailsNow = $client->getJails(); } catch (\Throwable $e) {}
+                        if (!empty($activeJailsNow)) {
+                            return json_encode([
+                                'success'          => false,
+                                'jail_cant_activate' => true,
+                                'ip'               => $ip,
+                                'error'            => "O filter '{$filterName}' não existe e o jail não pôde ser ativado.",
+                            ]);
+                        }
+                        return json_encode(['success' => false, 'error' => "Jail '{$jail}' não pôde ser ativado e nenhum jail está ativo no fail2ban."]);
                     }
 
-                    // Causa desconhecida — oferecer edição do jail pelo painel (último recurso)
-                    return json_encode([
-                        'success'        => false,
-                        'jail_cfg_error' => true,
-                        'jail_name'      => $jail,
-                        'error'          => "Não foi possível ativar o jail '{$jail}'. Verifique a configuração.",
-                    ]);
+                    // Causa desconhecida — verificar jails ativas para ban manual (último recurso)
+                    $activeJailsNow = [];
+                    try { $activeJailsNow = $client->getJails(); } catch (\Throwable $e) {}
+                    if (!empty($activeJailsNow)) {
+                        return json_encode([
+                            'success'            => false,
+                            'jail_cant_activate' => true,
+                            'ip'                 => $ip,
+                            'error'              => "Não foi possível ativar o jail '{$jail}'.",
+                        ]);
+                    }
+                    return json_encode(['success' => false, 'error' => "Jail '{$jail}' não pôde ser ativado e nenhum jail está ativo no fail2ban."]);
                 }
 
                 // Jail realmente não existe — extrair suggested_rule e oferecer criação
