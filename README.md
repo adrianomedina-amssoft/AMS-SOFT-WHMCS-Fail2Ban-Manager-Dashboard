@@ -155,6 +155,8 @@ O painel do WHMCS (processo `www-data`) precisa ter permissão de **escrita** no
 ```bash
 chown root:www-data /etc/fail2ban/jail.local
 chmod 664 /etc/fail2ban/jail.local
+chown root:www-data /etc/fail2ban
+chmod 750 /etc/fail2ban
 ```
 
 > ⚠️ Sem este passo, todas as operações de escrita (criar jail, editar parâmetros, remover jail) falharão com a mensagem "Erro ao criar jail".
