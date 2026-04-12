@@ -202,7 +202,13 @@ class AIController
         if (!empty($jail)) {
             $activeJails = $client->getJails();
             if (!in_array($jail, $activeJails, true)) {
-                return json_encode(['success' => false, 'error' => "Jail '{$jail}' não está ativo no fail2ban. Ative o jail e tente novamente."]);
+                return json_encode([
+                    'success'      => false,
+                    'jail_missing' => true,
+                    'jail_name'    => $jail,
+                    'bantime'      => (int)($suggestion['bantime'] ?? 3600),
+                    'error'        => "Jail '{$jail}' não está ativo no fail2ban.",
+                ]);
             }
         }
 

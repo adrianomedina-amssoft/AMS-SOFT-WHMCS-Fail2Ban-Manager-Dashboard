@@ -249,6 +249,26 @@ $statusLabels = [
                     var row = document.getElementById('amsfb-row-' + id);
                     if (row) row.remove();
                     alert('✓ ' + (data.message || 'Aprovado.'));
+                } else if (data.jail_missing) {
+                    // Jail inexistente: mostrar aviso inline com link para criar
+                    self.disabled = false;
+                    var createUrl = window.AMSFB.moduleLink
+                        + '&action=jails'
+                        + '&new_jail='    + encodeURIComponent(data.jail_name || '')
+                        + '&bantime='     + encodeURIComponent(data.bantime   || 3600)
+                        + '&open_modal=1';
+                    var cell = self.closest('td');
+                    // Remover aviso anterior se houver
+                    var old = cell.querySelector('.amsfb-jail-missing-msg');
+                    if (old) old.remove();
+                    var msg = document.createElement('div');
+                    msg.className = 'amsfb-jail-missing-msg';
+                    msg.style.cssText = 'margin-top:6px;display:flex;align-items:center;gap:6px;flex-wrap:wrap;';
+                    msg.innerHTML = '<span style="color:#c0392b;font-size:12px;">&#9888; Jail <strong>'
+                        + data.jail_name.replace(/[<>"&]/g, function(c){return {'<':'&lt;','>':'&gt;','"':'&quot;','&':'&amp;'}[c];})
+                        + '</strong> não existe.</span>'
+                        + '<a href="' + createUrl + '" class="btn btn-xs btn-primary">+ Criar Jail</a>';
+                    cell.appendChild(msg);
                 } else {
                     self.disabled = false;
                     alert('✗ ' + (data.error || 'Erro ao aprovar.'));

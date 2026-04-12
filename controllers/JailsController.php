@@ -332,11 +332,20 @@ class JailsController
             sort($availableFilters);
         }
 
+        // Parâmetros para pré-preencher e abrir o modal "Novo Jail" automaticamente
+        // (usado quando o admin vem da tela de Sugestões IA com jail inexistente).
+        $prefillJail    = Helper::sanitizeJail($_GET['new_jail'] ?? '');
+        $prefillBantime = max(60, min(2592000, (int)($_GET['bantime'] ?? 3600)));
+        $openAddModal   = !empty($_GET['open_modal']) && !empty($prefillJail);
+
         return $this->router->render('jails', [
-            'jail_data'         => $jailData,
-            'live_status'       => $liveStatus,
-            'error'             => $error,
-            'available_filters' => $availableFilters,
+            'jail_data'          => $jailData,
+            'live_status'        => $liveStatus,
+            'error'              => $error,
+            'available_filters'  => $availableFilters,
+            'prefill_jail'       => $prefillJail,
+            'prefill_bantime'    => $prefillBantime,
+            'open_add_modal'     => $openAddModal,
         ]);
     }
 }

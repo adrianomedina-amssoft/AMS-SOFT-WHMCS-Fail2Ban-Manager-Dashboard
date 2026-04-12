@@ -116,7 +116,8 @@
                         <label>Nome do Jail <span class="text-danger">*</span></label>
                         <input type="text" name="new_jail" class="form-control" required
                                pattern="^[a-zA-Z0-9][a-zA-Z0-9_-]{0,63}$"
-                               placeholder="ex: apache-auth">
+                               placeholder="ex: apache-auth"
+                               value="<?= $e($prefill_jail ?? '') ?>">
                         <span class="help-block">Apenas letras, números, hífen e underscore.</span>
                     </div>
                     <div class="form-group">
@@ -150,7 +151,8 @@
                         <div class="col-sm-4">
                             <div class="form-group">
                                 <label>bantime (s)</label>
-                                <input type="number" name="bantime" class="form-control" value="3600" min="60">
+                                <input type="number" name="bantime" class="form-control"
+                                       value="<?= (int)($prefill_bantime ?? 3600) ?>" min="60">
                             </div>
                         </div>
                     </div>
@@ -276,5 +278,28 @@
             });
         });
     });
+
+    // Auto-abrir modal "Novo Jail" com dados pré-preenchidos
+    // (acionado quando o admin vem da tela de Sugestões IA com jail inexistente)
+    <?php if (!empty($open_add_modal) && !empty($prefill_jail)): ?>
+    (function () {
+        function openPrefilled() {
+            var modal = document.getElementById('modalAddJail');
+            if (!modal) return;
+            // bantime já está pré-preenchido via PHP no value do input
+            if (typeof $ !== 'undefined') {
+                $(modal).modal('show');
+            } else if (typeof bootstrap !== 'undefined') {
+                new bootstrap.Modal(modal).show();
+            }
+        }
+        // Aguarda o DOM estar pronto (Bootstrap 3 usa jQuery)
+        if (typeof $ !== 'undefined') {
+            $(document).ready(openPrefilled);
+        } else {
+            document.addEventListener('DOMContentLoaded', openPrefilled);
+        }
+    })();
+    <?php endif; ?>
 })();
 </script>
