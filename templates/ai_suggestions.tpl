@@ -249,6 +249,40 @@ $statusLabels = [
                     var row = document.getElementById('amsfb-row-' + id);
                     if (row) row.remove();
                     alert('✓ ' + (data.message || 'Aprovado.'));
+                } else if (data.need_reload) {
+                    // Jail existe em jail.local mas fail2ban não carregou mesmo após tentativa.
+                    // Exibir botão de reload pelo painel — sem precisar de terminal.
+                    self.disabled = false;
+                    var cell2 = self.closest('td');
+                    var old2  = cell2.querySelector('.amsfb-jail-missing-msg');
+                    if (old2) old2.remove();
+                    var msg2 = document.createElement('div');
+                    msg2.className = 'amsfb-jail-missing-msg';
+                    msg2.style.cssText = 'margin-top:6px;display:flex;align-items:center;gap:6px;flex-wrap:wrap;';
+                    var reloadBtn = document.createElement('button');
+                    reloadBtn.type = 'button';
+                    reloadBtn.className = 'btn btn-xs btn-warning';
+                    reloadBtn.textContent = 'Recarregar fail2ban';
+                    reloadBtn.onclick = function () {
+                        reloadBtn.disabled    = true;
+                        reloadBtn.textContent = '...';
+                        window.AMSFB.post('jails', 'reload_all', {}, function (rd) {
+                            if (rd.success) {
+                                // Reload ok — retentar aprovação automaticamente
+                                msg2.remove();
+                                self.disabled    = false;
+                                self.textContent = 'Aprovar';
+                                self.click();
+                            } else {
+                                reloadBtn.disabled    = false;
+                                reloadBtn.textContent = 'Recarregar fail2ban';
+                                alert('Não foi possível recarregar o fail2ban. Verifique as permissões de sudo do servidor.');
+                            }
+                        });
+                    };
+                    msg2.innerHTML = '<span style="color:#c0392b;font-size:12px;">&#9888; fail2ban não carregou o jail.</span>';
+                    msg2.appendChild(reloadBtn);
+                    cell2.appendChild(msg2);
                 } else if (data.jail_missing) {
                     // Jail inexistente: mostrar aviso inline com link para criar
                     self.disabled = false;

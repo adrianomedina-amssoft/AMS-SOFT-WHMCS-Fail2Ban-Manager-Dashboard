@@ -36,6 +36,13 @@ class JailsController
 
     public function handleAjax(string $do, array $post): string
     {
+        // Reload geral não precisa de jail específico
+        if ($do === 'reload_all') {
+            $config   = $this->router->makeJailConfig();
+            $reloaded = $config->reloadAll();
+            return json_encode(['success' => $reloaded]);
+        }
+
         $jail = Helper::sanitizeJail($post['jail'] ?? '');
         if (!$jail) {
             return json_encode(['success' => false, 'error' => 'Jail inválido']);

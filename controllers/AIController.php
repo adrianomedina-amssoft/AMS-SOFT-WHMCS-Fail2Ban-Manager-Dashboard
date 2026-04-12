@@ -209,16 +209,22 @@ class AIController
                 try { $jailLocal = $jailConfig->readJailLocal(); } catch (\Throwable $e) {}
 
                 if (isset($jailLocal[$jail])) {
-                    // Jail existe em jail.local — tentar reload e reexecutar o ban
-                    $jailConfig->reloadJail($jail);
+                    // Jail existe em jail.local — fazer reload completo e reexecutar o ban.
+                    // reloadAll() = fail2ban-client reload (carrega novos jails, não só recarrega existentes)
+                    $jailConfig->reloadAll();
                     $ok2 = $engine->approveSuggestion($id, $adminId);
                     if ($ok2) {
                         return json_encode(['success' => true,
                             'message' => "IP {$ip} banido com sucesso (fail2ban recarregado automaticamente)."]);
                     }
-                    return json_encode(['success' => false,
-                        'error' => "Jail '{$jail}' existe em jail.local mas o fail2ban não conseguiu carregá-lo. "
-                                 . "Execute no servidor: sudo fail2ban-client reload"]);
+                    // Reload executado mas ban ainda falhou — devolver sinal para o frontend
+                    // oferecer botão de reload manual pelo painel (sem terminal)
+                    return json_encode([
+                        'success'      => false,
+                        'need_reload'  => true,
+                        'suggestion_id' => $id,
+                        'error'        => "Jail '{$jail}' existe mas o fail2ban não conseguiu carregá-lo. Tente recarregar o fail2ban pelo painel.",
+                    ]);
                 }
 
                 // Jail realmente não existe — extrair suggested_rule e oferecer criação
