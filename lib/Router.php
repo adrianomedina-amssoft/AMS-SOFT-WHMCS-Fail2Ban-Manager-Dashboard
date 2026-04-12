@@ -42,12 +42,15 @@ class Router
 
     /** Maps action name → controller FQCN */
     private const CONTROLLER_MAP = [
-        'dashboard' => Controllers\DashboardController::class,
-        'ips'       => Controllers\IpsController::class,
-        'jails'     => Controllers\JailsController::class,
-        'jail_edit' => Controllers\JailsController::class,
-        'logpaths'  => Controllers\LogPathsController::class,
-        'reports'   => Controllers\ReportsController::class,
+        'dashboard'   => Controllers\DashboardController::class,
+        'ips'         => Controllers\IpsController::class,
+        'jails'       => Controllers\JailsController::class,
+        'jail_edit'   => Controllers\JailsController::class,
+        'logpaths'    => Controllers\LogPathsController::class,
+        'reports'     => Controllers\ReportsController::class,
+        'logviewer'   => Controllers\LogViewerController::class,
+        'ai'          => Controllers\AIController::class,
+        'ai_settings' => Controllers\AIController::class,
     ];
 
     public function __construct(array $vars)

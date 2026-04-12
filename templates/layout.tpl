@@ -18,13 +18,19 @@
     <ul class="nav nav-pills amsfb-nav" role="tablist">
         <?php
         $navItems = [
-            'dashboard' => ['icon' => '&#9776;', 'label' => 'Dashboard'],
-            'ips'       => ['icon' => '&#128683;', 'label' => 'IPs Banidos'],
-            'jails'     => ['icon' => '&#128274;', 'label' => 'Jails'],
-            'logpaths'  => ['icon' => '&#128196;', 'label' => 'Log Paths'],
-            'reports'   => ['icon' => '&#128202;', 'label' => 'Relatórios'],
+            'dashboard'  => ['icon' => '&#9776;',   'label' => 'Dashboard'],
+            'ips'        => ['icon' => '&#128683;',  'label' => 'IPs Banidos'],
+            'jails'      => ['icon' => '&#128274;',  'label' => 'Jails'],
+            'logpaths'   => ['icon' => '&#128196;',  'label' => 'Log Paths'],
+            'reports'    => ['icon' => '&#128202;',  'label' => 'Relatórios'],
+            'logviewer'  => ['icon' => '&#128220;',  'label' => 'Log Viewer'],
+            'ai'         => ['icon' => '&#129302;',  'label' => 'IA'],
         ];
-        $activeNav = in_array($current_action, ['jail_edit'], true) ? 'jails' : $current_action;
+        $activeNav = match(true) {
+            in_array($current_action, ['jail_edit'], true) => 'jails',
+            $current_action === 'ai_settings'              => 'ai',
+            default                                        => $current_action,
+        };
         foreach ($navItems as $act => $item):
             $isActive = ($activeNav === $act);
         ?>

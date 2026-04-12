@@ -144,4 +144,64 @@ class Helper
         header('Location: ' . $url);
         exit;
     }
+
+    // -----------------------------------------------------------------------
+    // Criptografia da chave API
+    // -----------------------------------------------------------------------
+
+    /**
+     * Criptografa a chave API Anthropic usando AES-256-CBC.
+     * Retorna string no formato base64(iv + ciphertext).
+     * A chave de criptografia é derivada do hash SHA-256 da chave de licença WHMCS.
+     */
+    public static function encryptApiKey(string $plaintext): string
+    {
+        if (empty($plaintext)) {
+            return '';
+        }
+        $encKey = self::getEncryptionKey();
+        $iv     = random_bytes(16);
+        $cipher = openssl_encrypt($plaintext, 'AES-256-CBC', $encKey, OPENSSL_RAW_DATA, $iv);
+        if ($cipher === false) {
+            return '';
+        }
+        return base64_encode($iv . $cipher);
+    }
+
+    /**
+     * Descriptografa a chave API Anthropic.
+     * Retorna string vazia se falhar.
+     */
+    public static function decryptApiKey(string $encrypted): string
+    {
+        if (empty($encrypted)) {
+            return '';
+        }
+        $raw    = base64_decode($encrypted, true);
+        if ($raw === false || strlen($raw) <= 16) {
+            return '';
+        }
+        $encKey  = self::getEncryptionKey();
+        $iv      = substr($raw, 0, 16);
+        $cipher  = substr($raw, 16);
+        $plain   = openssl_decrypt($cipher, 'AES-256-CBC', $encKey, OPENSSL_RAW_DATA, $iv);
+        return $plain !== false ? $plain : '';
+    }
+
+    /** Deriva a chave de criptografia a partir de dados do sistema WHMCS. */
+    private static function getEncryptionKey(): string
+    {
+        try {
+            $license = Capsule::table('tblconfiguration')
+                ->where('setting', 'License')
+                ->value('value');
+            if ($license) {
+                return hash('sha256', $license, true);
+            }
+        } catch (\Throwable $e) {
+            // fallback
+        }
+        // Fallback: chave derivada do path do módulo (constante por instalação)
+        return hash('sha256', __DIR__, true);
+    }
 }

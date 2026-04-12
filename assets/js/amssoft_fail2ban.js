@@ -79,34 +79,74 @@
     window.AMSFB = window.AMSFB || {};
 
     /**
-     * amsfbPost(path, params) → Promise<Object>
-     * Sends a POST request with CSRF token and returns parsed JSON.
+     * AMSFB.post — duas assinaturas suportadas:
+     *
+     * 1) AMSFB.post(action, do, params, callback)
+     *    Envia POST para moduleLink + &action=X&do=Y e chama callback(data).
+     *    Usado pelos templates v2 (logviewer, ai_suggestions, ai_settings).
+     *
+     * 2) AMSFB.post(url, params) → Promise<Object>
+     *    Compatibilidade com chamadas diretas a uma URL.
+     *    (Não usado pelos templates nativos, mas preservado para extensibilidade.)
      */
-    window.AMSFB.post = function (path, params) {
-        var body = 'csrf_token=' + encodeURIComponent(window.AMSFB.csrfToken || '');
-        Object.keys(params || {}).forEach(function (k) {
-            body += '&' + encodeURIComponent(k) + '=' + encodeURIComponent(params[k]);
-        });
-        return fetch(path, {
-            method:  'POST',
-            headers: {
-                'Content-Type':     'application/x-www-form-urlencoded',
-                'X-Requested-With': 'XMLHttpRequest',
-            },
-            body: body,
-        }).then(function (r) {
-            if (!r.ok) {
-                throw new Error('HTTP ' + r.status);
-            }
-            return r.json();
-        }).then(function (data) {
-            // [SEC-7] If the server rotated the CSRF token, keep the local copy in sync
-            // so the next request uses the new token without a page reload.
-            if (data && data.csrf_token) {
-                window.AMSFB.csrfToken = data.csrf_token;
-            }
-            return data;
-        });
+    window.AMSFB.post = function (actionOrUrl, doOrParams, params, callback) {
+        var url, body;
+
+        if (typeof doOrParams === 'string') {
+            // Assinatura nova: (action, do, params, callback)
+            var action = actionOrUrl;
+            var doStr  = doOrParams;
+            var extra  = params || {};
+            url  = (window.AMSFB.moduleLink || '') + '&action=' + encodeURIComponent(action) + '&do=' + encodeURIComponent(doStr);
+            body = 'csrf_token=' + encodeURIComponent(window.AMSFB.csrfToken || '');
+            Object.keys(extra).forEach(function (k) {
+                body += '&' + encodeURIComponent(k) + '=' + encodeURIComponent(extra[k]);
+            });
+
+            fetch(url, {
+                method:  'POST',
+                headers: {
+                    'Content-Type':     'application/x-www-form-urlencoded',
+                    'X-Requested-With': 'XMLHttpRequest',
+                },
+                body: body,
+            }).then(function (r) {
+                return r.ok ? r.json() : Promise.reject('HTTP ' + r.status);
+            }).then(function (data) {
+                // [SEC-7] Sincronizar token CSRF rotacionado
+                if (data && data.csrf_token) {
+                    window.AMSFB.csrfToken = data.csrf_token;
+                }
+                if (typeof callback === 'function') callback(data);
+            }).catch(function (err) {
+                if (typeof callback === 'function') callback({ success: false, error: String(err) });
+            });
+
+        } else {
+            // Assinatura legada: (url, params) → Promise
+            url  = actionOrUrl;
+            var legacyParams = doOrParams || {};
+            body = 'csrf_token=' + encodeURIComponent(window.AMSFB.csrfToken || '');
+            Object.keys(legacyParams).forEach(function (k) {
+                body += '&' + encodeURIComponent(k) + '=' + encodeURIComponent(legacyParams[k]);
+            });
+            return fetch(url, {
+                method:  'POST',
+                headers: {
+                    'Content-Type':     'application/x-www-form-urlencoded',
+                    'X-Requested-With': 'XMLHttpRequest',
+                },
+                body: body,
+            }).then(function (r) {
+                if (!r.ok) throw new Error('HTTP ' + r.status);
+                return r.json();
+            }).then(function (data) {
+                if (data && data.csrf_token) {
+                    window.AMSFB.csrfToken = data.csrf_token;
+                }
+                return data;
+            });
+        }
     };
 
 })();

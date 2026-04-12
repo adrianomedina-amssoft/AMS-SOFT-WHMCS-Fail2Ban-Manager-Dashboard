@@ -25,7 +25,7 @@ function amssoft_fail2ban_config(): array
         'author'      => 'AMS SOFT',
         'authorurl' => 'https://www.amssoft.com.br',
         'language'    => 'portuguese-br',
-        'version'     => '1.0.0',
+        'version'     => '2.0.0',
         'fields'      => [
             'sudo_path'       => [
                 'FriendlyName' => 'Caminho sudo',
@@ -88,6 +88,25 @@ function amssoft_fail2ban_activate(): array
             });
         }
 
+        if (!Capsule::schema()->hasTable('mod_amssoft_fail2ban_ai_suggestions')) {
+            Capsule::schema()->create('mod_amssoft_fail2ban_ai_suggestions', function ($t) {
+                $t->bigIncrements('id');
+                $t->string('ip', 45)->index();
+                $t->string('jail', 64)->default('');
+                $t->string('threat', 128)->default('');
+                $t->enum('severity', ['low', 'medium', 'high', 'critical'])->default('medium');
+                $t->unsignedTinyInteger('confidence')->default(0);
+                $t->text('evidence')->nullable();
+                $t->text('suggested_rule')->nullable();
+                $t->text('reason')->nullable();
+                $t->unsignedInteger('bantime')->default(3600);
+                $t->enum('status', ['pending', 'approved', 'rejected', 'auto_executed'])->default('pending')->index();
+                $t->timestamp('created_at')->useCurrent()->index();
+                $t->timestamp('resolved_at')->nullable();
+                $t->unsignedInteger('resolved_by')->nullable();
+            });
+        }
+
         return ['status' => 'success', 'description' => 'AMS Fail2Ban Manager instalado com sucesso.'];
     } catch (\Exception $e) {
         return ['status' => 'error', 'description' => $e->getMessage()];
@@ -99,14 +118,49 @@ function amssoft_fail2ban_deactivate(): array
     try {
         Capsule::schema()->dropIfExists('mod_amssoft_fail2ban_logs');
         Capsule::schema()->dropIfExists('mod_amssoft_fail2ban_config');
+        Capsule::schema()->dropIfExists('mod_amssoft_fail2ban_ai_suggestions');
         return ['status' => 'success', 'description' => 'AMS Fail2Ban Manager removido.'];
     } catch (\Exception $e) {
         return ['status' => 'error', 'description' => $e->getMessage()];
     }
 }
 
+/**
+ * Migração automática v2: cria a tabela de sugestões da IA se ainda não existir.
+ * Chamada em todo carregamento do módulo para garantir compatibilidade com
+ * instalações que ativaram o módulo antes da atualização para v2.
+ */
+function amssoft_fail2ban_migrate_v2(): void
+{
+    if (!Capsule::schema()->hasTable('mod_amssoft_fail2ban_ai_suggestions')) {
+        Capsule::schema()->create('mod_amssoft_fail2ban_ai_suggestions', function ($t) {
+            $t->bigIncrements('id');
+            $t->string('ip', 45)->index();
+            $t->string('jail', 64)->default('');
+            $t->string('threat', 128)->default('');
+            $t->enum('severity', ['low', 'medium', 'high', 'critical'])->default('medium');
+            $t->unsignedTinyInteger('confidence')->default(0);
+            $t->text('evidence')->nullable();
+            $t->text('suggested_rule')->nullable();
+            $t->text('reason')->nullable();
+            $t->unsignedInteger('bantime')->default(3600);
+            $t->enum('status', ['pending', 'approved', 'rejected', 'auto_executed'])->default('pending')->index();
+            $t->timestamp('created_at')->useCurrent()->index();
+            $t->timestamp('resolved_at')->nullable();
+            $t->unsignedInteger('resolved_by')->nullable();
+        });
+    }
+}
+
 function amssoft_fail2ban_output(array $vars): void
 {
+    // Migração automática: garante que tabelas do v2 existam mesmo em instalações antigas
+    try {
+        amssoft_fail2ban_migrate_v2();
+    } catch (\Exception $e) {
+        // Silencioso — não interrompe o carregamento do módulo
+    }
+
     // Detect AJAX requests — clear any WHMCS output buffers, return JSON and exit.
     $isAjax = isset($_SERVER['HTTP_X_REQUESTED_WITH'])
         && strtolower($_SERVER['HTTP_X_REQUESTED_WITH']) === 'xmlhttprequest';
@@ -138,5 +192,7 @@ function amssoft_fail2ban_sidebar(array $vars): string
         <li><a href="' . $ml . '&amp;action=jails">&#128274; Jails</a></li>
         <li><a href="' . $ml . '&amp;action=logpaths">&#128196; Log Paths</a></li>
         <li><a href="' . $ml . '&amp;action=reports">&#128202; Relatórios</a></li>
+        <li><a href="' . $ml . '&amp;action=logviewer">&#128220; Log Viewer</a></li>
+        <li><a href="' . $ml . '&amp;action=ai">&#129302; IA / Sugestões</a></li>
     </ul>';
 }

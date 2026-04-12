@@ -10,6 +10,8 @@ if (!defined('WHMCS')) {
 
 use WHMCS\Database\Capsule;
 
+require_once __DIR__ . '/lib/Router.php'; // registra o autoloader de namespace
+
 add_hook('ClientLoginFailed', 1, function (array $vars): void {
     // Only act when the module hook setting is enabled
     $row = Capsule::table('tbladdonmodules')
@@ -32,6 +34,68 @@ add_hook('AdminUserLoginFailed', 1, function (array $vars): void {
     }
     amssoft_fail2ban_write_auth_log('admin', $vars['username'] ?? '', $_SERVER['REMOTE_ADDR'] ?? '');
 });
+
+// -----------------------------------------------------------------------
+// Hook periódico de análise de IA via cron WHMCS
+// -----------------------------------------------------------------------
+
+add_hook('AfterCronJob', 1, function (): void {
+    // Verificar se o módulo tem tabelas criadas (evita erros antes do activate)
+    try {
+        $mode = \AMS\Fail2Ban\Database::getConfig('ai_mode', 'suggestion');
+    } catch (\Throwable $e) {
+        return; // Tabelas ainda não existem
+    }
+
+    // Não executa em modo sugestão (a análise automática é exclusiva dos modos auto/threshold)
+    // e não executa se não há chave API configurada
+    if ($mode === 'suggestion') {
+        return;
+    }
+
+    $apiKeyEnc = \AMS\Fail2Ban\Database::getConfig('ai_api_key', '');
+    if (empty($apiKeyEnc)) {
+        return;
+    }
+
+    $interval = (int)\AMS\Fail2Ban\Database::getConfig('ai_interval_minutes', 30);
+    $lastRun  = (int)\AMS\Fail2Ban\Database::getConfig('ai_last_run', 0);
+
+    if ((time() - $lastRun) < ($interval * 60)) {
+        return; // Ainda não é hora de rodar
+    }
+
+    try {
+        $apiKey  = \AMS\Fail2Ban\Helper::decryptApiKey($apiKeyEnc);
+        if (empty($apiKey)) {
+            return;
+        }
+
+        $row = Capsule::table('tbladdonmodules')
+            ->where('module', 'amssoft_fail2ban')
+            ->whereIn('setting', ['sudo_path', 'fail2ban_client'])
+            ->get()
+            ->keyBy('setting');
+
+        $sudoPath  = $row->get('sudo_path')->value   ?? '/usr/bin/sudo';
+        $clientBin = $row->get('fail2ban_client')->value ?? '/usr/bin/fail2ban-client';
+
+        $analyzer = new \AMS\Fail2Ban\AIAnalyzer($apiKey);
+        $client   = new \AMS\Fail2Ban\Fail2BanClient($sudoPath, $clientBin);
+        $engine   = new \AMS\Fail2Ban\AutoBanEngine($analyzer, $client);
+
+        $engine->runAnalysis();
+
+        \AMS\Fail2Ban\Database::setConfig('ai_last_run', (string)time());
+        \AMS\Fail2Ban\Database::setConfig('ai_last_ping_ok', '1');
+    } catch (\Throwable $e) {
+        // Falha silenciosa — não interrompe o cron do WHMCS
+    }
+});
+
+// -----------------------------------------------------------------------
+// Hooks de autenticação (v1)
+// -----------------------------------------------------------------------
 
 /**
  * Write a structured auth-failure line compatible with fail2ban regex.

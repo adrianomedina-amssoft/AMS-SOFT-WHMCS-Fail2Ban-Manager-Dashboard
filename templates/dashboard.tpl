@@ -4,7 +4,8 @@
  * Available: $fail2ban_online, $error, $total_banned_now, $bans_24h,
  *            $active_jails, $last_ban, $jail_statuses,
  *            $series_labels (JSON), $series_counts (JSON),
- *            $top_ip_labels (JSON), $top_ip_counts (JSON)
+ *            $top_ip_labels (JSON), $top_ip_counts (JSON),
+ *            $ai_pending_count, $ai_last_suggestion, $ai_mode, $ai_api_ok
  */
 ?>
 
@@ -64,6 +65,73 @@
             <div class="panel-heading"><strong>Top 10 IPs</strong></div>
             <div class="panel-body">
                 <canvas id="chartTopIps" height="200"></canvas>
+            </div>
+        </div>
+    </div>
+</div>
+
+<!-- Card Alertas da IA -->
+<div class="panel amsfb-ai-panel" style="margin-top:24px;">
+    <div class="panel-heading">
+        <strong>&#129302; Alertas da IA</strong>
+        &nbsp;
+        <?php
+        $modeLabels = ['suggestion' => 'Sugestão', 'auto' => 'Automático', 'threshold' => 'Threshold'];
+        $modeLabel  = $modeLabels[$ai_mode ?? 'suggestion'] ?? 'Sugestão';
+        $modeCls    = ($ai_mode === 'suggestion') ? 'label-default' : 'label-warning';
+        ?>
+        <span class="label <?= $e($modeCls) ?>">Modo: <?= $e($modeLabel) ?></span>
+        &nbsp;
+        <span class="label <?= ($ai_api_ok === '1') ? 'label-success' : 'label-default' ?>">
+            API <?= ($ai_api_ok === '1') ? 'OK' : 'não testada' ?>
+        </span>
+        <a href="<?= $e($modulelink . '&action=ai') ?>" class="btn btn-xs btn-default pull-right">Ver todas</a>
+    </div>
+    <div class="panel-body">
+        <div class="row">
+            <div class="col-sm-4 text-center">
+                <div style="font-size:36px; font-weight:bold; color:<?= ($ai_pending_count > 0) ? '#e74c3c' : '#27ae60' ?>;">
+                    <?= (int)$ai_pending_count ?>
+                </div>
+                <div class="text-muted">Sugestões pendentes</div>
+                <?php if ($ai_pending_count > 0): ?>
+                <a href="<?= $e($modulelink . '&action=ai') ?>" class="btn btn-xs btn-danger" style="margin-top:6px;">
+                    Revisar agora
+                </a>
+                <?php endif; ?>
+            </div>
+            <div class="col-sm-8">
+                <?php if (!empty($ai_last_suggestion)): ?>
+                <table class="table table-condensed amsfb-table" style="margin-bottom:0;">
+                    <tr>
+                        <th style="width:110px;">Última sugestão</th>
+                        <td>
+                            <strong><?= $e($ai_last_suggestion['ip'] ?? '-') ?></strong>
+                            &mdash; <?= $e($ai_last_suggestion['threat'] ?? '-') ?>
+                        </td>
+                    </tr>
+                    <tr>
+                        <th>Severidade</th>
+                        <td>
+                            <?php
+                            $sev = $ai_last_suggestion['severity'] ?? 'medium';
+                            $sevMap = ['low' => 'Baixa', 'medium' => 'Média', 'high' => 'Alta', 'critical' => 'Crítica'];
+                            ?>
+                            <span class="amsfb-sev-<?= $e($sev) ?>"><?= $e($sevMap[$sev] ?? $sev) ?></span>
+                            &nbsp; Confiança: <?= (int)($ai_last_suggestion['confidence'] ?? 0) ?>%
+                        </td>
+                    </tr>
+                    <tr>
+                        <th>Gerado em</th>
+                        <td><?= $e($ai_last_suggestion['created_at'] ?? '-') ?></td>
+                    </tr>
+                </table>
+                <?php else: ?>
+                <p class="text-muted" style="margin:0;">Nenhuma sugestão gerada ainda. Configure a IA e rode uma análise.</p>
+                <a href="<?= $e($modulelink . '&action=ai_settings') ?>" class="btn btn-xs btn-primary" style="margin-top:6px;">
+                    Configurar IA
+                </a>
+                <?php endif; ?>
             </div>
         </div>
     </div>

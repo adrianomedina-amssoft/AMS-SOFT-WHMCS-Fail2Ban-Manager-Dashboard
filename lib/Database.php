@@ -173,6 +173,117 @@ class Database
             ->updateOrInsert(['key' => $key], ['value' => $value]);
     }
 
+    // -----------------------------------------------------------------------
+    // Sugestões da IA
+    // -----------------------------------------------------------------------
+
+    /** Salva uma nova sugestão da IA e retorna o ID inserido. */
+    public static function saveSuggestion(array $data): int
+    {
+        return (int) Capsule::table('mod_amssoft_fail2ban_ai_suggestions')->insertGetId([
+            'ip'             => $data['ip']             ?? '',
+            'jail'           => $data['jail']           ?? '',
+            'threat'         => $data['threat']         ?? '',
+            'severity'       => $data['severity']       ?? 'medium',
+            'confidence'     => (int)($data['confidence'] ?? 0),
+            'evidence'       => isset($data['evidence']) ? json_encode($data['evidence']) : null,
+            'suggested_rule' => $data['suggested_rule'] ?? null,
+            'reason'         => $data['reason']         ?? null,
+            'bantime'        => (int)($data['bantime']  ?? 3600),
+            'status'         => $data['status']         ?? 'pending',
+            'created_at'     => Capsule::raw('NOW()'),
+        ]);
+    }
+
+    /** Retorna todas as sugestões com status 'pending'. */
+    public static function getPendingSuggestions(): array
+    {
+        return Capsule::table('mod_amssoft_fail2ban_ai_suggestions')
+            ->where('status', 'pending')
+            ->orderBy('created_at', 'desc')
+            ->get()
+            ->map(fn ($r) => (array)$r)
+            ->all();
+    }
+
+    /** Retorna sugestões filtradas (para histórico). */
+    public static function getAllSuggestions(array $filters = []): array
+    {
+        $q = Capsule::table('mod_amssoft_fail2ban_ai_suggestions')
+            ->orderBy('created_at', 'desc');
+
+        if (!empty($filters['status'])) {
+            $q->where('status', $filters['status']);
+        }
+        if (!empty($filters['severity'])) {
+            $q->where('severity', $filters['severity']);
+        }
+        if (!empty($filters['date_from'])) {
+            $q->where('created_at', '>=', $filters['date_from'] . ' 00:00:00');
+        }
+        if (!empty($filters['date_to'])) {
+            $q->where('created_at', '<=', $filters['date_to'] . ' 23:59:59');
+        }
+
+        return $q->get()->map(fn ($r) => (array)$r)->all();
+    }
+
+    /** Conta sugestões pendentes (para o card do dashboard). */
+    public static function countPendingSuggestions(): int
+    {
+        return (int) Capsule::table('mod_amssoft_fail2ban_ai_suggestions')
+            ->where('status', 'pending')
+            ->count();
+    }
+
+    /** Retorna a sugestão mais recente (qualquer status). */
+    public static function getLastSuggestion(): ?array
+    {
+        $row = Capsule::table('mod_amssoft_fail2ban_ai_suggestions')
+            ->orderBy('created_at', 'desc')
+            ->first();
+        return $row ? (array)$row : null;
+    }
+
+    /** Retorna uma sugestão por ID. */
+    public static function getSuggestion(int $id): ?array
+    {
+        $row = Capsule::table('mod_amssoft_fail2ban_ai_suggestions')
+            ->where('id', $id)
+            ->first();
+        return $row ? (array)$row : null;
+    }
+
+    /** Atualiza o status de uma sugestão. */
+    public static function updateSuggestionStatus(int $id, string $status, ?int $resolvedBy = null): bool
+    {
+        $affected = Capsule::table('mod_amssoft_fail2ban_ai_suggestions')
+            ->where('id', $id)
+            ->update([
+                'status'      => $status,
+                'resolved_at' => Capsule::raw('NOW()'),
+                'resolved_by' => $resolvedBy,
+            ]);
+        return $affected > 0;
+    }
+
+    /**
+     * Conta detecções de um IP nas últimas X minutos (para modo threshold).
+     * Considera sugestões com status pending ou auto_executed.
+     */
+    public static function countRecentDetections(string $ip, int $minutes): int
+    {
+        return (int) Capsule::table('mod_amssoft_fail2ban_ai_suggestions')
+            ->where('ip', $ip)
+            ->whereIn('status', ['pending', 'auto_executed'])
+            ->where('created_at', '>=', Capsule::raw("NOW() - INTERVAL {$minutes} MINUTE"))
+            ->count();
+    }
+
+    // -----------------------------------------------------------------------
+    // Cross-reference de IPs banidos
+    // -----------------------------------------------------------------------
+
     /** Returns ban-time cross-reference for a list of IPs from the DB log. */
     public static function getBanInfoForIps(array $ips): array
     {
