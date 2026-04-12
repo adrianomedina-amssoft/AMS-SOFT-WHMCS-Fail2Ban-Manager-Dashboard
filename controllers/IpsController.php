@@ -103,6 +103,19 @@ class IpsController
             $error = $e->getMessage();
         }
 
+        // Fallback: if fail2ban is offline or returned no jails, read from jail.local
+        // so the "Banir IP" modal always has options to select from.
+        if (empty($jails)) {
+            try {
+                $config    = $this->router->makeJailConfig();
+                $jailData  = $config->readJailLocal();
+                unset($jailData['DEFAULT']);
+                $jails = array_values(array_keys($jailData));
+            } catch (\Throwable $e) {
+                // jail.local unreadable — keep empty
+            }
+        }
+
         // Cross-reference with DB for ban time / reason
         $ipList  = array_unique(array_column($bannedIPs, 'ip'));
         $banInfo = [];
