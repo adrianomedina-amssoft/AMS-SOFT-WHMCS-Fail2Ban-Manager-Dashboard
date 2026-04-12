@@ -21,6 +21,9 @@ $statusLabels = [
 
 <div class="amsfb-page-header">
     <h3>&#129302; Sugestões da IA</h3>
+    <button id="amsfb-run-now-btn" class="btn btn-sm btn-primary">
+        &#9654; Analisar agora
+    </button>
     <a href="<?= $e($modulelink . '&action=ai_settings') ?>" class="btn btn-sm btn-default">&#9881; Configurações</a>
 </div>
 
@@ -312,6 +315,29 @@ $statusLabels = [
             if (typeof $ !== 'undefined') $('#amsfb-rule-modal').modal('show');
         });
     });
+
+    // -------------------------------------------------------------------------
+    // Analisar agora
+    // -------------------------------------------------------------------------
+    var runNowBtn = document.getElementById('amsfb-run-now-btn');
+    if (runNowBtn) {
+        runNowBtn.addEventListener('click', function () {
+            if (!confirm('Rodar análise de IA agora em todos os logs configurados?')) return;
+            runNowBtn.disabled = true;
+            runNowBtn.innerHTML = '&#9654; Analisando...';
+
+            window.AMSFB.post('ai', 'run_now', {}, function (data) {
+                runNowBtn.disabled = false;
+                runNowBtn.innerHTML = '&#9654; Analisar agora';
+                if (data.success) {
+                    alert('✓ ' + (data.message || 'Análise concluída.'));
+                    window.location.reload();
+                } else {
+                    alert('✗ ' + (data.error || 'Erro ao rodar análise.'));
+                }
+            });
+        });
+    }
 
 })();
 </script>
