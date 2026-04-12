@@ -131,11 +131,56 @@ class Router
             'e'              => fn ($v) => Helper::e($v),
         ];
 
+        $shared['system_warnings'] = $this->checkSystemRequirements();
+
         $data   = array_merge($shared, $data);
         $content = $this->renderFile($template . '.tpl', $data);
 
         $data['content'] = $content;
         return $this->renderFile('layout.tpl', $data);
+    }
+
+    /**
+     * Verifica requisitos de sistema e retorna lista de avisos para exibir no layout.
+     * Cada aviso é ['level' => 'warning|danger', 'message' => '...', 'fix' => '...'].
+     */
+    private function checkSystemRequirements(): array
+    {
+        $warnings = [];
+
+        $sudoersFile = '/etc/sudoers.d/amssoft_fail2ban';
+        $content     = @file_get_contents($sudoersFile);
+
+        if ($content === false) {
+            $warnings[] = [
+                'level'   => 'danger',
+                'message' => 'Arquivo de sudoers não encontrado: <code>' . $sudoersFile . '</code>. '
+                           . 'O módulo não conseguirá executar comandos do fail2ban.',
+                'fix'     => 'cp ' . escapeshellarg(dirname(__DIR__) . '/setup/sudoers/amssoft_fail2ban')
+                           . ' ' . escapeshellarg($sudoersFile)
+                           . ' &amp;&amp; chmod 0440 ' . escapeshellarg($sudoersFile),
+            ];
+            return $warnings;
+        }
+
+        // Verificar regras obrigatórias de cp/chmod para criação de filtros pela IA
+        $hasCp     = str_contains($content, '/bin/cp /tmp/amsfb_filter_*');
+        $hasChmod  = str_contains($content, '/bin/chmod 644 /etc/fail2ban/filter.d/amsfb-*');
+
+        if (!$hasCp || !$hasChmod) {
+            $warnings[] = [
+                'level'   => 'warning',
+                'message' => 'O arquivo <code>' . $sudoersFile . '</code> está desatualizado — '
+                           . 'faltam as regras para criação de filtros pela IA (recurso v3). '
+                           . 'Sem elas, o botão "Criar Filtro" falhará.',
+                'fix'     => 'cp ' . escapeshellarg(dirname(__DIR__) . '/setup/sudoers/amssoft_fail2ban')
+                           . ' ' . escapeshellarg($sudoersFile)
+                           . ' &amp;&amp; chmod 0440 ' . escapeshellarg($sudoersFile)
+                           . ' &amp;&amp; visudo -c',
+            ];
+        }
+
+        return $warnings;
     }
 
     /** Renders a single template file and returns its output as a string. */
@@ -174,6 +219,15 @@ class Router
     {
         return new JailConfig(
             $this->vars['jail_local_path'] ?? '/etc/fail2ban/jail.local',
+            $this->makeClient()
+        );
+    }
+
+    public function makeFilterManager(): FilterManager
+    {
+        return new FilterManager(
+            '/etc/fail2ban/filter.d/',
+            $this->makeJailConfig(),
             $this->makeClient()
         );
     }

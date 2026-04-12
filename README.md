@@ -17,6 +17,7 @@ Este módulo ainda está sendo desenvolvido e pode conter falhas ou precisar de 
 - Mapeamento de log paths por jail com validação AJAX inline (✓/✗)
 - Relatórios paginados (50 por página) com filtros e exportação CSV (UTF-8 BOM — compatível com Excel)
 - Hook automático: captura falhas de login de clientes e admins no WHMCS e alimenta o fail2ban automaticamente
+- **IA (Claude):** análise de logs, sugestão de banimento e criação automática de filtros fail2ban (`failregex`) — novos IPs com o mesmo padrão de ataque são bloqueados automaticamente sem intervenção humana
 
 ## Requisitos
 
@@ -104,6 +105,21 @@ systemctl status fail2ban
 
 ---
 
+## Atualização de versão anterior
+
+Se você já tinha o módulo instalado, re-aplique o arquivo de sudoers para garantir que todas as regras estejam presentes (a v3 adicionou permissões para criação de filtros pela IA):
+
+```bash
+cp /var/www/html/modules/addons/amssoft_fail2ban/setup/sudoers/amssoft_fail2ban \
+   /etc/sudoers.d/amssoft_fail2ban
+chmod 0440 /etc/sudoers.d/amssoft_fail2ban
+visudo -c
+```
+
+> O módulo exibe um aviso amarelo no topo de todas as páginas caso detecte que o sudoers está desatualizado.
+
+---
+
 ## Instalação do Módulo no WHMCS
 
 ### 1. Copiar o módulo para a pasta correta
@@ -153,6 +169,8 @@ https://seu-whmcs.com/admin/addonmodules.php?module=amssoft_fail2ban
 | Arquivo de log WHMCS não existe | `touch /var/log/whmcs_auth.log && chown www-data:www-data /var/log/whmcs_auth.log` |
 | fail2ban aparece offline no dashboard | Conferir os paths em **Configurar** no painel do WHMCS |
 | "Erro ao criar/editar/remover jail" | Executar: `chown root:www-data /etc/fail2ban/jail.local && chmod 664 /etc/fail2ban/jail.local` |
+| "Falha ao criar arquivo de filtro" (botão Criar Filtro da IA) | Sudoers desatualizado — re-aplicar conforme seção **Atualização de versão anterior** |
+| Aviso amarelo "sudoers desatualizado" no painel | Idem acima — o módulo detectou automaticamente que faltam regras de `cp`/`chmod` |
 
 ---
 
@@ -163,8 +181,10 @@ amssoft_fail2ban/
 ├── amssoft_fail2ban.php      # Entry point WHMCS (5 funções obrigatórias)
 ├── hooks.php                  # Hook de captura de falhas de login
 ├── lib/                       # Núcleo: Router, Fail2BanClient, JailConfig, Database, Helper, LogParser
-├── controllers/               # 5 controllers MVC
-├── templates/                 # 7 templates PHP (sem Smarty)
+│   ├── AIAnalyzer.php         # Integração com API Anthropic (Claude) — análise de logs e geração de failregex
+│   └── FilterManager.php      # Criação de filtros e jails fail2ban gerados pela IA
+├── controllers/               # Controllers MVC
+├── templates/                 # Templates PHP (sem Smarty)
 ├── assets/                    # CSS, JS e Chart.js embutido (sem CDN externo)
 ├── setup/                     # Configs prontas: sudoers + filtro e jail do fail2ban
 └── sql/                       # install.sql / uninstall.sql (referência; execução via activate())
