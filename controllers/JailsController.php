@@ -335,7 +335,18 @@ class JailsController
         // Parâmetros para pré-preencher e abrir o modal "Novo Jail" automaticamente
         // (usado quando o admin vem da tela de Sugestões IA com jail inexistente).
         $prefillJail    = Helper::sanitizeJail($_GET['new_jail'] ?? '');
-        $prefillBantime = max(60, min(2592000, (int)($_GET['bantime'] ?? 3600)));
+        $prefillFilter  = preg_replace('/[^a-zA-Z0-9_-]/', '', $_GET['filter'] ?? '');
+        $prefillLogpath = trim($_GET['logpath'] ?? '');
+        $prefillLogpath = preg_replace('/[\x00-\x1F\x7F]/', '', $prefillLogpath);
+        if ($prefillLogpath !== '' && (str_contains($prefillLogpath, '..') || !str_starts_with($prefillLogpath, '/'))) {
+            $prefillLogpath = '';
+        }
+        $prefillMaxretry = max(1,  min(100,    (int)($_GET['maxretry'] ?? 5)));
+        $prefillFindtime = max(60, min(86400,   (int)($_GET['findtime'] ?? 600)));
+        $prefillBantime  = (int)($_GET['bantime'] ?? 3600);
+        if ($prefillBantime !== -1) {
+            $prefillBantime = max(60, min(2592000, $prefillBantime));
+        }
         $openAddModal   = !empty($_GET['open_modal']) && !empty($prefillJail);
 
         return $this->router->render('jails', [
@@ -344,6 +355,10 @@ class JailsController
             'error'              => $error,
             'available_filters'  => $availableFilters,
             'prefill_jail'       => $prefillJail,
+            'prefill_filter'     => $prefillFilter,
+            'prefill_logpath'    => $prefillLogpath,
+            'prefill_maxretry'   => $prefillMaxretry,
+            'prefill_findtime'   => $prefillFindtime,
             'prefill_bantime'    => $prefillBantime,
             'open_add_modal'     => $openAddModal,
         ]);

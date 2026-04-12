@@ -125,7 +125,7 @@
                         <select name="filter" class="form-control">
                             <option value="">— nenhum —</option>
                             <?php foreach ($available_filters as $f): ?>
-                            <option value="<?= $e($f) ?>"><?= $e($f) ?></option>
+                            <option value="<?= $e($f) ?>" <?= ($f === ($prefill_filter ?? '')) ? 'selected' : '' ?>><?= $e($f) ?></option>
                             <?php endforeach; ?>
                         </select>
                         <span class="help-block">Filtros disponíveis em /etc/fail2ban/filter.d/.</span>
@@ -133,19 +133,22 @@
                     <div class="form-group">
                         <label>Log Path</label>
                         <input type="text" name="logpath" class="form-control"
-                               placeholder="/var/log/...">
+                               placeholder="/var/log/..."
+                               value="<?= $e($prefill_logpath ?? '') ?>">
                     </div>
                     <div class="row">
                         <div class="col-sm-4">
                             <div class="form-group">
                                 <label>maxretry</label>
-                                <input type="number" name="maxretry" class="form-control" value="5" min="1" max="100">
+                                <input type="number" name="maxretry" class="form-control"
+                                       value="<?= (int)($prefill_maxretry ?? 5) ?>" min="1" max="100">
                             </div>
                         </div>
                         <div class="col-sm-4">
                             <div class="form-group">
                                 <label>findtime (s)</label>
-                                <input type="number" name="findtime" class="form-control" value="600" min="60" max="86400">
+                                <input type="number" name="findtime" class="form-control"
+                                       value="<?= (int)($prefill_findtime ?? 600) ?>" min="60" max="86400">
                             </div>
                         </div>
                         <div class="col-sm-4">

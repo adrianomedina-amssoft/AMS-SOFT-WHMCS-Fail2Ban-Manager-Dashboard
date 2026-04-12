@@ -254,8 +254,12 @@ $statusLabels = [
                     self.disabled = false;
                     var createUrl = window.AMSFB.moduleLink
                         + '&action=jails'
-                        + '&new_jail='    + encodeURIComponent(data.jail_name || '')
-                        + '&bantime='     + encodeURIComponent(data.bantime   || 3600)
+                        + '&new_jail='  + encodeURIComponent(data.jail_name || '')
+                        + '&filter='    + encodeURIComponent(data.filter    || '')
+                        + '&logpath='   + encodeURIComponent(data.logpath   || '')
+                        + '&maxretry='  + encodeURIComponent(data.maxretry  || 5)
+                        + '&findtime='  + encodeURIComponent(data.findtime  || 600)
+                        + '&bantime='   + encodeURIComponent(data.bantime   || 3600)
                         + '&open_modal=1';
                     var cell = self.closest('td');
                     // Remover aviso anterior se houver

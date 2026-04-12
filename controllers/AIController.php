@@ -202,11 +202,45 @@ class AIController
         if (!empty($jail)) {
             $activeJails = $client->getJails();
             if (!in_array($jail, $activeJails, true)) {
+                // Extrair configuração do suggested_rule para pré-preencher o modal de criação
+                $ruleCfg = [];
+                $rawRule = $suggestion['suggested_rule'] ?? '';
+                if (!empty($rawRule)) {
+                    try {
+                        $parsed = @parse_ini_string($rawRule, true, INI_SCANNER_RAW);
+                        if (is_array($parsed)) {
+                            // Seção com o nome do jail ou primeira seção disponível
+                            $section = $parsed[$jail] ?? reset($parsed);
+                            if (is_array($section)) {
+                                $ruleCfg = $section;
+                            }
+                        }
+                    } catch (\Throwable $e) {}
+                }
+
+                // Sanitizar cada campo antes de devolver ao frontend
+                $pfFilter  = preg_replace('/[^a-zA-Z0-9_-]/', '', $ruleCfg['filter'] ?? '');
+                $pfLogpath = trim($ruleCfg['logpath'] ?? '');
+                $pfLogpath = preg_replace('/[\x00-\x1F\x7F]/', '', $pfLogpath);
+                if ($pfLogpath !== '' && (str_contains($pfLogpath, '..') || !str_starts_with($pfLogpath, '/'))) {
+                    $pfLogpath = '';
+                }
+                $pfMaxretry = max(1,  min(100,   (int)($ruleCfg['maxretry'] ?? 5)));
+                $pfFindtime = max(60, min(86400,  (int)($ruleCfg['findtime'] ?? 600)));
+                $pfBantime  = (int)($ruleCfg['bantime'] ?? $suggestion['bantime'] ?? 3600);
+                if ($pfBantime !== -1) {
+                    $pfBantime = max(60, min(2592000, $pfBantime));
+                }
+
                 return json_encode([
                     'success'      => false,
                     'jail_missing' => true,
                     'jail_name'    => $jail,
-                    'bantime'      => (int)($suggestion['bantime'] ?? 3600),
+                    'filter'       => $pfFilter,
+                    'logpath'      => $pfLogpath,
+                    'maxretry'     => $pfMaxretry,
+                    'findtime'     => $pfFindtime,
+                    'bantime'      => $pfBantime,
                     'error'        => "Jail '{$jail}' não está ativo no fail2ban.",
                 ]);
             }
