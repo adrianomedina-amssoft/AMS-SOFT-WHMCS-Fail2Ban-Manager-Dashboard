@@ -249,40 +249,22 @@ $statusLabels = [
                     var row = document.getElementById('amsfb-row-' + id);
                     if (row) row.remove();
                     alert('✓ ' + (data.message || 'Aprovado.'));
-                } else if (data.need_reload) {
-                    // Jail existe em jail.local mas fail2ban não carregou mesmo após tentativa.
-                    // Exibir botão de reload pelo painel — sem precisar de terminal.
+                } else if (data.jail_cfg_error) {
+                    // Jail existe mas fail2ban não conseguiu ativá-lo (ex: filter ausente).
+                    // Mostrar botão "Editar Jail" para o admin corrigir a configuração pelo painel.
                     self.disabled = false;
-                    var cell2 = self.closest('td');
-                    var old2  = cell2.querySelector('.amsfb-jail-missing-msg');
-                    if (old2) old2.remove();
-                    var msg2 = document.createElement('div');
-                    msg2.className = 'amsfb-jail-missing-msg';
-                    msg2.style.cssText = 'margin-top:6px;display:flex;align-items:center;gap:6px;flex-wrap:wrap;';
-                    var reloadBtn = document.createElement('button');
-                    reloadBtn.type = 'button';
-                    reloadBtn.className = 'btn btn-xs btn-warning';
-                    reloadBtn.textContent = 'Recarregar fail2ban';
-                    reloadBtn.onclick = function () {
-                        reloadBtn.disabled    = true;
-                        reloadBtn.textContent = '...';
-                        window.AMSFB.post('jails', 'reload_all', {}, function (rd) {
-                            if (rd.success) {
-                                // Reload ok — retentar aprovação automaticamente
-                                msg2.remove();
-                                self.disabled    = false;
-                                self.textContent = 'Aprovar';
-                                self.click();
-                            } else {
-                                reloadBtn.disabled    = false;
-                                reloadBtn.textContent = 'Recarregar fail2ban';
-                                alert('Não foi possível recarregar o fail2ban. Verifique as permissões de sudo do servidor.');
-                            }
-                        });
-                    };
-                    msg2.innerHTML = '<span style="color:#c0392b;font-size:12px;">&#9888; fail2ban não carregou o jail.</span>';
-                    msg2.appendChild(reloadBtn);
-                    cell2.appendChild(msg2);
+                    var cell3 = self.closest('td');
+                    var old3  = cell3.querySelector('.amsfb-jail-missing-msg');
+                    if (old3) old3.remove();
+                    var msg3 = document.createElement('div');
+                    msg3.className = 'amsfb-jail-missing-msg';
+                    msg3.style.cssText = 'margin-top:6px;display:flex;align-items:center;gap:6px;flex-wrap:wrap;';
+                    var editUrl = window.AMSFB.moduleLink
+                        + '&action=jail_edit&jail=' + encodeURIComponent(data.jail_name || '');
+                    var esc = function(s){ return String(s).replace(/[<>"&]/g,function(c){return{'<':'&lt;','>':'&gt;','"':'&quot;','&':'&amp;'}[c];}); };
+                    msg3.innerHTML = '<span style="color:#c0392b;font-size:12px;">&#9888; ' + esc(data.error) + '</span>'
+                        + '<a href="' + editUrl + '" class="btn btn-xs btn-primary">Editar Jail</a>';
+                    cell3.appendChild(msg3);
                 } else if (data.jail_missing) {
                     // Jail inexistente: mostrar aviso inline com link para criar
                     self.disabled = false;

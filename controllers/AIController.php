@@ -209,21 +209,42 @@ class AIController
                 try { $jailLocal = $jailConfig->readJailLocal(); } catch (\Throwable $e) {}
 
                 if (isset($jailLocal[$jail])) {
-                    // Jail existe em jail.local — fazer reload completo e reexecutar o ban.
-                    // reloadAll() = fail2ban-client reload (carrega novos jails, não só recarrega existentes)
+                    // Jail existe em jail.local — fazer reload completo e verificar se ficou ativo
                     $jailConfig->reloadAll();
-                    $ok2 = $engine->approveSuggestion($id, $adminId);
-                    if ($ok2) {
-                        return json_encode(['success' => true,
-                            'message' => "IP {$ip} banido com sucesso (fail2ban recarregado automaticamente)."]);
+
+                    $activeAfterReload = [];
+                    try { $activeAfterReload = $client->getJails(); } catch (\Throwable $e) {}
+
+                    if (in_array($jail, $activeAfterReload, true)) {
+                        // Jail ativo após reload — reexecutar o ban
+                        $ok2 = $engine->approveSuggestion($id, $adminId);
+                        if ($ok2) {
+                            return json_encode(['success' => true,
+                                'message' => "IP {$ip} banido com sucesso (fail2ban recarregado automaticamente)."]);
+                        }
                     }
-                    // Reload executado mas ban ainda falhou — devolver sinal para o frontend
-                    // oferecer botão de reload manual pelo painel (sem terminal)
+
+                    // Jail ainda não está ativo — diagnosticar causa mais provável
+                    $jailCfg     = $jailLocal[$jail] ?? [];
+                    $filterName  = preg_replace('/[^a-zA-Z0-9_-]/', '', $jailCfg['filter'] ?? '');
+                    $filterMissing = $filterName !== ''
+                        && !file_exists("/etc/fail2ban/filter.d/{$filterName}.conf");
+
+                    if ($filterMissing) {
+                        return json_encode([
+                            'success'     => false,
+                            'jail_cfg_error' => true,
+                            'jail_name'   => $jail,
+                            'error'       => "O filter '{$filterName}' não existe em filter.d/. Edite o jail e escolha um filter válido.",
+                        ]);
+                    }
+
+                    // Causa desconhecida — oferecer edição do jail pelo painel
                     return json_encode([
-                        'success'      => false,
-                        'need_reload'  => true,
-                        'suggestion_id' => $id,
-                        'error'        => "Jail '{$jail}' existe mas o fail2ban não conseguiu carregá-lo. Tente recarregar o fail2ban pelo painel.",
+                        'success'        => false,
+                        'jail_cfg_error' => true,
+                        'jail_name'      => $jail,
+                        'error'          => "fail2ban não conseguiu ativar o jail '{$jail}'. Verifique a configuração do jail.",
                     ]);
                 }
 
