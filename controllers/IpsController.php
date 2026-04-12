@@ -141,6 +141,13 @@ class IpsController
         $banIp        = Helper::sanitizeIp($_GET['ban_ip'] ?? '');
         $openBanModal = !empty($_GET['open_modal']) && !empty($banIp);
 
+        // Paginação server-side via array_slice (os IPs vêm do fail2ban, não do DB)
+        $perPage   = 10;
+        $totalIPs  = count($bannedIPs);
+        $pages     = $totalIPs > 0 ? (int)ceil($totalIPs / $perPage) : 1;
+        $page      = max(1, min((int)($_GET['page'] ?? 1), $pages));
+        $bannedIPs = array_slice($bannedIPs, ($page - 1) * $perPage, $perPage);
+
         return $this->router->render('ips', [
             'fail2ban_online' => $fail2banOnline,
             'error'           => $error,
@@ -148,6 +155,9 @@ class IpsController
             'jails'           => $jails,
             'ban_ip'          => $banIp,
             'open_ban_modal'  => $openBanModal,
+            'page'            => $page,
+            'pages'           => $pages,
+            'total_ips'       => $totalIPs,
         ]);
     }
 }
