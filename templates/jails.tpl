@@ -124,8 +124,16 @@
                         <label>Filter</label>
                         <select name="filter" class="form-control">
                             <option value="">— nenhum —</option>
+                            <?php
+                            $pf = $prefill_filter ?? '';
+                            // Se o filtro sugerido pela IA não existe em filter.d, adiciona
+                            // como opção selecionada no topo para não perder o valor.
+                            if ($pf !== '' && !in_array($pf, $available_filters, true)):
+                            ?>
+                            <option value="<?= $e($pf) ?>" selected><?= $e($pf) ?> (sugerido pela IA)</option>
+                            <?php endif; ?>
                             <?php foreach ($available_filters as $f): ?>
-                            <option value="<?= $e($f) ?>" <?= ($f === ($prefill_filter ?? '')) ? 'selected' : '' ?>><?= $e($f) ?></option>
+                            <option value="<?= $e($f) ?>" <?= ($f === $pf) ? 'selected' : '' ?>><?= $e($f) ?></option>
                             <?php endforeach; ?>
                         </select>
                         <span class="help-block">Filtros disponíveis em /etc/fail2ban/filter.d/.</span>
