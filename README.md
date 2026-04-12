@@ -2,8 +2,6 @@
 
 > **Leve o fail2ban a outro nível — integrado ao WHMCS, com dashboard visual, IA da Anthropic (Claude) para análise de ataques, criação automática de filtros, relatórios e muito mais. Tudo sem precisar de linha de comando ou terminal.**
 
-![Dashboard](docs/screenshots/dashboard.png)
-
 ---
 
 ## O que é este módulo?
@@ -14,15 +12,37 @@ A IA integrada (Claude, da Anthropic) não apenas sugere banir um IP suspeito: e
 
 ## Capturas de Tela
 
-| Dashboard | IPs Banidos |
-|---|---|
-| ![Dashboard](docs/screenshots/dashboard.png) | ![IPs Banidos](docs/screenshots/ips.png) |
+**Dashboard**
 
-| Sugestões da IA | Relatórios |
-|---|---|
-| ![IA](docs/screenshots/ai_suggestions.png) | ![Relatórios](docs/screenshots/reports.png) |
+![Dashboard](docs/screenshots/01.png)
+![Dashboard — alertas da IA](docs/screenshots/02.png)
 
-> As imagens acima estão na pasta [`docs/screenshots/`](docs/screenshots/) do repositório.
+**IPs Banidos**
+
+| Lista de IPs | Ban manual |
+|---|---|
+| ![IPs Banidos](docs/screenshots/03.png) | ![Banir IP](docs/screenshots/04.png) |
+
+**Jails**
+
+| Lista de Jails | Criar novo Jail |
+|---|---|
+| ![Jails](docs/screenshots/05.png) | ![Novo Jail](docs/screenshots/06.png) |
+
+**Log Paths · Relatórios · Log Viewer**
+
+| Log Paths | Relatórios | Log Viewer |
+|---|---|---|
+| ![Log Paths](docs/screenshots/07.png) | ![Relatórios](docs/screenshots/08.png) | ![Log Viewer](docs/screenshots/09.png) |
+
+**IA — Análise e Sugestões (Claude / Anthropic)**
+
+![Sugestões aguardando aprovação](docs/screenshots/10.png)
+![Histórico de sugestões](docs/screenshots/11.png)
+
+| Configurações da IA | Prompt personalizado |
+|---|---|
+| ![Configurações IA](docs/screenshots/12.png) | ![Prompt](docs/screenshots/13.png) |
 
 ---
 
