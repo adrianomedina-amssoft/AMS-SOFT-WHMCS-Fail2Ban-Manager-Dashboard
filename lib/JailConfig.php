@@ -198,13 +198,20 @@ class JailConfig
             $body .= "\n";
         }
 
-        // [SEC-3] Atomic write: write to a temp file then rename to avoid partial reads
-        // by fail2ban during the write window, and to prevent concurrent-write corruption.
-        $tmp = $this->jailLocalPath . '.tmp.' . getmypid();
-        if (file_put_contents($tmp, $header . $body, LOCK_EX) === false) {
+        // [SEC-3] Atomic write: write to a temp file in /tmp (always writable by www-data)
+        // then copy back to jail.local (which is 664 root:www-data — writable without
+        // needing directory write permission on /etc/fail2ban/ which is 755 root:root).
+        $tmp = tempnam(sys_get_temp_dir(), 'amsfb_jail_');
+        if ($tmp === false) {
             return false;
         }
-        return rename($tmp, $this->jailLocalPath);
+        if (file_put_contents($tmp, $header . $body, LOCK_EX) === false) {
+            @unlink($tmp);
+            return false;
+        }
+        $ok = copy($tmp, $this->jailLocalPath);
+        @unlink($tmp);
+        return $ok;
     }
 
     /** Extracts the leading comment/empty lines before the first [section]. */
@@ -230,9 +237,14 @@ class JailConfig
         if (!file_exists($this->jailLocalPath)) {
             return '';
         }
-        // [SEC-3] Include PID in backup name to prevent two concurrent operations in the
-        // same second from silently overwriting each other's backup.
-        $dst = $this->jailLocalPath . '.bak.' . date('YmdHis') . '_' . getmypid();
+        // [SEC-3] PID in name prevents concurrent backup collisions.
+        // Prefer same directory as jail.local; fall back to /tmp if the directory
+        // is not writable by the current process (e.g. /etc/fail2ban is 755 root:root).
+        $suffix = '.bak.' . date('YmdHis') . '_' . getmypid();
+        $dir    = dirname($this->jailLocalPath);
+        $dst    = is_writable($dir)
+            ? $this->jailLocalPath . $suffix
+            : sys_get_temp_dir() . '/amsfb_jail_bak' . $suffix;
         copy($this->jailLocalPath, $dst);
         return $dst;
     }
