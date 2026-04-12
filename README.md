@@ -1,8 +1,30 @@
 # AMS SOFT – Fail2Ban Manager para WHMCS
 
+> **Leve o fail2ban a outro nível — integrado ao WHMCS, com dashboard visual, IA da Anthropic (Claude) para análise de ataques, criação automática de filtros, relatórios e muito mais. Tudo sem precisar de linha de comando ou terminal.**
+
+![Dashboard](docs/screenshots/dashboard.png)
+
+---
+
 ## O que é este módulo?
 
-Addon para WHMCS 9+ que expõe toda a gestão do fail2ban em interface gráfica, sem necessidade de acesso SSH ou conhecimento de linha de comando. Gerencie IPs banidos, edite jails, consulte logs e exporte relatórios — tudo direto pelo painel do WHMCS.
+O **AMS SOFT Fail2Ban Manager** transforma o fail2ban em uma ferramenta visual e inteligente dentro do próprio WHMCS. Em vez de gerenciar segurança via SSH, você tem um painel completo com gráficos em tempo real, controle de IPs e jails por botão, análise de logs por Inteligência Artificial e relatórios exportáveis — tudo acessível pelo admin do WHMCS, sem instalar nada extra no navegador.
+
+A IA integrada (Claude, da Anthropic) não apenas sugere banir um IP suspeito: ela lê as linhas de log, identifica o **padrão** do ataque e cria automaticamente um filtro fail2ban (`failregex`) para que qualquer futuro IP que use o mesmo vetor seja bloqueado de forma autônoma — sem intervenção humana.
+
+## Capturas de Tela
+
+| Dashboard | IPs Banidos |
+|---|---|
+| ![Dashboard](docs/screenshots/dashboard.png) | ![IPs Banidos](docs/screenshots/ips.png) |
+
+| Sugestões da IA | Relatórios |
+|---|---|
+| ![IA](docs/screenshots/ai_suggestions.png) | ![Relatórios](docs/screenshots/reports.png) |
+
+> As imagens acima estão na pasta [`docs/screenshots/`](docs/screenshots/) do repositório.
+
+---
 
 ## ⚠️ Aviso — Módulo em Construção
 
@@ -10,14 +32,20 @@ Este módulo ainda está sendo desenvolvido e pode conter falhas ou precisar de 
 
 ## Funcionalidades
 
-- Dashboard com 4 KPIs: IPs banidos agora, bans nas últimas 24h, jails ativos e último ban
-- 2 gráficos Chart.js embutidos: linha (últimos 7 dias) + barra horizontal (Top 10 IPs)
-- Lista ao vivo de IPs banidos com ban/unban por botão
-- Gerenciamento de jails: habilitar/desabilitar e editar parâmetros (maxretry, findtime, bantime)
-- Mapeamento de log paths por jail com validação AJAX inline (✓/✗)
-- Relatórios paginados (50 por página) com filtros e exportação CSV (UTF-8 BOM — compatível com Excel)
-- Hook automático: captura falhas de login de clientes e admins no WHMCS e alimenta o fail2ban automaticamente
-- **IA (Claude):** análise de logs, sugestão de banimento e criação automática de filtros fail2ban (`failregex`) — novos IPs com o mesmo padrão de ataque são bloqueados automaticamente sem intervenção humana
+- **Dashboard** com 4 KPIs em tempo real: IPs banidos agora, bans nas últimas 24h, jails ativos e último ban
+- **Gráficos interativos** Chart.js: linha (evolução dos últimos 7 dias) + barra horizontal (Top 10 IPs mais bloqueados)
+- **IPs Banidos** — lista ao vivo com ban/unban por botão, sem terminal
+- **Gerenciamento de Jails** — habilitar/desabilitar e editar parâmetros (maxretry, findtime, bantime) pelo painel
+- **Log Paths** — mapeamento de logs por jail com validação AJAX inline (✓/✗)
+- **Log Viewer** — visualização dos logs de ataque direto no painel, com auto-descoberta de arquivos
+- **Relatórios** — paginados com filtros e exportação CSV (UTF-8 BOM, compatível com Excel)
+- **Hook automático** — captura falhas de login de clientes e admins no WHMCS e alimenta o fail2ban automaticamente
+- **IA (Claude / Anthropic):**
+  - Analisa linhas de log e identifica ameaças com nível de severidade e confiança
+  - Sugere banimento de IPs suspeitos com um clique
+  - Gera `failregex` (padrão de ataque) e cria filtro + jail no fail2ban automaticamente
+  - Para sugestões antigas sem `failregex`, a IA gera o filtro on-demand a partir das evidências armazenadas
+  - Tudo sem acessar o terminal
 
 ## Requisitos
 
