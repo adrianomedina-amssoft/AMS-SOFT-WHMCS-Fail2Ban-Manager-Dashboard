@@ -4,7 +4,9 @@ namespace AMS\Fail2Ban\Controllers;
 use AMS\Fail2Ban\Database;
 use AMS\Fail2Ban\Helper;
 use AMS\Fail2Ban\LogParser;
+use AMS\Fail2Ban\LogViewer;
 use AMS\Fail2Ban\Router;
+use WHMCS\Database\Capsule;
 
 class LogPathsController
 {
@@ -34,7 +36,6 @@ class LogPathsController
         if ($do === 'validate') {
             $path = $post['path'] ?? $_GET['path'] ?? '';
 
-            // Reject path traversal / non-absolute
             if (strpos($path, '..') !== false || !str_starts_with($path, '/')) {
                 return json_encode(['success' => false, 'error' => 'Caminho inválido']);
             }
@@ -48,7 +49,7 @@ class LogPathsController
     }
 
     // -----------------------------------------------------------------------
-    // POST: save logpaths
+    // POST: add or delete custom log
     // -----------------------------------------------------------------------
 
     private function handlePost(): string
@@ -57,41 +58,52 @@ class LogPathsController
         if (!Helper::checkCsrf($token)) {
             Helper::setFlash('danger', 'Token CSRF inválido.');
             Helper::redirect(($this->vars['modulelink'] ?? '') . '&action=logpaths');
+            return '';
         }
 
-        $paths  = $_POST['logpath'] ?? [];    // array: jail => path
-        $config = $this->router->makeJailConfig();
-        $saved  = 0;
+        $do = $_POST['do'] ?? '';
 
-        foreach ($paths as $jail => $path) {
-            $jail = Helper::sanitizeJail($jail);
-            $path = trim((string)$path);
+        if ($do === 'add') {
+            $label = trim($_POST['label'] ?? '');
+            $path  = trim($_POST['path']  ?? '');
 
-            if (!$jail) {
-                continue;
-            }
+            // Sanitizar label: só alfanumérico, hífen, underscore, espaço (max 64)
+            $label = preg_replace('/[^a-zA-Z0-9\-_ ]/', '', $label);
+            $label = trim(substr($label, 0, 64));
 
-            // [SEC-2] Strip control characters (newlines, null bytes) before path checks
-            // to prevent INI injection via embedded \n in the logpath value.
+            // Sanitizar path
             $path = preg_replace('/[\x00-\x1F\x7F]/', '', $path);
 
-            // Validate path
-            if ($path !== '' && (strpos($path, '..') !== false || !str_starts_with($path, '/'))) {
-                continue; // reject unsafe paths silently
+            if (empty($label)) {
+                Helper::setFlash('danger', 'O campo Label é obrigatório.');
+            } elseif (empty($path)) {
+                Helper::setFlash('danger', 'O campo Path é obrigatório.');
+            } elseif (strpos($path, '..') !== false || !str_starts_with($path, '/')) {
+                Helper::setFlash('danger', 'Caminho inválido.');
+            } else {
+                $viewer = new LogViewer();
+                if (!$viewer->isValidPath($path)) {
+                    Helper::setFlash('danger', 'Caminho fora dos diretórios permitidos (/var/log/).');
+                } else {
+                    // Normalizar label para chave DB: minúsculas, sem espaços
+                    $key = preg_replace('/\s+/', '-', strtolower($label));
+                    Database::setConfig("custom_log.{$key}", $path);
+                    Helper::setFlash('success', "Log \"{$label}\" adicionado com sucesso.");
+                }
             }
-
-            // Persist to DB config store
-            Database::setConfig("logpath.{$jail}", $path);
-
-            // Also update jail.local if the path is non-empty
-            if ($path !== '') {
-                $config->saveJail($jail, ['logpath' => $path]);
+        } elseif ($do === 'delete') {
+            $key = trim($_POST['key'] ?? '');
+            $key = preg_replace('/[^a-zA-Z0-9\-_]/', '', $key);
+            if (!empty($key)) {
+                Capsule::table('mod_amssoft_fail2ban_config')
+                    ->where('key', "custom_log.{$key}")
+                    ->delete();
+                Helper::setFlash('success', 'Log removido.');
             }
-
-            $saved++;
+        } else {
+            Helper::setFlash('danger', 'Ação desconhecida.');
         }
 
-        Helper::setFlash('success', "Log paths salvos ({$saved} jail(s) atualizados).");
         Helper::redirect(($this->vars['modulelink'] ?? '') . '&action=logpaths');
         return '';
     }
@@ -102,43 +114,49 @@ class LogPathsController
 
     private function showPage(): string
     {
-        $jailConfig = $this->router->makeJailConfig();
-        $jailData   = [];
+        $parser = new LogParser();
 
-        try {
-            $rawData  = $jailConfig->readJailLocal();
-            // Remove DEFAULT e stubs de desabilitação do sistema (ex: [sshd] enabled=false)
-            unset($rawData['DEFAULT']);
-            foreach ($rawData as $jailName => $cfg) {
-                $keys = array_keys($cfg);
-                if ($keys === ['enabled'] && strtolower($cfg['enabled']) === 'false') {
-                    unset($rawData[$jailName]);
-                }
+        // Logs auto-descobertos (bem conhecidos que existem no disco)
+        $autoLogs = [];
+        foreach (LogViewer::WELL_KNOWN_LOGS as $path => $label) {
+            if (file_exists($path)) {
+                $v = $parser->validateLogPath($path);
+                $autoLogs[] = [
+                    'label'    => $label,
+                    'path'     => $path,
+                    'readable' => $v['readable'] ?? false,
+                    'size'     => $v['size']     ?? 0,
+                ];
             }
-            $jailData = $rawData;
-        } catch (\Throwable $e) {
-            // jail.local might not be accessible
         }
 
-        // Merge saved DB overrides
-        $parser    = new LogParser();
-        $jailPaths = [];
-
-        foreach (array_keys($jailData) as $jail) {
-            $dbPath  = Database::getConfig("logpath.{$jail}");
-            $iniPath = $jailData[$jail]['logpath'] ?? '';
-            $path    = $dbPath ?? $iniPath;
-
-            $validation = ($path !== '') ? $parser->validateLogPath($path) : null;
-
-            $jailPaths[$jail] = [
-                'path'       => $path,
-                'validation' => $validation,
-            ];
-        }
+        // Logs customizados salvos pelo admin
+        $customLogs = [];
+        try {
+            $rows = Capsule::table('mod_amssoft_fail2ban_config')
+                ->where('key', 'like', 'custom_log.%')
+                ->orderBy('key')
+                ->get();
+            foreach ($rows as $row) {
+                $dbKey = substr($row->key, strlen('custom_log.'));
+                $path  = $row->value ?? '';
+                if ($path === '') {
+                    continue;
+                }
+                $v = $parser->validateLogPath($path);
+                $customLogs[] = [
+                    'key'      => $dbKey,
+                    'label'    => $dbKey,
+                    'path'     => $path,
+                    'readable' => $v['readable'] ?? false,
+                    'size'     => $v['size']     ?? 0,
+                ];
+            }
+        } catch (\Throwable $e) {}
 
         return $this->router->render('logpaths', [
-            'jail_paths' => $jailPaths,
+            'auto_logs'   => $autoLogs,
+            'custom_logs' => $customLogs,
         ]);
     }
 }

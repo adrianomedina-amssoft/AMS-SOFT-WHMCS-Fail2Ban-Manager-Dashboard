@@ -31,33 +31,71 @@ class LogViewer
      *
      * Retorna: [['label' => 'sshd', 'path' => '/var/log/auth.log'], ...]
      */
+    /**
+     * Logs bem conhecidos que são incluídos automaticamente se existirem no disco.
+     * Permite que o Log Viewer funcione sem nenhuma configuração manual.
+     */
+    public const WELL_KNOWN_LOGS = [
+        '/var/log/whmcs_auth.log'           => 'WHMCS Auth',
+        '/var/log/apache2/access.log'        => 'Apache Access',
+        '/var/log/apache2/whmcs_access.log'  => 'WHMCS Apache Access',
+        '/var/log/apache2/error.log'         => 'Apache Error',
+        '/var/log/auth.log'                  => 'Linux Auth (SSH/sudo)',
+        '/var/log/syslog'                    => 'Syslog',
+        '/var/log/nginx/access.log'          => 'Nginx Access',
+        '/var/log/nginx/error.log'           => 'Nginx Error',
+    ];
+
     public function getAvailableLogs(array $extra = []): array
     {
         $logs      = [];
         $seenPaths = [];
 
-        // 1. DB: chaves logpath.* gravadas pela tela Log Paths
-        $rows = \WHMCS\Database\Capsule::table('mod_amssoft_fail2ban_config')
-            ->where('key', 'like', 'logpath.%')
-            ->get();
-        foreach ($rows as $row) {
-            $jail = substr($row->key, strlen('logpath.'));
-            if ($row->value && $this->isValidPath($row->value)
-                && !isset($seenPaths[$row->value])) {
-                $logs[] = ['label' => $jail, 'path' => $row->value];
-                $seenPaths[$row->value] = true;
-            }
-        }
-
-        // 2. jail.local: paths de jails não cobertos pelo DB
-        foreach ($extra as $path => $label) {
-            if (!isset($seenPaths[$path]) && $this->isValidPath($path)) {
-                $logs[] = ['label' => $label, 'path' => $path];
+        // 1. Auto-descoberta: logs bem conhecidos que existem no disco
+        foreach (self::WELL_KNOWN_LOGS as $path => $label) {
+            if (file_exists($path) && $this->isValidPath($path) && !isset($seenPaths[$path])) {
+                $logs[]           = ['label' => $label, 'path' => $path];
                 $seenPaths[$path] = true;
             }
         }
 
-        // 3. Sempre inclui fail2ban.log se existir e não estiver na lista
+        // 2. DB: custom_log.* — adicionados pelo admin via tela Log Paths
+        try {
+            $rows = \WHMCS\Database\Capsule::table('mod_amssoft_fail2ban_config')
+                ->where('key', 'like', 'custom_log.%')
+                ->get();
+            foreach ($rows as $row) {
+                $label = substr($row->key, strlen('custom_log.'));
+                if ($row->value && $this->isValidPath($row->value) && !isset($seenPaths[$row->value])) {
+                    $logs[]                 = ['label' => $label, 'path' => $row->value];
+                    $seenPaths[$row->value] = true;
+                }
+            }
+        } catch (\Throwable $e) {}
+
+        // 3. DB: logpath.* — legado (jails com logpath configurado)
+        try {
+            $rows = \WHMCS\Database\Capsule::table('mod_amssoft_fail2ban_config')
+                ->where('key', 'like', 'logpath.%')
+                ->get();
+            foreach ($rows as $row) {
+                $jail = substr($row->key, strlen('logpath.'));
+                if ($row->value && $this->isValidPath($row->value) && !isset($seenPaths[$row->value])) {
+                    $logs[]                 = ['label' => $jail, 'path' => $row->value];
+                    $seenPaths[$row->value] = true;
+                }
+            }
+        } catch (\Throwable $e) {}
+
+        // 4. jail.local: paths de jails não cobertos pelo DB
+        foreach ($extra as $path => $label) {
+            if (!isset($seenPaths[$path]) && $this->isValidPath($path)) {
+                $logs[]           = ['label' => $label, 'path' => $path];
+                $seenPaths[$path] = true;
+            }
+        }
+
+        // 5. Sempre inclui fail2ban.log se existir
         $fb = '/var/log/fail2ban.log';
         if (file_exists($fb) && !isset($seenPaths[$fb])) {
             $logs[] = ['label' => 'fail2ban (geral)', 'path' => $fb];
