@@ -78,20 +78,34 @@ Este módulo ainda está sendo desenvolvido e pode conter falhas ou precisar de 
 
 ---
 
-## O que precisa ser instalado e configurado fora do módulo
+## Instalação Completa (Passo a Passo)
 
-Durante o desenvolvimento foram identificados os seguintes requisitos externos que precisam ser configurados manualmente no servidor **antes** de ativar o módulo:
+> ⚠️ **Importante:** copie o módulo para o servidor **antes** de executar os passos de configuração do sistema — os arquivos de setup estão dentro da pasta do módulo.
 
-### 1. Instalar fail2ban e sudo
+### Passo 1 — Instalar fail2ban e sudo
 
 ```bash
 apt-get update
 apt-get install -y fail2ban sudo
 ```
 
-> ⚠️ Em muitas imagens de VPS e containers o **sudo** e o **fail2ban** não estão instalados por padrão. Sem eles o módulo não consegue se comunicar com o fail2ban.
+> Em muitas imagens de VPS e containers o **sudo** e o **fail2ban** não estão instalados por padrão.
 
-### 2. Configurar o sudoers (permite www-data chamar fail2ban-client sem senha)
+### Passo 2 — Copiar o módulo para a pasta correta
+
+```bash
+cp -r amssoft_fail2ban /var/www/html/modules/addons/
+```
+
+### Passo 3 — Ajustar permissões da pasta do módulo
+
+```bash
+chown -R www-data:www-data /var/www/html/modules/addons/amssoft_fail2ban/
+find /var/www/html/modules/addons/amssoft_fail2ban/ -type d -exec chmod 755 {} \;
+find /var/www/html/modules/addons/amssoft_fail2ban/ -type f -exec chmod 644 {} \;
+```
+
+### Passo 4 — Configurar o sudoers (permite www-data chamar fail2ban-client sem senha)
 
 ```bash
 cp /var/www/html/modules/addons/amssoft_fail2ban/setup/sudoers/amssoft_fail2ban \
@@ -104,28 +118,37 @@ visudo -c   # valida a sintaxe antes de aplicar
 >
 > Verifique se `/etc/sudoers` contém a linha `@includedir /etc/sudoers.d` (presente por padrão no Debian/Ubuntu).
 
-### 3. Instalar o filtro fail2ban para WHMCS
+### Passo 5 — Instalar o filtro fail2ban para WHMCS
 
 ```bash
 cp /var/www/html/modules/addons/amssoft_fail2ban/setup/fail2ban/filter.d/whmcs.conf \
    /etc/fail2ban/filter.d/whmcs.conf
 ```
 
-### 4. Adicionar o jail WHMCS ao jail.local
+### Passo 6 — Configurar o jail.local
+
+Crie ou substitua o `/etc/fail2ban/jail.local` com o conteúdo abaixo.
+
+> ⚠️ Em Debian 12+ o `/var/log/auth.log` não existe (o sistema usa journald). O jail `[sshd]` padrão falha ao iniciar caso não seja desabilitado explicitamente.
 
 ```bash
-cat /var/www/html/modules/addons/amssoft_fail2ban/setup/fail2ban/jail.whmcs.conf \
-   >> /etc/fail2ban/jail.local
+cat > /etc/fail2ban/jail.local << 'EOF'
+# Desabilita o jail sshd padrão (sem /var/log/auth.log no Debian 12+/journald)
+[sshd]
+enabled = false
+
+# Jail para falhas de login no WHMCS
+[whmcs]
+enabled  = true
+filter   = whmcs
+logpath  = /var/log/whmcs_auth.log
+maxretry = 5
+findtime = 600
+bantime  = 3600
+EOF
 ```
 
-> Se o fail2ban não iniciar por causa do jail `[sshd]` (arquivo de log inexistente), adicione ao início do `jail.local`:
->
-> ```ini
-> [sshd]
-> enabled = false
-> ```
-
-### 5. Ajustar permissões do jail.local
+### Passo 7 — Ajustar permissões do jail.local
 
 O painel do WHMCS (processo `www-data`) precisa ter permissão de **escrita** no `jail.local` para criar, editar e remover jails pela interface gráfica.
 
@@ -134,9 +157,9 @@ chown root:www-data /etc/fail2ban/jail.local
 chmod 664 /etc/fail2ban/jail.local
 ```
 
-> ⚠️ Sem este passo, todas as operações de escrita (criar jail, editar parâmetros, remover jail) falharão silenciosamente com a mensagem "Erro ao criar jail". O arquivo de log e o diretório `/etc/fail2ban/` **não** precisam ser alterados.
+> ⚠️ Sem este passo, todas as operações de escrita (criar jail, editar parâmetros, remover jail) falharão com a mensagem "Erro ao criar jail".
 
-### 6. Criar o arquivo de log do WHMCS
+### Passo 8 — Criar o arquivo de log do WHMCS
 
 ```bash
 touch /var/log/whmcs_auth.log
@@ -144,11 +167,12 @@ chown www-data:www-data /var/log/whmcs_auth.log
 chmod 664 /var/log/whmcs_auth.log
 ```
 
-### 6. Reiniciar o fail2ban
+### Passo 9 — Reiniciar o fail2ban e verificar
 
 ```bash
 systemctl restart fail2ban
 systemctl status fail2ban
+fail2ban-client status whmcs   # deve mostrar o jail ativo com 0 IPs banidos
 ```
 
 ---
@@ -164,27 +188,13 @@ chmod 0440 /etc/sudoers.d/amssoft_fail2ban
 visudo -c
 ```
 
-> O módulo exibe um aviso amarelo no topo de todas as páginas caso detecte que o sudoers está desatualizado.
+> O módulo exibe um aviso no topo de todas as páginas caso o sudo não esteja funcionando corretamente.
 
 ---
 
-## Instalação do Módulo no WHMCS
+## Ativar o módulo no painel do WHMCS
 
-### 1. Copiar o módulo para a pasta correta
-
-```bash
-cp -r amssoft_fail2ban /var/www/html/modules/addons/
-```
-
-### 2. Ajustar permissões da pasta
-
-```bash
-chown -R www-data:www-data /var/www/html/modules/addons/amssoft_fail2ban/
-find /var/www/html/modules/addons/amssoft_fail2ban/ -type d -exec chmod 755 {} \;
-find /var/www/html/modules/addons/amssoft_fail2ban/ -type f -exec chmod 644 {} \;
-```
-
-### 3. Ativar o módulo no painel do WHMCS
+### Passo 10 — Ativar e configurar
 
 - Acesse **Admin → Configurações → Módulos Addon**
 - Localize **AMS SOFT Fail2Ban Manager** e clique em **Ativar**
@@ -198,7 +208,7 @@ find /var/www/html/modules/addons/amssoft_fail2ban/ -type f -exec chmod 644 {} \
 | Caminho do log WHMCS | `/var/log/whmcs_auth.log` |
 | Ativar hooks de login | Sim (recomendado) |
 
-### 4. Acessar o módulo
+### Passo 11 — Acessar o módulo
 
 ```
 https://seu-whmcs.com/admin/addonmodules.php?module=amssoft_fail2ban
