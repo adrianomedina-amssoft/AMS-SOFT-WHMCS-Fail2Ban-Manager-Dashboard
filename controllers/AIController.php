@@ -231,20 +231,42 @@ class AIController
                         && !file_exists("/etc/fail2ban/filter.d/{$filterName}.conf");
 
                     if ($filterMissing) {
+                        // Auto-fix: substituir pelo melhor filter disponível em filter.d/
+                        // e retentar — sem precisar de ação manual do admin.
+                        $bestFilter = $this->findBestFilter($jail);
+                        if ($bestFilter !== '') {
+                            $jailConfig->saveJail($jail, ['filter' => $bestFilter]);
+                            $jailConfig->reloadAll();
+
+                            $activeAfterFix = [];
+                            try { $activeAfterFix = $client->getJails(); } catch (\Throwable $e) {}
+
+                            if (in_array($jail, $activeAfterFix, true)) {
+                                $ok3 = $engine->approveSuggestion($id, $adminId);
+                                if ($ok3) {
+                                    return json_encode(['success' => true,
+                                        'message' => "IP {$ip} banido. Filter do jail corrigido automaticamente para '{$bestFilter}'."]);
+                                }
+                            }
+                        }
+
+                        // Auto-fix falhou — oferecer edição manual pelo painel
                         return json_encode([
-                            'success'     => false,
+                            'success'        => false,
                             'jail_cfg_error' => true,
-                            'jail_name'   => $jail,
-                            'error'       => "O filter '{$filterName}' não existe em filter.d/. Edite o jail e escolha um filter válido.",
+                            'jail_name'      => $jail,
+                            'error'          => "O filter '{$filterName}' não existe. "
+                                             . ($bestFilter ? "Tentativa automática com '{$bestFilter}' também falhou. " : '')
+                                             . "Edite o jail e escolha um filter válido.",
                         ]);
                     }
 
-                    // Causa desconhecida — oferecer edição do jail pelo painel
+                    // Causa desconhecida — oferecer edição do jail pelo painel (último recurso)
                     return json_encode([
                         'success'        => false,
                         'jail_cfg_error' => true,
                         'jail_name'      => $jail,
-                        'error'          => "fail2ban não conseguiu ativar o jail '{$jail}'. Verifique a configuração do jail.",
+                        'error'          => "Não foi possível ativar o jail '{$jail}'. Verifique a configuração.",
                     ]);
                 }
 
@@ -467,5 +489,45 @@ class AIController
             }
         }
         return $suggestions;
+    }
+
+    // -----------------------------------------------------------------------
+    // Helpers
+    // -----------------------------------------------------------------------
+
+    /**
+     * Encontra o melhor filter disponível em filter.d/ para um jail pelo nome.
+     * Estratégia: maior sobreposição de tokens (separados por - ou _),
+     * fallback para apache-auth, fallback para primeiro alfabético.
+     */
+    private function findBestFilter(string $jailName, string $filterDir = '/etc/fail2ban/filter.d/'): string
+    {
+        $available = [];
+        foreach (glob($filterDir . '*.conf') ?: [] as $f) {
+            $available[] = basename($f, '.conf');
+        }
+        if (empty($available)) {
+            return '';
+        }
+
+        $jailTokens = preg_split('/[-_]/', strtolower($jailName), -1, PREG_SPLIT_NO_EMPTY);
+        $bestFilter = '';
+        $bestScore  = 0;
+
+        foreach ($available as $filter) {
+            $filterTokens = preg_split('/[-_]/', strtolower($filter), -1, PREG_SPLIT_NO_EMPTY);
+            $score = count(array_intersect($jailTokens, $filterTokens));
+            if ($score > $bestScore) {
+                $bestScore  = $score;
+                $bestFilter = $filter;
+            }
+        }
+
+        // Sem sobreposição: preferir apache-auth (relevante para WHMCS) ou primeiro da lista
+        if ($bestScore === 0) {
+            $bestFilter = in_array('apache-auth', $available, true) ? 'apache-auth' : $available[0];
+        }
+
+        return $bestFilter;
     }
 }
