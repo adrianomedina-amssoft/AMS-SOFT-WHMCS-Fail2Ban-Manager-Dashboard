@@ -23,6 +23,11 @@ class AutoBanEngine
     /**
      * Roda análise em todos os logs configurados no módulo.
      * Retorna array com resultados de cada log processado.
+     *
+     * Duas camadas de proteção contra trabalho redundante:
+     *   1. Watermark por arquivo: lê apenas bytes novos desde a última análise.
+     *   2. Deduplicação de IP: ignora IPs já conhecidos (pending/approved/auto_executed
+     *      nos últimos 7 dias) — chamada à IA só ocorre para conteúdo genuinamente novo.
      */
     public function runAnalysis(): array
     {
@@ -33,9 +38,10 @@ class AutoBanEngine
         // Modo automático exige confirmação explícita do admin (segurança dupla)
         if (in_array($mode, ['auto', 'threshold'], true)) {
             if (Database::getConfig('ai_confirmed_auto', '0') !== '1') {
-                return []; // Bloqueia execução até que o admin confirme na tela de configurações
+                return [];
             }
         }
+
         $viewer        = new LogViewer();
         $availableLogs = $viewer->getAvailableLogs();
 
@@ -43,48 +49,100 @@ class AutoBanEngine
             return [];
         }
 
+        // Carrega IPs já conhecidos ANTES de iterar os logs — evita chamadas
+        // desnecessárias à API para IPs que já estão na fila ou foram banidos.
+        $knownIPs = Database::getKnownIPs(7);
+
         $results = [];
+
         foreach ($availableLogs as $logInfo) {
-            $lines       = $viewer->readLines($logInfo['path'], 200);
+            $path = $logInfo['path'];
+
+            if (!is_readable($path)) {
+                continue;
+            }
+
+            $currentSize = @filesize($path);
+            if ($currentSize === false) {
+                continue;
+            }
+
+            // ── Watermark ────────────────────────────────────────────────────
+            $offsetKey    = 'ai_log_offset.' . md5($path);
+            $storedOffset = (int)Database::getConfig($offsetKey, 0);
+
+            if ($currentSize === $storedOffset) {
+                // Nenhum conteúdo novo — pular chamada à IA
+                continue;
+            }
+
+            if ($currentSize < $storedOffset) {
+                // Arquivo foi rotacionado/truncado — ler do início
+                $storedOffset = 0;
+            }
+
+            $lines = $this->readNewLines($path, $storedOffset, 200);
+
+            // Atualiza o watermark independentemente de haver sugestões
+            Database::setConfig($offsetKey, (string)$currentSize);
+
+            if (empty($lines)) {
+                continue;
+            }
+
+            // ── Chamada à IA ─────────────────────────────────────────────────
             $suggestions = $this->analyzer->analyze($lines);
 
             foreach ($suggestions as $suggestion) {
-                // Ignorar IPs na whitelist
-                if (in_array($suggestion['ip'], $whitelist, true)) {
+                $ip = $suggestion['ip'] ?? '';
+
+                // ── Filtros pré-salvamento ────────────────────────────────────
+
+                // 1. Whitelist (filtrado ANTES da API — zero tokens gastos)
+                if (in_array($ip, $whitelist, true)) {
                     continue;
                 }
 
-                // Ignorar abaixo do limiar de confiança
+                // 2. IP já conhecido (pending/approved/auto_executed últimos 7 dias)
+                if (in_array($ip, $knownIPs, true)) {
+                    continue;
+                }
+
+                // 3. Confiança mínima
                 if ($suggestion['confidence'] < $minConfidence) {
                     continue;
                 }
 
-                // Ignorar sugestões de ação != 'ban'
+                // 4. Apenas sugestões de ban
                 if (($suggestion['action'] ?? 'ban') !== 'ban') {
                     continue;
                 }
+
+                // Adiciona ao knownIPs em memória para evitar duplicatas dentro
+                // do mesmo ciclo (múltiplos logs com o mesmo IP)
+                $knownIPs[] = $ip;
 
                 switch ($mode) {
                     case 'auto':
                         $id = $this->saveSuggestion($suggestion, 'auto_executed');
                         $this->executeBan($suggestion);
-                        $results[] = ['id' => $id, 'ip' => $suggestion['ip'], 'mode' => 'auto'];
+                        $results[] = ['id' => $id, 'ip' => $ip, 'mode' => 'auto'];
                         break;
 
                     case 'threshold':
                         $id = $this->saveSuggestion($suggestion, 'pending');
-                        if ($this->checkThresholdBySeverity($suggestion['ip'], $suggestion['severity'])) {
+                        if ($this->checkThresholdBySeverity($ip, $suggestion['severity'])) {
                             Database::updateSuggestionStatus($id, 'auto_executed');
                             $this->executeBan($suggestion);
-                            $results[] = ['id' => $id, 'ip' => $suggestion['ip'], 'mode' => 'threshold_triggered'];
+                            $results[] = ['id' => $id, 'ip' => $ip, 'mode' => 'threshold_triggered'];
                         } else {
-                            $results[] = ['id' => $id, 'ip' => $suggestion['ip'], 'mode' => 'threshold_waiting'];
+                            $results[] = ['id' => $id, 'ip' => $ip, 'mode' => 'threshold_waiting'];
                         }
                         break;
 
                     default: // suggestion
                         $id = $this->saveSuggestion($suggestion, 'pending');
-                        $results[] = ['id' => $id, 'ip' => $suggestion['ip'], 'mode' => 'suggestion'];
+                        $results[] = ['id' => $id, 'ip' => $ip, 'mode' => 'suggestion'];
                         break;
                 }
             }
@@ -193,6 +251,45 @@ class AutoBanEngine
     // -----------------------------------------------------------------------
     // Privados
     // -----------------------------------------------------------------------
+
+    /**
+     * Lê apenas as linhas novas de um arquivo a partir de $offset bytes.
+     * Retorna no máximo $maxLines linhas (as mais recentes do trecho novo).
+     *
+     * Seguro contra log rotation: se o arquivo tiver sido truncado o caller
+     * já terá resetado o offset para 0 antes de chamar este método.
+     */
+    private function readNewLines(string $path, int $offset, int $maxLines = 200): array
+    {
+        $viewer = new LogViewer();
+        if (!$viewer->isValidPath($path) || !is_readable($path)) {
+            return [];
+        }
+
+        $fp = @fopen($path, 'r');
+        if (!$fp) {
+            return [];
+        }
+
+        if ($offset > 0) {
+            fseek($fp, $offset);
+        }
+
+        $content = stream_get_contents($fp);
+        fclose($fp);
+
+        if ($content === false || trim($content) === '') {
+            return [];
+        }
+
+        $lines = array_values(array_filter(
+            array_map('rtrim', explode("\n", $content)),
+            fn ($l) => $l !== ''
+        ));
+
+        // Retorna apenas as últimas $maxLines linhas do trecho novo
+        return array_slice($lines, -$maxLines);
+    }
 
     /** Retorna a whitelist de IPs como array. */
     private function getWhitelist(): array

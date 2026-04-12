@@ -198,6 +198,13 @@ class Database
             'bantime'        => (int)($data['bantime']  ?? 3600),
             'status'         => $data['status']         ?? 'pending',
             'created_at'     => Capsule::raw('NOW()'),
+            // v3: filtro fail2ban gerado pela IA
+            'filter_name'    => isset($data['filter_name']) && $data['filter_name'] !== ''
+                                    ? substr(preg_replace('/[^a-z0-9-]/', '', strtolower($data['filter_name'])), 0, 64)
+                                    : null,
+            'failregex'      => isset($data['failregex']) && $data['failregex'] !== ''
+                                    ? substr($data['failregex'], 0, 1000)
+                                    : null,
         ]);
     }
 
@@ -210,6 +217,27 @@ class Database
             ->get()
             ->map(fn ($r) => (array)$r)
             ->all();
+    }
+
+    /** Retorna sugestões 'pending' paginadas. */
+    public static function getPendingSuggestionsPaged(int $page = 1, int $perPage = 10): array
+    {
+        $q = Capsule::table('mod_amssoft_fail2ban_ai_suggestions')
+            ->where('status', 'pending')
+            ->orderBy('created_at', 'desc');
+
+        $total  = $q->count();
+        $pages  = $total > 0 ? (int)ceil($total / $perPage) : 1;
+        $page   = max(1, min($page, $pages));
+        $offset = ($page - 1) * $perPage;
+        $data   = $q->offset($offset)->limit($perPage)->get()->map(fn ($r) => (array)$r)->all();
+
+        return [
+            'data'  => $data,
+            'total' => $total,
+            'pages' => $pages,
+            'page'  => $page,
+        ];
     }
 
     /** Retorna sugestões filtradas (para histórico). */
@@ -232,6 +260,39 @@ class Database
         }
 
         return $q->get()->map(fn ($r) => (array)$r)->all();
+    }
+
+    /** Retorna sugestões filtradas paginadas (para histórico). */
+    public static function getAllSuggestionsPaged(array $filters = [], int $page = 1, int $perPage = 10): array
+    {
+        $q = Capsule::table('mod_amssoft_fail2ban_ai_suggestions')
+            ->orderBy('created_at', 'desc');
+
+        if (!empty($filters['status'])) {
+            $q->where('status', $filters['status']);
+        }
+        if (!empty($filters['severity'])) {
+            $q->where('severity', $filters['severity']);
+        }
+        if (!empty($filters['date_from'])) {
+            $q->where('created_at', '>=', $filters['date_from'] . ' 00:00:00');
+        }
+        if (!empty($filters['date_to'])) {
+            $q->where('created_at', '<=', $filters['date_to'] . ' 23:59:59');
+        }
+
+        $total  = $q->count();
+        $pages  = $total > 0 ? (int)ceil($total / $perPage) : 1;
+        $page   = max(1, min($page, $pages));
+        $offset = ($page - 1) * $perPage;
+        $data   = $q->offset($offset)->limit($perPage)->get()->map(fn ($r) => (array)$r)->all();
+
+        return [
+            'data'  => $data,
+            'total' => $total,
+            'pages' => $pages,
+            'page'  => $page,
+        ];
     }
 
     /** Conta sugestões pendentes (para o card do dashboard). */
@@ -306,6 +367,26 @@ class Database
     }
 
     /**
+     * Retorna IPs que já possuem sugestão recente com status pending, approved
+     * ou auto_executed (últimos $days dias). Usado para deduplicação antes de
+     * chamar a API de IA — evita re-enviar o mesmo IP repetidamente.
+     *
+     * IPs com status 'rejected' são intencionalmente omitidos: se o admin
+     * rejeitou e o IP continua atacando, ele deve ser re-analisado.
+     */
+    public static function getKnownIPs(int $days = 7): array
+    {
+        $since = date('Y-m-d H:i:s', time() - $days * 86400);
+        return Capsule::table('mod_amssoft_fail2ban_ai_suggestions')
+            ->whereIn('status', ['pending', 'approved', 'auto_executed'])
+            ->where('created_at', '>=', $since)
+            ->distinct()
+            ->pluck('ip')
+            ->map(fn ($ip) => (string)$ip)
+            ->toArray();
+    }
+
+    /**
      * Conta detecções de um IP nas últimas X minutos (para modo threshold).
      * Considera sugestões com status pending ou auto_executed.
      */
@@ -323,6 +404,34 @@ class Database
     // -----------------------------------------------------------------------
     // Cross-reference de IPs banidos
     // -----------------------------------------------------------------------
+
+    /**
+     * Marca o filtro fail2ban como criado para a sugestão.
+     * Não altera status nem resolved_at — a sugestão continua pending
+     * para que o admin ainda possa usar "Banir IP" independentemente.
+     */
+    public static function updateFilterCreated(int $id): bool
+    {
+        $affected = Capsule::table('mod_amssoft_fail2ban_ai_suggestions')
+            ->where('id', $id)
+            ->update(['filter_created_at' => Capsule::raw('NOW()')]);
+        return $affected > 0;
+    }
+
+    /**
+     * Salva o filter_name e failregex gerados pela IA on-demand em uma sugestão
+     * que originalmente não tinha esses campos (sugestão antiga ou IA não gerou).
+     */
+    public static function updateSuggestionFilter(int $id, string $filterName, string $failregex): bool
+    {
+        $affected = Capsule::table('mod_amssoft_fail2ban_ai_suggestions')
+            ->where('id', $id)
+            ->update([
+                'filter_name' => substr(preg_replace('/[^a-z0-9-]/', '', strtolower($filterName)), 0, 64),
+                'failregex'   => substr($failregex, 0, 1000),
+            ]);
+        return $affected > 0;
+    }
 
     /** Returns ban-time cross-reference for a list of IPs from the DB log. */
     public static function getBanInfoForIps(array $ips): array

@@ -7,6 +7,7 @@ use AMS\Fail2Ban\Router;
 use AMS\Fail2Ban\AIAnalyzer;
 use AMS\Fail2Ban\AutoBanEngine;
 use AMS\Fail2Ban\LogViewer;
+use AMS\Fail2Ban\FilterManager;
 
 class AIController
 {
@@ -37,23 +38,31 @@ class AIController
 
     private function showSuggestions(): string
     {
-        $pending = Database::getPendingSuggestions();
+        // Pending (paginado)
+        $pendingPage   = max(1, (int)($_GET['pending_page'] ?? 1));
+        $pendingResult = Database::getPendingSuggestionsPaged($pendingPage, 10);
+        $pending       = $this->decodeSuggestions($pendingResult['data']);
 
-        // Decodificar evidence JSON para cada sugestão
-        $pending = $this->decodeSuggestions($pending);
-
-        // Filtros para histórico
+        // Histórico (filtros + paginado)
         $filters = [
             'status'    => $_GET['filter_status']   ?? '',
             'severity'  => $_GET['filter_severity'] ?? '',
             'date_from' => $_GET['date_from']        ?? '',
             'date_to'   => $_GET['date_to']          ?? '',
         ];
-        $history = $this->decodeSuggestions(Database::getAllSuggestions($filters));
+        $historyPage   = max(1, (int)($_GET['history_page'] ?? 1));
+        $historyResult = Database::getAllSuggestionsPaged($filters, $historyPage, 10);
+        $history       = $this->decodeSuggestions($historyResult['data']);
 
         return $this->router->render('ai_suggestions', [
             'pending'       => $pending,
+            'pending_total' => $pendingResult['total'],
+            'pending_pages' => $pendingResult['pages'],
+            'pending_page'  => $pendingResult['page'],
             'history'       => $history,
+            'history_total' => $historyResult['total'],
+            'history_pages' => $historyResult['pages'],
+            'history_page'  => $historyResult['page'],
             'filters'       => $filters,
         ]);
     }
@@ -137,6 +146,9 @@ class AIController
 
             case 'save_settings':
                 return $this->ajaxSaveSettings($post);
+
+            case 'create_filter':
+                return $this->ajaxCreateFilter($post);
 
             default:
                 return json_encode(['success' => false, 'error' => 'Ação desconhecida.']);
@@ -223,6 +235,135 @@ class AIController
         } catch (\Throwable $e) {}
 
         return json_encode(['success' => false, 'error' => "Falha ao banir {$ip}. Verifique se o fail2ban está online."]);
+    }
+
+    // -----------------------------------------------------------------------
+    // AJAX: criar filtro fail2ban a partir de sugestão da IA
+    // -----------------------------------------------------------------------
+
+    /**
+     * Cria filtro em /etc/fail2ban/filter.d/ e jail em jail.local para
+     * bloquear automaticamente o padrão de ataque detectado pela IA.
+     *
+     * Cenário A: sugestão já tem failregex → cria diretamente.
+     * Cenário B: sugestão sem failregex mas com evidence → chama IA para gerar.
+     *
+     * Completamente independente do fluxo de aprovação de IP.
+     */
+    private function ajaxCreateFilter(array $post): string
+    {
+        $id = (int)($post['id'] ?? 0);
+        if ($id <= 0) {
+            return json_encode(['success' => false, 'error' => 'ID inválido.']);
+        }
+
+        $suggestion = Database::getSuggestion($id);
+        if (!$suggestion) {
+            return json_encode(['success' => false, 'error' => 'Sugestão não encontrada.']);
+        }
+
+        $failregex   = $suggestion['failregex']   ?? '';
+        $filterName  = $suggestion['filter_name'] ?? '';
+        $generatedByAi = false;
+
+        // Cenário B: sem failregex — tentar gerar on-demand via IA a partir da evidence
+        if (empty($failregex)) {
+            $evidenceRaw = $suggestion['evidence'] ?? null;
+            $evidenceLines = [];
+            if (!empty($evidenceRaw) && is_string($evidenceRaw)) {
+                $decoded = json_decode($evidenceRaw, true);
+                $evidenceLines = is_array($decoded) ? $decoded : [$evidenceRaw];
+            }
+
+            if (empty($evidenceLines)) {
+                return json_encode([
+                    'success' => false,
+                    'error'   => 'Esta sugestão não possui evidências de log para gerar um filtro.',
+                ]);
+            }
+
+            $apiKey = $this->decryptApiKey();
+            if (empty($apiKey)) {
+                return json_encode([
+                    'success' => false,
+                    'error'   => 'Chave API Anthropic não configurada. Configure em Configurações da IA.',
+                ]);
+            }
+
+            $analyzer = new AIAnalyzer($apiKey);
+            $generated = $analyzer->generateFilterRegex($evidenceLines);
+
+            if ($generated === null || empty($generated['failregex']) || empty($generated['filter_name'])) {
+                return json_encode([
+                    'success' => false,
+                    'error'   => 'Não foi possível gerar um filtro para este padrão de ataque. Tente novamente ou crie manualmente.',
+                ]);
+            }
+
+            $failregex  = $generated['failregex'];
+            $filterName = $generated['filter_name'];
+            $generatedByAi = true;
+
+            // Persistir para uso futuro e exibição na UI
+            Database::updateSuggestionFilter($id, $filterName, $failregex);
+        }
+
+        if (empty($filterName) || empty($failregex)) {
+            return json_encode(['success' => false, 'error' => 'Nome do filtro ou failregex ausentes.']);
+        }
+
+        // Criar filtro e jail via FilterManager
+        $filterManager  = $this->router->makeFilterManager();
+        $jailName       = 'amsfb-' . $filterName;
+        $filterAlreadyExisted = $filterManager->filterExists($filterName);
+        $jailAlreadyExisted   = $filterManager->jailExists($jailName);
+
+        if (!$filterAlreadyExisted) {
+            $ok = $filterManager->createFilter($filterName, $failregex, $suggestion['threat'] ?? '');
+            if (!$ok) {
+                return json_encode([
+                    'success' => false,
+                    'error'   => "Falha ao criar arquivo de filtro 'amsfb-{$filterName}.conf'. "
+                               . 'Verifique as permissões em /etc/fail2ban/filter.d/ e as regras do sudoers.',
+                ]);
+            }
+        }
+
+        if (!$jailAlreadyExisted) {
+            $ok = $filterManager->createJailForFilter($jailName, $filterName, [
+                'bantime' => (int)($suggestion['bantime'] ?? 86400),
+                'logpath' => $this->detectLogPath($failregex, $suggestion['evidence'] ?? ''),
+            ]);
+            if (!$ok) {
+                return json_encode([
+                    'success' => false,
+                    'error'   => "Falha ao criar jail '{$jailName}' em jail.local.",
+                ]);
+            }
+        }
+
+        // Recarregar jail (não-fatal)
+        if (!$filterAlreadyExisted || !$jailAlreadyExisted) {
+            $filterManager->reloadJail($jailName);
+        }
+
+        Database::updateFilterCreated($id);
+
+        $alreadyExisted = $filterAlreadyExisted && $jailAlreadyExisted;
+        $message = $alreadyExisted
+            ? "Filtro 'amsfb-{$filterName}' já existia e continua ativo."
+            : "Filtro 'amsfb-{$filterName}' e jail '{$jailName}' criados com sucesso."
+              . ($generatedByAi ? ' (failregex gerado pela IA)' : '');
+
+        return json_encode([
+            'success'          => true,
+            'message'          => $message,
+            'filter_name'      => $filterName,
+            'jail_name'        => $jailName,
+            'already_existed'  => $alreadyExisted,
+            'generated_by_ai'  => $generatedByAi,
+            'failregex'        => $failregex,
+        ]);
     }
 
     // -----------------------------------------------------------------------
@@ -321,8 +462,67 @@ class AIController
     }
 
     // -----------------------------------------------------------------------
-    // Helpers
+    // Helpers privados
     // -----------------------------------------------------------------------
+
+    /**
+     * Detecta o logpath mais adequado com base no failregex e nas evidências.
+     * Analisa palavras-chave para identificar o tipo de log.
+     */
+    private function detectLogPath(string $failregex, string $evidenceJson): string
+    {
+        $evidenceLines = [];
+        if (!empty($evidenceJson) && is_string($evidenceJson)) {
+            $decoded = json_decode($evidenceJson, true);
+            $evidenceLines = is_array($decoded) ? $decoded : [$evidenceJson];
+        }
+
+        $allText = strtolower($failregex . ' ' . implode(' ', $evidenceLines));
+
+        // WHMCS auth log
+        if (strpos($allText, 'whmcs') !== false
+            || strpos($allText, 'login failed') !== false
+        ) {
+            if (file_exists('/var/log/whmcs_auth.log')) {
+                return '/var/log/whmcs_auth.log';
+            }
+        }
+
+        // Apache error log
+        if (strpos($allText, 'ah0') !== false
+            || strpos($allText, 'authz') !== false
+            || strpos($allText, 'client denied') !== false
+        ) {
+            if (file_exists('/var/log/apache2/error.log')) {
+                return '/var/log/apache2/error.log';
+            }
+        }
+
+        // SSH / sistema
+        if (strpos($allText, 'sshd') !== false
+            || strpos($allText, 'invalid user') !== false
+            || strpos($allText, 'failed password') !== false
+        ) {
+            if (file_exists('/var/log/auth.log')) {
+                return '/var/log/auth.log';
+            }
+        }
+
+        // Fallback: primeiro log existente em ordem de relevância
+        $fallbacks = [
+            '/var/log/whmcs_auth.log',
+            '/var/log/apache2/error.log',
+            '/var/log/apache2/access.log',
+            '/var/log/auth.log',
+        ];
+        foreach ($fallbacks as $path) {
+            if (file_exists($path)) {
+                return $path;
+            }
+        }
+
+        return '/var/log/apache2/error.log';
+    }
 
     /** Salva as configurações da IA no banco. */
     private function persistSettings(array $post): void

@@ -22,7 +22,16 @@ Analise as seguintes linhas de log do Apache/fail2ban e identifique ameaças.
 Para cada ameaça encontrada, retorne APENAS um JSON array com os campos:
 ip, threat, severity (low|medium|high|critical), confidence (0-100),
 evidence (array de linhas relevantes), action (ban|monitor|whitelist),
-jail, bantime (segundos), reason (em português), suggested_rule (jail.local entry).
+jail, bantime (segundos), reason (em português), suggested_rule (jail.local entry),
+filter_name (string curto [a-z0-9-] max 50 chars, ex: "whmcs-wp-probe" -- nome unico para o tipo de ataque),
+failregex (regex fail2ban usando <HOST> no lugar do IP, compativel com Python re module,
+           ex: "^.* \\[client <HOST>:\\d+\\] AH01630:.*wp-.*\\.php").
+
+Regras para filter_name e failregex:
+- filter_name: apenas letras minusculas, numeros e hifens, descritivo do padrao de ataque
+- failregex: use <HOST> exatamente onde o IP aparece no log
+- O regex deve capturar o PADRAO do ataque, nao apenas o IP especifico
+- Evite .* excessivo para minimizar falsos positivos
 
 Não inclua texto fora do JSON.
 
@@ -167,6 +176,91 @@ LOGS:
     }
 
     /**
+     * Gera failregex e filter_name a partir de linhas de evidência (log).
+     * Usa a API com prompt focado — sem análise completa de logs.
+     * Retorna ['filter_name' => '...', 'failregex' => '...'] ou null se falhar.
+     */
+    public function generateFilterRegex(array $evidenceLines): ?array
+    {
+        if (empty($evidenceLines)) {
+            return null;
+        }
+
+        $logsText = implode("\n", array_slice($evidenceLines, 0, 20));
+
+        $prompt = 'Analise as linhas de log abaixo e gere um filtro fail2ban para bloquear'
+                . " automaticamente este padrao de ataque.\n"
+                . "Retorne APENAS um JSON com exatamente dois campos:\n"
+                . '{"filter_name": "nome-curto-apenas-letras-minusculas-numeros-e-hifens",'
+                . ' "failregex": "regex_fail2ban_usando_HOST_no_lugar_do_ip"}'
+                . "\n\nRegras:\n"
+                . "- filter_name: apenas [a-z0-9-], maximo 50 caracteres, descritivo do ataque\n"
+                . "- failregex: compativel com Python re module (fail2ban), use <HOST> onde o IP aparece\n"
+                . "- O regex deve capturar o PADRAO do ataque, nao apenas o IP especifico\n"
+                . "- Evite .* excessivo para minimizar falsos positivos\n"
+                . "- Nao inclua texto fora do JSON\n\n"
+                . "LOGS:\n"
+                . $logsText;
+
+        $response = $this->callApi($prompt);
+        if ($response === null) {
+            return null;
+        }
+
+        // Extrair JSON da resposta — Claude frequentemente envolve em ```json ... ```
+        $data = null;
+
+        // 1. Tentar extrair de bloco de código markdown (```json { } ```)
+        if (preg_match('/```(?:json)?\s*(\{[\s\S]*?\})\s*```/i', $response, $m)) {
+            $data = json_decode($m[1], true);
+        }
+
+        // 2. Extração balanceada de chaves — suporta failregex com {4} {2} etc.
+        if (!is_array($data)) {
+            $start = strpos($response, '{');
+            if ($start !== false) {
+                $depth = 0;
+                $end   = $start;
+                $len   = strlen($response);
+                for ($i = $start; $i < $len; $i++) {
+                    if ($response[$i] === '{') {
+                        $depth++;
+                    } elseif ($response[$i] === '}') {
+                        $depth--;
+                        if ($depth === 0) {
+                            $end = $i;
+                            break;
+                        }
+                    }
+                }
+                $data = json_decode(substr($response, $start, $end - $start + 1), true);
+            }
+        }
+
+        // 3. Decode direto (fallback)
+        if (!is_array($data)) {
+            $data = json_decode($response, true);
+        }
+
+        if (!is_array($data)
+            || empty($data['failregex'])
+            || empty($data['filter_name'])
+        ) {
+            return null;
+        }
+
+        $failregex = substr((string)$data['failregex'], 0, 1000);
+        // Não usar strip_tags() — removeria <HOST> que é a macro obrigatória do fail2ban
+        // Remover apenas caracteres de controle e nulos
+        $failregex = preg_replace('/[\x00-\x08\x0B\x0C\x0E-\x1F\x7F]/', '', $failregex);
+
+        return [
+            'filter_name' => $this->sanitizeFilterName($data['filter_name']),
+            'failregex'   => $failregex,
+        ];
+    }
+
+    /**
      * Faz parse da resposta JSON do Claude.
      * O Claude deve retornar apenas um JSON array — extrai e valida.
      */
@@ -239,9 +333,26 @@ LOGS:
                 'bantime'        => $bantime,
                 'reason'         => substr(strip_tags($item['reason'] ?? ''), 0, 1000),
                 'suggested_rule' => substr(strip_tags($item['suggested_rule'] ?? ''), 0, 4000),
+                'filter_name'    => $this->sanitizeFilterName($item['filter_name'] ?? ''),
+                // Não usar strip_tags() — removeria <HOST> (macro obrigatória do fail2ban)
+                'failregex'      => substr(preg_replace('/[\x00-\x08\x0B\x0C\x0E-\x1F\x7F]/', '', $item['failregex'] ?? ''), 0, 1000),
             ];
         }
 
         return $valid;
+    }
+
+    /**
+     * Sanitiza o nome do filtro: apenas [a-z0-9-], max 50 chars.
+     * Duplicado propositalmente do FilterManager para evitar acoplamento
+     * entre a camada de análise e a camada de filesystem.
+     */
+    private function sanitizeFilterName(string $name): string
+    {
+        $name = strtolower($name);
+        $name = preg_replace('/[^a-z0-9-]/', '', $name);
+        $name = preg_replace('/-+/', '-', $name);
+        $name = trim($name, '-');
+        return substr($name, 0, 50);
     }
 }

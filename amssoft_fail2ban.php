@@ -104,6 +104,10 @@ function amssoft_fail2ban_activate(): array
                 $t->timestamp('created_at')->useCurrent()->index();
                 $t->timestamp('resolved_at')->nullable();
                 $t->unsignedInteger('resolved_by')->nullable();
+                // v3: filtro fail2ban gerado pela IA
+                $t->string('filter_name', 64)->nullable();
+                $t->text('failregex')->nullable();
+                $t->timestamp('filter_created_at')->nullable();
             });
         }
 
@@ -169,6 +173,28 @@ function amssoft_fail2ban_migrate_v2(): void
     }
 }
 
+/**
+ * Migração automática v3: adiciona colunas de filtro fail2ban à tabela de sugestões.
+ * Idempotente: usa hasColumn() para verificar antes de adicionar.
+ */
+function amssoft_fail2ban_migrate_v3(): void
+{
+    if (!Capsule::schema()->hasTable('mod_amssoft_fail2ban_ai_suggestions')) {
+        return;
+    }
+    Capsule::schema()->table('mod_amssoft_fail2ban_ai_suggestions', function ($t) {
+        if (!Capsule::schema()->hasColumn('mod_amssoft_fail2ban_ai_suggestions', 'filter_name')) {
+            $t->string('filter_name', 64)->nullable()->after('resolved_by');
+        }
+        if (!Capsule::schema()->hasColumn('mod_amssoft_fail2ban_ai_suggestions', 'failregex')) {
+            $t->text('failregex')->nullable()->after('filter_name');
+        }
+        if (!Capsule::schema()->hasColumn('mod_amssoft_fail2ban_ai_suggestions', 'filter_created_at')) {
+            $t->timestamp('filter_created_at')->nullable()->after('failregex');
+        }
+    });
+}
+
 function amssoft_fail2ban_output(array $vars): void
 {
     // Migração automática: garante que tabelas do v2 existam mesmo em instalações antigas
@@ -176,6 +202,13 @@ function amssoft_fail2ban_output(array $vars): void
         amssoft_fail2ban_migrate_v2();
     } catch (\Exception $e) {
         // Silencioso — não interrompe o carregamento do módulo
+    }
+
+    // Migração automática v3: colunas de filtro fail2ban
+    try {
+        amssoft_fail2ban_migrate_v3();
+    } catch (\Exception $e) {
+        // Silencioso
     }
 
     // Detect AJAX requests — clear any WHMCS output buffers, return JSON and exit.

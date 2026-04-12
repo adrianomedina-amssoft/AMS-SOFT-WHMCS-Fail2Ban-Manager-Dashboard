@@ -33,8 +33,8 @@ $statusLabels = [
 <div class="panel panel-default">
     <div class="panel-heading">
         <strong>&#9203; Aguardando Aprovação</strong>
-        <?php if (!empty($pending)): ?>
-        <span class="badge" style="background:#e74c3c; margin-left:8px;"><?= count($pending) ?></span>
+        <?php if ($pending_total > 0): ?>
+        <span class="badge" style="background:#e74c3c; margin-left:8px;"><?= (int)$pending_total ?></span>
         <?php endif; ?>
     </div>
 
@@ -50,6 +50,7 @@ $statusLabels = [
                     <th>Severidade</th>
                     <th>Confiança</th>
                     <th>Jail</th>
+                    <th>Filtro</th>
                     <th>Bantime</th>
                     <th>Data</th>
                     <th>Ações</th>
@@ -72,13 +73,24 @@ $statusLabels = [
                         </div>
                     </td>
                     <td><?= $e($s['jail'] ?: '-') ?></td>
+                    <td>
+                        <?php if (!empty($s['filter_name'])): ?>
+                            <code style="font-size:11px;"
+                                  title="failregex: <?= $e($s['failregex'] ?? '') ?>">amsfb-<?= $e($s['filter_name']) ?></code>
+                            <?php if (!empty($s['filter_created_at'])): ?>
+                                <br><small class="text-success">&#10003; criado</small>
+                            <?php endif; ?>
+                        <?php else: ?>
+                            <span class="text-muted">-</span>
+                        <?php endif; ?>
+                    </td>
                     <td><?= $s['bantime'] ? $e($s['bantime'] . 's') : '-' ?></td>
                     <td><?= $e($s['created_at'] ?? '-') ?></td>
                     <td class="amsfb-action-btns">
                         <button class="btn btn-xs btn-success amsfb-approve-btn"
                                 data-id="<?= (int)$s['id'] ?>"
-                                title="Aprovar e executar ban">
-                            &#10003; Aprovar
+                                title="Banir este IP imediatamente">
+                            &#128683; Banir IP
                         </button>
                         <button class="btn btn-xs btn-danger amsfb-reject-btn"
                                 data-id="<?= (int)$s['id'] ?>"
@@ -99,12 +111,58 @@ $statusLabels = [
                             &#128196; Regra
                         </button>
                         <?php endif; ?>
+                        <?php if (!empty($s['failregex']) || !empty($s['evidence'])): ?>
+                        <button class="btn btn-xs <?= !empty($s['filter_created_at']) ? 'btn-success' : 'btn-default' ?> amsfb-create-filter-btn"
+                                data-id="<?= (int)$s['id'] ?>"
+                                data-filter-name="<?= $e($s['filter_name'] ?? '') ?>"
+                                data-has-regex="<?= !empty($s['failregex']) ? '1' : '0' ?>"
+                                data-failregex="<?= $e($s['failregex'] ?? '') ?>"
+                                <?= !empty($s['filter_created_at']) ? 'disabled' : '' ?>
+                                title="<?= !empty($s['failregex']) ? 'Criar filtro fail2ban para este padrão de ataque' : 'A IA irá gerar um failregex a partir das evidências e criar o filtro' ?>">
+                            <?= !empty($s['filter_created_at']) ? '&#10003; Filtro criado' : '&#128736; Criar Filtro' ?>
+                        </button>
+                        <?php endif; ?>
                     </td>
                 </tr>
             <?php endforeach; ?>
             </tbody>
         </table>
     </div>
+
+    <!-- Paginação da fila pendente -->
+    <?php if ($pending_pages > 1): ?>
+    <div class="amsfb-pagination-wrap">
+        <nav aria-label="Paginação pendentes">
+            <ul class="pagination pagination-sm">
+                <?php if ($pending_page > 1): ?>
+                <li>
+                    <a href="<?= $e($modulelink . '&action=ai&pending_page=' . ($pending_page - 1)) ?>">&laquo;</a>
+                </li>
+                <?php endif; ?>
+
+                <?php
+                $pStart = max(1, $pending_page - 3);
+                $pEnd   = min($pending_pages, $pending_page + 3);
+                for ($p = $pStart; $p <= $pEnd; $p++):
+                ?>
+                <li class="<?= $p === $pending_page ? 'active' : '' ?>">
+                    <a href="<?= $e($modulelink . '&action=ai&pending_page=' . $p) ?>"><?= $p ?></a>
+                </li>
+                <?php endfor; ?>
+
+                <?php if ($pending_page < $pending_pages): ?>
+                <li>
+                    <a href="<?= $e($modulelink . '&action=ai&pending_page=' . ($pending_page + 1)) ?>">&raquo;</a>
+                </li>
+                <?php endif; ?>
+            </ul>
+        </nav>
+        <p class="text-muted amsfb-pagination-info">
+            <?= (int)$pending_total ?> sugestão(ões) pendente(s) &mdash; página <?= (int)$pending_page ?> de <?= (int)$pending_pages ?>
+        </p>
+    </div>
+    <?php endif; ?>
+
     <?php endif; ?>
 </div>
 
@@ -195,6 +253,56 @@ $statusLabels = [
             </tbody>
         </table>
     </div>
+
+    <!-- Paginação do histórico -->
+    <?php if ($history_pages > 1): ?>
+    <div class="amsfb-pagination-wrap">
+        <nav aria-label="Paginação histórico">
+            <ul class="pagination pagination-sm">
+                <?php if ($history_page > 1): ?>
+                <li>
+                    <a href="<?= $e($modulelink . '&action=ai&history_page=' . ($history_page - 1)
+                        . '&filter_status='   . urlencode($filters['status'])
+                        . '&filter_severity=' . urlencode($filters['severity'])
+                        . '&date_from='       . urlencode($filters['date_from'])
+                        . '&date_to='         . urlencode($filters['date_to'])
+                    ) ?>">&laquo;</a>
+                </li>
+                <?php endif; ?>
+
+                <?php
+                $hStart = max(1, $history_page - 3);
+                $hEnd   = min($history_pages, $history_page + 3);
+                for ($p = $hStart; $p <= $hEnd; $p++):
+                ?>
+                <li class="<?= $p === $history_page ? 'active' : '' ?>">
+                    <a href="<?= $e($modulelink . '&action=ai&history_page=' . $p
+                        . '&filter_status='   . urlencode($filters['status'])
+                        . '&filter_severity=' . urlencode($filters['severity'])
+                        . '&date_from='       . urlencode($filters['date_from'])
+                        . '&date_to='         . urlencode($filters['date_to'])
+                    ) ?>"><?= $p ?></a>
+                </li>
+                <?php endfor; ?>
+
+                <?php if ($history_page < $history_pages): ?>
+                <li>
+                    <a href="<?= $e($modulelink . '&action=ai&history_page=' . ($history_page + 1)
+                        . '&filter_status='   . urlencode($filters['status'])
+                        . '&filter_severity=' . urlencode($filters['severity'])
+                        . '&date_from='       . urlencode($filters['date_from'])
+                        . '&date_to='         . urlencode($filters['date_to'])
+                    ) ?>">&raquo;</a>
+                </li>
+                <?php endif; ?>
+            </ul>
+        </nav>
+        <p class="text-muted amsfb-pagination-info">
+            <?= (int)$history_total ?> registro(s) &mdash; página <?= (int)$history_page ?> de <?= (int)$history_pages ?>
+        </p>
+    </div>
+    <?php endif; ?>
+
     <?php endif; ?>
 </div>
 
@@ -285,6 +393,85 @@ $statusLabels = [
                 } else {
                     self.disabled = false;
                     alert('✗ ' + (data.error || 'Erro ao rejeitar.'));
+                }
+            });
+        });
+    });
+
+    // -------------------------------------------------------------------------
+    // Criar Filtro
+    // -------------------------------------------------------------------------
+    document.querySelectorAll('.amsfb-create-filter-btn').forEach(function (btn) {
+        btn.addEventListener('click', function () {
+            var id         = this.getAttribute('data-id');
+            var filterName = this.getAttribute('data-filter-name');
+            var hasRegex   = this.getAttribute('data-has-regex') === '1';
+            var failregex  = this.getAttribute('data-failregex');
+            var self       = this;
+
+            var msg;
+            if (hasRegex) {
+                msg = 'Criar filtro fail2ban para o padrão de ataque detectado?\n\n'
+                    + 'Filtro: amsfb-' + filterName + '\n'
+                    + 'Jail:   amsfb-' + filterName + '\n'
+                    + 'Regex:  ' + failregex + '\n\n'
+                    + 'Isso NÃO bane nenhum IP agora.\n'
+                    + 'IPs que realizarem este padrão no futuro serão banidos\n'
+                    + 'automaticamente pelo fail2ban sem intervenção manual.';
+            } else {
+                msg = 'A IA irá analisar as evidências desta sugestão e gerar\n'
+                    + 'automaticamente um failregex para bloquear este padrão de ataque.\n\n'
+                    + 'Isso NÃO bane nenhum IP agora.\n'
+                    + 'Deseja continuar?';
+            }
+
+            if (!confirm(msg)) return;
+
+            self.disabled = true;
+            self.innerHTML = hasRegex ? '&#8987; Criando...' : '&#8987; Gerando...';
+
+            window.AMSFB.post('ai', 'create_filter', { id: id }, function (data) {
+                if (data.success) {
+                    self.innerHTML = '&#10003; Filtro criado';
+                    self.disabled  = true;
+                    self.classList.remove('btn-default');
+                    self.classList.add('btn-success');
+                    // Atualizar data-has-regex e data-filter-name se IA gerou
+                    if (data.generated_by_ai && data.failregex) {
+                        self.setAttribute('data-has-regex', '1');
+                        self.setAttribute('data-filter-name', data.filter_name || '');
+                        self.setAttribute('data-failregex', data.failregex || '');
+                        // Atualizar coluna Filtro na mesma linha
+                        var row = document.getElementById('amsfb-row-' + id);
+                        if (row) {
+                            var filterCell = row.querySelector('td:nth-child(6)');
+                            if (filterCell) {
+                                filterCell.innerHTML = '<code style="font-size:11px;" title="failregex: '
+                                    + data.failregex.replace(/"/g, '&quot;')
+                                    + '">amsfb-' + (data.filter_name || '') + '</code>'
+                                    + '<br><small class="text-success">&#10003; criado</small>';
+                            }
+                        }
+                    } else {
+                        // Atualizar indicador "criado" na coluna Filtro
+                        var row2 = document.getElementById('amsfb-row-' + id);
+                        if (row2) {
+                            var filterCell2 = row2.querySelector('td:nth-child(6) small');
+                            if (!filterCell2) {
+                                var codeEl = row2.querySelector('td:nth-child(6) code');
+                                if (codeEl) {
+                                    codeEl.insertAdjacentHTML('afterend',
+                                        '<br><small class="text-success">&#10003; criado</small>');
+                                }
+                            }
+                        }
+                    }
+                    // Linha permanece na tabela — o IP ainda pode ser banido
+                    alert('✓ ' + (data.message || 'Filtro criado com sucesso.'));
+                } else {
+                    self.disabled  = false;
+                    self.innerHTML = hasRegex ? '&#128736; Criar Filtro' : '&#128736; Criar Filtro';
+                    alert('✗ ' + (data.error || 'Erro ao criar filtro.'));
                 }
             });
         });

@@ -134,6 +134,42 @@ class Fail2BanClient
         return $code === 0;
     }
 
+    /**
+     * Copia um arquivo de filtro de /tmp para /etc/fail2ban/filter.d/ via sudo.
+     * Requer entradas correspondentes no arquivo sudoers.
+     *
+     * Restrições de segurança rígidas:
+     * - $src deve ser um arquivo temporário criado pelo módulo (/tmp/amsfb_filter_*)
+     * - $dest deve ser um filtro do módulo (/etc/fail2ban/filter.d/amsfb-*.conf)
+     */
+    public function copySudoFile(string $src, string $dest): bool
+    {
+        // [SEC-4] Validação estrita de src e dest — previne path traversal e injeção
+        if (!preg_match('/^\/tmp\/amsfb_filter_[a-zA-Z0-9]+$/', $src)) {
+            return false;
+        }
+        if (!preg_match('/^\/etc\/fail2ban\/filter\.d\/amsfb-[a-z0-9-]+\.conf$/', $dest)) {
+            return false;
+        }
+
+        $cpCmd = escapeshellarg($this->sudo)
+               . ' /bin/cp '
+               . escapeshellarg($src) . ' '
+               . escapeshellarg($dest)
+               . ' 2>&1';
+        exec($cpCmd, $output, $code);
+        if ($code !== 0) {
+            return false;
+        }
+
+        $chmodCmd = escapeshellarg($this->sudo)
+                  . ' /bin/chmod 644 '
+                  . escapeshellarg($dest)
+                  . ' 2>&1';
+        exec($chmodCmd, $output2, $code2);
+        return $code2 === 0;
+    }
+
     // -----------------------------------------------------------------------
     // Private helpers
     // -----------------------------------------------------------------------

@@ -3,6 +3,7 @@
 #          chmod 0440 /etc/sudoers.d/amssoft_fail2ban
 #          visudo -c   (validate before reloading)
 
+# fail2ban-client operations
 www-data ALL=(root) NOPASSWD: /usr/bin/fail2ban-client status
 www-data ALL=(root) NOPASSWD: /usr/bin/fail2ban-client status *
 www-data ALL=(root) NOPASSWD: /usr/bin/fail2ban-client set * unbanip *
@@ -10,4 +11,10 @@ www-data ALL=(root) NOPASSWD: /usr/bin/fail2ban-client set * banip *
 www-data ALL=(root) NOPASSWD: /usr/bin/fail2ban-client reload
 www-data ALL=(root) NOPASSWD: /usr/bin/fail2ban-client reload *
 www-data ALL=(root) NOPASSWD: /usr/bin/fail2ban-client ping
+
+# Criacao de filtros fail2ban gerados pela IA (v3)
+# Permite copiar arquivos de filtro temporarios para filter.d/
+www-data ALL=(root) NOPASSWD: /bin/cp /tmp/amsfb_filter_* /etc/fail2ban/filter.d/amsfb-*
+www-data ALL=(root) NOPASSWD: /bin/chmod 644 /etc/fail2ban/filter.d/amsfb-*
+
 Defaults:www-data !requiretty
