@@ -107,6 +107,23 @@ function amssoft_fail2ban_activate(): array
             });
         }
 
+        // Garantir que a jail dedicada ai-bans existe em jail.local
+        try {
+            $jailConfig = new \AMS\Fail2Ban\JailConfig('/etc/fail2ban/jail.local');
+            $existing   = $jailConfig->readJailLocal();
+            if (!isset($existing['ai-bans'])) {
+                $jailConfig->addJail('ai-bans', [
+                    'enabled'  => 'true',
+                    'filter'   => 'apache-auth',
+                    'maxretry' => '5',
+                    'findtime' => '600',
+                    'bantime'  => '3600',
+                ]);
+            }
+        } catch (\Throwable $e) {
+            // silencioso — jail será criada automaticamente no primeiro uso
+        }
+
         return ['status' => 'success', 'description' => 'AMS Fail2Ban Manager instalado com sucesso.'];
     } catch (\Exception $e) {
         return ['status' => 'error', 'description' => $e->getMessage()];

@@ -97,19 +97,16 @@ class AutoBanEngine
      * Executa o ban de um IP via Fail2BanClient e registra no log de eventos.
      * adminId = null indica ban automático pela IA.
      */
+    /** Nome da jail dedicada para bans manuais aprovados pela IA. */
+    public const AI_JAIL = 'ai-bans';
+
     public function executeBan(array $suggestion, ?int $adminId = null): bool
     {
-        $ip   = $suggestion['ip']   ?? '';
-        $jail = $suggestion['jail'] ?? '';
+        $ip   = $suggestion['ip'] ?? '';
+        $jail = self::AI_JAIL; // sempre usa a jail dedicada da IA
 
         if (!filter_var($ip, FILTER_VALIDATE_IP)) {
             return false;
-        }
-
-        // Se não há jail específico, tenta o padrão 'sshd'
-        if (empty($jail)) {
-            $jails = $this->client->getJails();
-            $jail  = !empty($jails) ? $jails[0] : 'sshd';
         }
 
         $ok = $this->client->banIP($jail, $ip);

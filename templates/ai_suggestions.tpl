@@ -256,46 +256,6 @@ $statusLabels = [
                         });
                     }
                     alert('✓ ' + (data.message || 'Aprovado.'));
-                } else if (data.jail_cant_activate) {
-                    // Jail não pôde ser ativado mas há jails ativas — redirecionar para ban manual.
-                    self.disabled = false;
-                    var cell3 = self.closest('td');
-                    var old3  = cell3.querySelector('.amsfb-jail-missing-msg');
-                    if (old3) old3.remove();
-                    var banUrl = window.AMSFB.moduleLink
-                        + '&action=ips&ban_ip=' + encodeURIComponent(data.ip || '')
-                        + '&open_modal=1';
-                    var esc3 = function(s){ return String(s).replace(/[<>"&]/g,function(c){return{'<':'&lt;','>':'&gt;','"':'&quot;','&':'&amp;'}[c];}); };
-                    var msg3 = document.createElement('div');
-                    msg3.className = 'amsfb-jail-missing-msg';
-                    msg3.style.cssText = 'margin-top:6px;display:flex;align-items:center;gap:6px;flex-wrap:wrap;';
-                    msg3.innerHTML = '<span style="color:#c0392b;font-size:12px;">&#9888; ' + esc3(data.error) + '</span>'
-                        + '<a href="' + banUrl + '" class="btn btn-xs btn-danger">Banir manualmente</a>';
-                    cell3.appendChild(msg3);
-                } else if (data.jail_missing) {
-                    // Jail inexistente: mostrar aviso inline com link para criar
-                    self.disabled = false;
-                    var createUrl = window.AMSFB.moduleLink
-                        + '&action=jails'
-                        + '&new_jail='  + encodeURIComponent(data.jail_name || '')
-                        + '&filter='    + encodeURIComponent(data.filter    || '')
-                        + '&logpath='   + encodeURIComponent(data.logpath   || '')
-                        + '&maxretry='  + encodeURIComponent(data.maxretry  || 5)
-                        + '&findtime='  + encodeURIComponent(data.findtime  || 600)
-                        + '&bantime='   + encodeURIComponent(data.bantime   || 3600)
-                        + '&open_modal=1';
-                    var cell = self.closest('td');
-                    // Remover aviso anterior se houver
-                    var old = cell.querySelector('.amsfb-jail-missing-msg');
-                    if (old) old.remove();
-                    var msg = document.createElement('div');
-                    msg.className = 'amsfb-jail-missing-msg';
-                    msg.style.cssText = 'margin-top:6px;display:flex;align-items:center;gap:6px;flex-wrap:wrap;';
-                    msg.innerHTML = '<span style="color:#c0392b;font-size:12px;">&#9888; Jail <strong>'
-                        + data.jail_name.replace(/[<>"&]/g, function(c){return {'<':'&lt;','>':'&gt;','"':'&quot;','&':'&amp;'}[c];})
-                        + '</strong> não existe.</span>'
-                        + '<a href="' + createUrl + '" class="btn btn-xs btn-primary">+ Criar Jail</a>';
-                    cell.appendChild(msg);
                 } else {
                     self.disabled = false;
                     alert('✗ ' + (data.error || 'Erro ao aprovar.'));

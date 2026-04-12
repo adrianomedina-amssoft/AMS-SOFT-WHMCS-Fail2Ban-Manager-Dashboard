@@ -154,7 +154,6 @@ class AIController
             return json_encode(['success' => false, 'error' => 'ID inválido.']);
         }
 
-        // Buscar sugestão para mensagens descritivas antes de delegar ao engine
         $suggestion = Database::getSuggestion($id);
         if (!$suggestion) {
             return json_encode(['success' => false, 'error' => 'Sugestão não encontrada.']);
@@ -176,6 +175,30 @@ class AIController
         $engine  = new AutoBanEngine($analyzer, $client);
         $adminId = Helper::adminId();
 
+        // Garantir que a jail ai-bans existe em jail.local e está ativa no fail2ban.
+        // Todo ban de sugestão IA vai para essa jail dedicada.
+        try {
+            $jailConfig = $this->router->makeJailConfig();
+            $jailLocal  = $jailConfig->readJailLocal();
+            if (!isset($jailLocal[AutoBanEngine::AI_JAIL])) {
+                $jailConfig->addJail(AutoBanEngine::AI_JAIL, [
+                    'enabled'  => 'true',
+                    'filter'   => $this->findBestFilter(AutoBanEngine::AI_JAIL),
+                    'maxretry' => '5',
+                    'findtime' => '600',
+                    'bantime'  => '3600',
+                ]);
+                $jailConfig->reloadAll();
+            } else {
+                $activeJails = $client->getJails();
+                if (!in_array(AutoBanEngine::AI_JAIL, $activeJails, true)) {
+                    $jailConfig->reloadAll();
+                }
+            }
+        } catch (\Throwable $e) {
+            // silencioso — approveSuggestion retornará false se offline
+        }
+
         $ok = $engine->approveSuggestion($id, $adminId);
 
         if ($ok) {
@@ -183,152 +206,23 @@ class AIController
             return json_encode(['success' => true, 'message' => "IP {$ip} banido com sucesso.", 'dismissed_ids' => $dismissed]);
         }
 
-        // Diagnosticar causa da falha para mensagem útil ao admin
+        // Diagnosticar causa da falha
         if (!$client->ping()) {
             return json_encode(['success' => false, 'error' => "fail2ban está offline — não foi possível banir {$ip}."]);
         }
 
-        // Verificar se o IP já está banido (qualquer jail) — tratar como sucesso
+        // IP já banido em qualquer jail — tratar como sucesso
         try {
             $bannedIPs = array_column($client->getBannedIPs(), 'ip');
             if (in_array($ip, $bannedIPs, true)) {
                 Database::updateSuggestionStatus($id, 'approved', $adminId);
-                Database::logEvent($ip, $suggestion['jail'] ?: 'unknown', 'manual_ban', 'AI: IP já estava banido — aprovação registrada', $adminId);
+                Database::logEvent($ip, AutoBanEngine::AI_JAIL, 'manual_ban', 'AI: IP já estava banido — aprovação registrada', $adminId);
                 $dismissed = Database::autoDismissDuplicates($ip, $id, $adminId);
                 return json_encode(['success' => true, 'message' => "IP {$ip} já estava banido. Sugestão marcada como aprovada.", 'dismissed_ids' => $dismissed]);
             }
         } catch (\Throwable $e) {}
 
-        // Verificar se o jail da sugestão existe no fail2ban
-        $jail = $suggestion['jail'] ?? '';
-        if (!empty($jail)) {
-            $activeJails = $client->getJails();
-            if (!in_array($jail, $activeJails, true)) {
-                // Verificar se o jail existe em jail.local mas fail2ban ainda não recarregou.
-                // Isso acontece quando o admin criou o jail pelo modal mas o reload falhou.
-                $jailConfig = $this->router->makeJailConfig();
-                $jailLocal  = [];
-                try { $jailLocal = $jailConfig->readJailLocal(); } catch (\Throwable $e) {}
-
-                if (isset($jailLocal[$jail])) {
-                    // Jail existe em jail.local — fazer reload completo e verificar se ficou ativo
-                    $jailConfig->reloadAll();
-
-                    $activeAfterReload = [];
-                    try { $activeAfterReload = $client->getJails(); } catch (\Throwable $e) {}
-
-                    if (in_array($jail, $activeAfterReload, true)) {
-                        // Jail ativo após reload — reexecutar o ban
-                        $ok2 = $engine->approveSuggestion($id, $adminId);
-                        if ($ok2) {
-                            $dismissed = Database::autoDismissDuplicates($ip, $id, $adminId);
-                            return json_encode(['success' => true,
-                                'message' => "IP {$ip} banido com sucesso (fail2ban recarregado automaticamente).",
-                                'dismissed_ids' => $dismissed]);
-                        }
-                    }
-
-                    // Jail ainda não está ativo — diagnosticar causa mais provável
-                    $jailCfg     = $jailLocal[$jail] ?? [];
-                    $filterName  = preg_replace('/[^a-zA-Z0-9_-]/', '', $jailCfg['filter'] ?? '');
-                    $filterMissing = $filterName !== ''
-                        && !file_exists("/etc/fail2ban/filter.d/{$filterName}.conf");
-
-                    if ($filterMissing) {
-                        // Auto-fix: substituir pelo melhor filter disponível em filter.d/
-                        // e retentar — sem precisar de ação manual do admin.
-                        $bestFilter = $this->findBestFilter($jail);
-                        if ($bestFilter !== '') {
-                            $jailConfig->saveJail($jail, ['filter' => $bestFilter]);
-                            $jailConfig->reloadAll();
-
-                            $activeAfterFix = [];
-                            try { $activeAfterFix = $client->getJails(); } catch (\Throwable $e) {}
-
-                            if (in_array($jail, $activeAfterFix, true)) {
-                                $ok3 = $engine->approveSuggestion($id, $adminId);
-                                if ($ok3) {
-                                    $dismissed = Database::autoDismissDuplicates($ip, $id, $adminId);
-                                    return json_encode(['success' => true,
-                                        'message' => "IP {$ip} banido. Filter do jail corrigido automaticamente para '{$bestFilter}'.",
-                                        'dismissed_ids' => $dismissed]);
-                                }
-                            }
-                        }
-
-                        // Auto-fix falhou — verificar se há jails ativas para ban manual
-                        $activeJailsNow = [];
-                        try { $activeJailsNow = $client->getJails(); } catch (\Throwable $e) {}
-                        if (!empty($activeJailsNow)) {
-                            return json_encode([
-                                'success'          => false,
-                                'jail_cant_activate' => true,
-                                'ip'               => $ip,
-                                'error'            => "O filter '{$filterName}' não existe e o jail não pôde ser ativado.",
-                            ]);
-                        }
-                        return json_encode(['success' => false, 'error' => "Jail '{$jail}' não pôde ser ativado e nenhum jail está ativo no fail2ban."]);
-                    }
-
-                    // Causa desconhecida — verificar jails ativas para ban manual (último recurso)
-                    $activeJailsNow = [];
-                    try { $activeJailsNow = $client->getJails(); } catch (\Throwable $e) {}
-                    if (!empty($activeJailsNow)) {
-                        return json_encode([
-                            'success'            => false,
-                            'jail_cant_activate' => true,
-                            'ip'                 => $ip,
-                            'error'              => "Não foi possível ativar o jail '{$jail}'.",
-                        ]);
-                    }
-                    return json_encode(['success' => false, 'error' => "Jail '{$jail}' não pôde ser ativado e nenhum jail está ativo no fail2ban."]);
-                }
-
-                // Jail realmente não existe — extrair suggested_rule e oferecer criação
-                $ruleCfg = [];
-                $rawRule = $suggestion['suggested_rule'] ?? '';
-                if (!empty($rawRule)) {
-                    try {
-                        $parsed = @parse_ini_string($rawRule, true, INI_SCANNER_RAW);
-                        if (is_array($parsed)) {
-                            // Seção com o nome do jail ou primeira seção disponível
-                            $section = $parsed[$jail] ?? reset($parsed);
-                            if (is_array($section)) {
-                                $ruleCfg = $section;
-                            }
-                        }
-                    } catch (\Throwable $e) {}
-                }
-
-                // Sanitizar cada campo antes de devolver ao frontend
-                $pfFilter  = preg_replace('/[^a-zA-Z0-9_-]/', '', $ruleCfg['filter'] ?? '');
-                $pfLogpath = trim($ruleCfg['logpath'] ?? '');
-                $pfLogpath = preg_replace('/[\x00-\x1F\x7F]/', '', $pfLogpath);
-                if ($pfLogpath !== '' && (str_contains($pfLogpath, '..') || !str_starts_with($pfLogpath, '/'))) {
-                    $pfLogpath = '';
-                }
-                $pfMaxretry = max(1,  min(100,   (int)($ruleCfg['maxretry'] ?? 5)));
-                $pfFindtime = max(60, min(86400,  (int)($ruleCfg['findtime'] ?? 600)));
-                $pfBantime  = (int)($ruleCfg['bantime'] ?? $suggestion['bantime'] ?? 3600);
-                if ($pfBantime !== -1) {
-                    $pfBantime = max(60, min(2592000, $pfBantime));
-                }
-
-                return json_encode([
-                    'success'      => false,
-                    'jail_missing' => true,
-                    'jail_name'    => $jail,
-                    'filter'       => $pfFilter,
-                    'logpath'      => $pfLogpath,
-                    'maxretry'     => $pfMaxretry,
-                    'findtime'     => $pfFindtime,
-                    'bantime'      => $pfBantime,
-                    'error'        => "Jail '{$jail}' não está ativo no fail2ban.",
-                ]);
-            }
-        }
-
-        return json_encode(['success' => false, 'error' => "Falha ao banir {$ip}. Verifique se o fail2ban está online e o jail está ativo."]);
+        return json_encode(['success' => false, 'error' => "Falha ao banir {$ip}. Verifique se o fail2ban está online."]);
     }
 
     // -----------------------------------------------------------------------
