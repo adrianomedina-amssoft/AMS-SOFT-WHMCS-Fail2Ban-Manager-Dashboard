@@ -185,7 +185,11 @@
             })
             .then(function (r) { return r.json(); })
             .then(function (d) {
-                if (d.csrf_token) { window.AMSFB.csrfToken = d.csrf_token; }
+                if (d.csrf_token) {
+                    window.AMSFB.csrfToken = d.csrf_token;
+                    var inp = validateBtn.closest('form').querySelector('input[name="csrf_token"]');
+                    if (inp) { inp.value = d.csrf_token; }
+                }
                 validateBtn.disabled    = false;
                 validateBtn.textContent = '✓ Validar';
 
