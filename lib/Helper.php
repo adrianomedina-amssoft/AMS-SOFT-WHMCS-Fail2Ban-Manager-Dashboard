@@ -201,7 +201,26 @@ class Helper
         } catch (\Throwable $e) {
             // fallback
         }
-        // Fallback: chave derivada do path do módulo (constante por instalação)
-        return hash('sha256', __DIR__, true);
+
+        // [SEC-13] Fallback seguro: gerar chave aleatória e persistir no banco,
+        // em vez de derivar do __DIR__ (caminho previsível em qualquer instalação).
+        try {
+            $stored = Capsule::table('mod_amssoft_fail2ban_config')
+                ->where('key', '_enc_key')
+                ->value('value');
+            if ($stored) {
+                $decoded = base64_decode($stored, true);
+                if ($decoded !== false && strlen($decoded) === 32) {
+                    return $decoded;
+                }
+            }
+            $newKey = random_bytes(32);
+            Capsule::table('mod_amssoft_fail2ban_config')
+                ->updateOrInsert(['key' => '_enc_key'], ['value' => base64_encode($newKey)]);
+            return $newKey;
+        } catch (\Throwable $e) {
+            // Último fallback: combinar dados menos previsíveis do servidor
+            return hash('sha256', php_uname() . gethostname(), true);
+        }
     }
 }

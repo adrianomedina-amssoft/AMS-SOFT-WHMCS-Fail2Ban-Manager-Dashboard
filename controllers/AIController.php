@@ -185,6 +185,16 @@ class AIController
 
     private function ajaxRunNow(): string
     {
+        // [SEC-10] Rate limiting: mínimo 60 segundos entre chamadas manuais
+        // para evitar esgotamento do orçamento da API Anthropic via loop rápido.
+        $lastRun = (int)Database::getConfig('ai_last_run', 0);
+        if ((time() - $lastRun) < 60) {
+            return json_encode([
+                'success' => false,
+                'error'   => 'Aguarde pelo menos 60 segundos entre análises manuais.',
+            ]);
+        }
+
         $apiKey = $this->decryptApiKey();
         if (empty($apiKey)) {
             return json_encode(['success' => false, 'error' => 'Chave API Anthropic não configurada.']);
@@ -275,8 +285,10 @@ class AIController
         Database::setConfig('ai_whitelist_ips', $whitelist);
 
         // Prompt customizável
-        $prompt = $post['ai_prompt'] ?? '';
-        if (!empty($prompt)) {
+        // [SEC-11] Limitar a 8000 caracteres para evitar prompts gigantescos
+        // que esgotem créditos da API Anthropic a cada análise automática.
+        $prompt = substr(trim($post['ai_prompt'] ?? ''), 0, 8000);
+        if ($prompt !== '') {
             Database::setConfig('ai_prompt', $prompt);
         }
 
@@ -290,9 +302,9 @@ class AIController
         }
 
         // Confirmação de modo automático (flag de segurança)
-        if (!empty($post['confirm_auto'])) {
-            Database::setConfig('ai_confirmed_auto', '1');
-        }
+        // [SEC-9] Sempre definir o valor (inclusive '0') para que o admin
+        // precise re-confirmar ao reativar o modo automático após desativá-lo.
+        Database::setConfig('ai_confirmed_auto', !empty($post['confirm_auto']) ? '1' : '0');
     }
 
     /** Descriptografa a chave API armazenada. */

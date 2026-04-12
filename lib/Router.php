@@ -81,12 +81,12 @@ class Router
             return json_encode(['success' => false, 'error' => 'Unauthorized']);
         }
 
-        // CSRF required for all mutating AJAX calls
-        if (!empty($post) || in_array($do, ['toggle', 'ban', 'unban', 'save'])) {
-            $token = $post['csrf_token'] ?? '';
-            if (!Helper::checkCsrf($token)) {
-                return json_encode(['success' => false, 'error' => 'Invalid CSRF token']);
-            }
+        // [SEC-12] CSRF validado incondicionalmente para toda requisição AJAX POST.
+        // A verificação condicional anterior permitia bypass com body vazio
+        // (Content-Length: 0) para ações não listadas como run_now e ping_api.
+        $token = $post['csrf_token'] ?? '';
+        if (!Helper::checkCsrf($token)) {
+            return json_encode(['success' => false, 'error' => 'Invalid CSRF token']);
         }
 
         $controllerClass = self::CONTROLLER_MAP[$action] ?? null;

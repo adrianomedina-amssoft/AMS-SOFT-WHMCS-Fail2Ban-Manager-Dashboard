@@ -164,7 +164,7 @@ class LogViewer
      * Valida se o path é seguro para leitura.
      * Não permite traversal, deve ser absoluto e extensão permitida.
      */
-    private function isValidPath(string $path): bool
+    public function isValidPath(string $path): bool
     {
         if (strpos($path, '..') !== false) {
             return false;
@@ -172,8 +172,15 @@ class LogViewer
         if (!str_starts_with($path, '/')) {
             return false;
         }
-        // Permite qualquer extensão — logs podem ser .log, .txt, sem extensão, etc.
-        // A proteção real é via sudo/permissões de sistema
-        return true;
+        // [SEC-8] Restringir leitura a diretórios de log conhecidos.
+        // Impede que um admin configure /etc/passwd, /etc/shadow, chaves SSH etc.
+        // como path de log, expondo arquivos sensíveis via fetch_lines AJAX.
+        $allowedPrefixes = ['/var/log/', '/var/www/html/', '/tmp/'];
+        foreach ($allowedPrefixes as $prefix) {
+            if (str_starts_with($path, $prefix)) {
+                return true;
+            }
+        }
+        return false;
     }
 }

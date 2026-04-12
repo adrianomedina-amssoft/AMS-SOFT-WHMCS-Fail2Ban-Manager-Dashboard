@@ -238,7 +238,7 @@ LOGS:
                 'jail'           => substr(preg_replace('/[^a-zA-Z0-9_-]/', '', $item['jail'] ?? ''), 0, 64),
                 'bantime'        => $bantime,
                 'reason'         => substr(strip_tags($item['reason'] ?? ''), 0, 1000),
-                'suggested_rule' => substr($item['suggested_rule'] ?? '', 0, 4000),
+                'suggested_rule' => substr(strip_tags($item['suggested_rule'] ?? ''), 0, 4000),
             ];
         }
 

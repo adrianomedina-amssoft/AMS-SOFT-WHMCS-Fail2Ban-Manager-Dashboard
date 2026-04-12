@@ -34,8 +34,10 @@ class Database
     /** Returns all ban/manual_ban rows in the last N hours (newest first). */
     public static function getRecentBans(int $hours = 24): array
     {
+        // [SEC-14] Evitar Capsule::raw() com variável interpolada — calcular timestamp em PHP.
+        $since = date('Y-m-d H:i:s', time() - $hours * 3600);
         return Capsule::table('mod_amssoft_fail2ban_logs')
-            ->where('timestamp', '>=', Capsule::raw("NOW() - INTERVAL {$hours} HOUR"))
+            ->where('timestamp', '>=', $since)
             ->whereIn('action', ['ban', 'manual_ban'])
             ->orderBy('timestamp', 'desc')
             ->get()
@@ -60,13 +62,15 @@ class Database
     /** Returns [['date' => 'Y-m-d', 'count' => N], ...] for the last N days. */
     public static function getBansSeries(int $days = 7): array
     {
+        // [SEC-14] Evitar Capsule::raw() com variável interpolada.
+        $since = date('Y-m-d H:i:s', time() - $days * 86400);
         return Capsule::table('mod_amssoft_fail2ban_logs')
             ->select(
                 Capsule::raw('DATE(timestamp) AS `date`'),
                 Capsule::raw('COUNT(*) AS `count`')
             )
             ->whereIn('action', ['ban', 'manual_ban'])
-            ->where('timestamp', '>=', Capsule::raw("NOW() - INTERVAL {$days} DAY"))
+            ->where('timestamp', '>=', $since)
             ->groupBy(Capsule::raw('DATE(timestamp)'))
             ->orderBy(Capsule::raw('DATE(timestamp)'), 'asc')
             ->get()
@@ -184,7 +188,9 @@ class Database
             'ip'             => $data['ip']             ?? '',
             'jail'           => $data['jail']           ?? '',
             'threat'         => $data['threat']         ?? '',
-            'severity'       => $data['severity']       ?? 'medium',
+            'severity'       => in_array($data['severity'] ?? '', ['low', 'medium', 'high', 'critical'], true)
+                                    ? $data['severity']
+                                    : 'medium',
             'confidence'     => (int)($data['confidence'] ?? 0),
             'evidence'       => isset($data['evidence']) ? json_encode($data['evidence']) : null,
             'suggested_rule' => $data['suggested_rule'] ?? null,
@@ -257,6 +263,12 @@ class Database
     /** Atualiza o status de uma sugestão. */
     public static function updateSuggestionStatus(int $id, string $status, ?int $resolvedBy = null): bool
     {
+        // [SEC-15] Validar status contra o ENUM antes de enviar ao banco.
+        $allowed = ['pending', 'approved', 'rejected', 'auto_executed'];
+        if (!in_array($status, $allowed, true)) {
+            return false;
+        }
+
         $affected = Capsule::table('mod_amssoft_fail2ban_ai_suggestions')
             ->where('id', $id)
             ->update([
@@ -273,10 +285,12 @@ class Database
      */
     public static function countRecentDetections(string $ip, int $minutes): int
     {
+        // [SEC-14] Evitar Capsule::raw() com variável interpolada.
+        $since = date('Y-m-d H:i:s', time() - $minutes * 60);
         return (int) Capsule::table('mod_amssoft_fail2ban_ai_suggestions')
             ->where('ip', $ip)
             ->whereIn('status', ['pending', 'auto_executed'])
-            ->where('created_at', '>=', Capsule::raw("NOW() - INTERVAL {$minutes} MINUTE"))
+            ->where('created_at', '>=', $since)
             ->count();
     }
 
