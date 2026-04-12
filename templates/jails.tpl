@@ -7,6 +7,9 @@
 
 <div class="amsfb-page-header">
     <h3>&#128274; Jails</h3>
+    <button class="btn btn-sm btn-success" data-toggle="modal" data-target="#modalAddJail">
+        + Novo Jail
+    </button>
 </div>
 
 <?php if ($error): ?>
@@ -68,6 +71,13 @@
                             data-enabled="<?= $enabled ? '1' : '0' ?>">
                         <?= $enabled ? 'Desabilitar' : 'Habilitar' ?>
                     </button>
+
+                    <!-- Remove button (AJAX) -->
+                    <button type="button"
+                            class="btn btn-xs btn-danger amsfb-remove-btn"
+                            data-jail="<?= $e($jail) ?>">
+                        Remover
+                    </button>
                 </td>
             </tr>
         <?php endforeach; ?>
@@ -87,6 +97,73 @@
 <?php endforeach; ?>
 
 <?php endif; ?>
+
+<!-- Modal: Novo Jail -->
+<div class="modal fade" id="modalAddJail" tabindex="-1" role="dialog" aria-labelledby="modalAddJailLabel">
+    <div class="modal-dialog" role="document">
+        <div class="modal-content">
+            <form method="post" action="<?= $e($modulelink . '&action=jails') ?>">
+                <input type="hidden" name="csrf_token" value="<?= $e($csrf_token) ?>">
+                <input type="hidden" name="do" value="add">
+                <div class="modal-header">
+                    <button type="button" class="close" data-dismiss="modal" aria-label="Fechar">
+                        <span aria-hidden="true">&times;</span>
+                    </button>
+                    <h4 class="modal-title" id="modalAddJailLabel">Novo Jail</h4>
+                </div>
+                <div class="modal-body">
+                    <div class="form-group">
+                        <label>Nome do Jail <span class="text-danger">*</span></label>
+                        <input type="text" name="new_jail" class="form-control" required
+                               pattern="^[a-zA-Z0-9][a-zA-Z0-9_-]{0,63}$"
+                               placeholder="ex: apache-auth">
+                        <span class="help-block">Apenas letras, números, hífen e underscore.</span>
+                    </div>
+                    <div class="form-group">
+                        <label>Filter</label>
+                        <input type="text" name="filter" class="form-control"
+                               placeholder="ex: apache-auth, sshd, whmcs">
+                        <span class="help-block">Nome do arquivo em /etc/fail2ban/filter.d/ (sem .conf).</span>
+                    </div>
+                    <div class="form-group">
+                        <label>Log Path</label>
+                        <input type="text" name="logpath" class="form-control"
+                               placeholder="/var/log/...">
+                    </div>
+                    <div class="row">
+                        <div class="col-sm-4">
+                            <div class="form-group">
+                                <label>maxretry</label>
+                                <input type="number" name="maxretry" class="form-control" value="5" min="1" max="100">
+                            </div>
+                        </div>
+                        <div class="col-sm-4">
+                            <div class="form-group">
+                                <label>findtime (s)</label>
+                                <input type="number" name="findtime" class="form-control" value="600" min="60" max="86400">
+                            </div>
+                        </div>
+                        <div class="col-sm-4">
+                            <div class="form-group">
+                                <label>bantime (s)</label>
+                                <input type="number" name="bantime" class="form-control" value="3600" min="60">
+                            </div>
+                        </div>
+                    </div>
+                    <div class="checkbox">
+                        <label>
+                            <input type="checkbox" name="enabled" value="1" checked> Habilitar jail
+                        </label>
+                    </div>
+                </div>
+                <div class="modal-footer">
+                    <button type="button" class="btn btn-default" data-dismiss="modal">Cancelar</button>
+                    <button type="submit" class="btn btn-success">Criar Jail</button>
+                </div>
+            </form>
+        </div>
+    </div>
+</div>
 
 <script>
 (function () {
@@ -135,6 +212,46 @@
                 // AJAX failed — fall back to form POST
                 var form = document.getElementById('form-toggle-' + jail);
                 if (form) { form.submit(); }
+            });
+        });
+    });
+    // Remove buttons (AJAX)
+    document.querySelectorAll('.amsfb-remove-btn').forEach(function (btn) {
+        btn.addEventListener('click', function () {
+            var jail = this.dataset.jail;
+            if (!confirm('Remover o jail "' + jail + '" do jail.local?\nEsta ação não pode ser desfeita.')) {
+                return;
+            }
+
+            btn.disabled    = true;
+            btn.textContent = '...';
+
+            fetch(window.AMSFB.moduleLink + '&action=jails&do=remove', {
+                method:  'POST',
+                headers: {
+                    'Content-Type':     'application/x-www-form-urlencoded',
+                    'X-Requested-With': 'XMLHttpRequest',
+                },
+                body: 'csrf_token=' + encodeURIComponent(window.AMSFB.csrfToken)
+                    + '&jail='       + encodeURIComponent(jail)
+                    + '&do=remove',
+            })
+            .then(function (r) { return r.json(); })
+            .then(function (data) {
+                if (data.csrf_token) { window.AMSFB.csrfToken = data.csrf_token; }
+                if (data.success) {
+                    var row = document.getElementById('row-' + jail);
+                    if (row) { row.parentNode.removeChild(row); }
+                } else {
+                    alert('Erro ao remover jail: ' + (data.error || 'Falha desconhecida'));
+                    btn.disabled    = false;
+                    btn.textContent = 'Remover';
+                }
+            })
+            .catch(function () {
+                btn.disabled    = false;
+                btn.textContent = 'Remover';
+                alert('Falha de comunicação. Tente novamente.');
             });
         });
     });

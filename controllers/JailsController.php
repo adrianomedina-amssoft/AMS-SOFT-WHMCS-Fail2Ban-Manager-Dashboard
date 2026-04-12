@@ -59,6 +59,15 @@ class JailsController
             return json_encode(['success' => $ok]);
         }
 
+        if ($do === 'remove') {
+            $ok = $config->removeJail($jail);
+            if ($ok) {
+                $config->reloadAll();
+                Database::logEvent('-', $jail, 'manual_ban', 'Jail removido via WHMCS', Helper::adminId());
+            }
+            return json_encode(['success' => $ok]);
+        }
+
         return json_encode(['success' => false, 'error' => 'Unknown do']);
     }
 
@@ -74,15 +83,20 @@ class JailsController
             Helper::redirect(($this->vars['modulelink'] ?? '') . '&action=jails');
         }
 
-        $do   = $_POST['do'] ?? '';
+        $do     = $_POST['do'] ?? '';
+        $config = $this->router->makeJailConfig();
+
+        // Add new jail — jail name comes from new_jail, not jail
+        if ($do === 'add') {
+            return $this->addJailFromPost($config);
+        }
+
         $jail = Helper::sanitizeJail($_POST['jail'] ?? '');
 
         if (!$jail) {
             Helper::setFlash('danger', 'Jail inválido.');
             Helper::redirect(($this->vars['modulelink'] ?? '') . '&action=jails');
         }
-
-        $config = $this->router->makeJailConfig();
 
         if ($do === 'enable') {
             $ok = $config->enableJail($jail);
@@ -102,12 +116,71 @@ class JailsController
             } else {
                 Helper::setFlash('danger', "Erro ao desabilitar jail {$jail}.");
             }
+        } elseif ($do === 'remove') {
+            $ok = $config->removeJail($jail);
+            if ($ok) {
+                $config->reloadAll();
+                Database::logEvent('-', $jail, 'manual_ban', 'Jail removido via WHMCS', Helper::adminId());
+                Helper::setFlash('success', "Jail {$jail} removido.");
+            } else {
+                Helper::setFlash('danger', "Erro ao remover jail {$jail}.");
+            }
         } elseif ($do === 'save') {
             return $this->saveJail($jail, $config);
         }
 
         Helper::redirect(($this->vars['modulelink'] ?? '') . '&action=jails');
         return ''; // unreachable
+    }
+
+    private function addJailFromPost(\AMS\Fail2Ban\JailConfig $config): string
+    {
+        $jail = Helper::sanitizeJail($_POST['new_jail'] ?? '');
+        if (!$jail) {
+            Helper::setFlash('danger', 'Nome do jail inválido.');
+            Helper::redirect(($this->vars['modulelink'] ?? '') . '&action=jails');
+        }
+
+        $maxretry = max(1, min(100,   (int)($_POST['maxretry'] ?? 5)));
+        $findtime = max(60, min(86400, (int)($_POST['findtime'] ?? 600)));
+        $bantime  = (int)($_POST['bantime'] ?? 3600);
+        if ($bantime !== -1) {
+            $bantime = max(60, min(2592000, $bantime));
+        }
+
+        $logpath = trim($_POST['logpath'] ?? '');
+        $logpath = preg_replace('/[\x00-\x1F\x7F]/', '', $logpath);
+        if ($logpath !== '' && (strpos($logpath, '..') !== false || !str_starts_with($logpath, '/'))) {
+            $logpath = '';
+        }
+
+        $filter  = preg_replace('/[^a-zA-Z0-9_-]/', '', $_POST['filter'] ?? '');
+        $enabled = isset($_POST['enabled']) ? 'true' : 'false';
+
+        $params = [
+            'enabled'  => $enabled,
+            'maxretry' => (string)$maxretry,
+            'findtime' => (string)$findtime,
+            'bantime'  => (string)$bantime,
+        ];
+        if ($filter !== '') {
+            $params['filter'] = $filter;
+        }
+        if ($logpath !== '') {
+            $params['logpath'] = $logpath;
+        }
+
+        $ok = $config->addJail($jail, $params);
+        if ($ok) {
+            $config->reloadAll();
+            Database::logEvent('-', $jail, 'manual_ban', 'Jail criado via WHMCS', Helper::adminId());
+            Helper::setFlash('success', "Jail {$jail} criado com sucesso.");
+        } else {
+            Helper::setFlash('danger', "Erro ao criar jail {$jail}. Verifique se já existe.");
+        }
+
+        Helper::redirect(($this->vars['modulelink'] ?? '') . '&action=jails');
+        return '';
     }
 
     // -----------------------------------------------------------------------

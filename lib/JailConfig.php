@@ -93,6 +93,33 @@ class JailConfig
         return $this->saveJail($jail, ['enabled' => 'false']);
     }
 
+    /**
+     * Creates a new jail section. Returns false if the jail already exists.
+     */
+    public function addJail(string $jail, array $params): bool
+    {
+        $data = $this->readJailLocal();
+        if (isset($data[$jail])) {
+            return false; // already exists
+        }
+        return $this->saveJail($jail, $params);
+    }
+
+    /**
+     * Removes a jail section from jail.local entirely.
+     * Returns false if the jail does not exist.
+     */
+    public function removeJail(string $jail): bool
+    {
+        $data = $this->readJailLocal();
+        if (!isset($data[$jail])) {
+            return false;
+        }
+        unset($data[$jail]);
+        $this->backup();
+        return $this->writeFile($data);
+    }
+
     /** Reloads the jail via fail2ban-client (requires injected client). */
     public function reloadJail(string $jail): bool
     {
@@ -100,6 +127,15 @@ class JailConfig
             return false;
         }
         return $this->client->reload($jail);
+    }
+
+    /** Full fail2ban reload (used after adding/removing a jail). */
+    public function reloadAll(): bool
+    {
+        if ($this->client === null) {
+            return false;
+        }
+        return $this->client->reload();
     }
 
     // -----------------------------------------------------------------------
