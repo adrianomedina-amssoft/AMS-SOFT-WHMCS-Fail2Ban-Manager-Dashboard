@@ -202,7 +202,26 @@ class AIController
         if (!empty($jail)) {
             $activeJails = $client->getJails();
             if (!in_array($jail, $activeJails, true)) {
-                // Extrair configuração do suggested_rule para pré-preencher o modal de criação
+                // Verificar se o jail existe em jail.local mas fail2ban ainda não recarregou.
+                // Isso acontece quando o admin criou o jail pelo modal mas o reload falhou.
+                $jailConfig = $this->router->makeJailConfig();
+                $jailLocal  = [];
+                try { $jailLocal = $jailConfig->readJailLocal(); } catch (\Throwable $e) {}
+
+                if (isset($jailLocal[$jail])) {
+                    // Jail existe em jail.local — tentar reload e reexecutar o ban
+                    $jailConfig->reloadJail($jail);
+                    $ok2 = $engine->approveSuggestion($id, $adminId);
+                    if ($ok2) {
+                        return json_encode(['success' => true,
+                            'message' => "IP {$ip} banido com sucesso (fail2ban recarregado automaticamente)."]);
+                    }
+                    return json_encode(['success' => false,
+                        'error' => "Jail '{$jail}' existe em jail.local mas o fail2ban não conseguiu carregá-lo. "
+                                 . "Execute no servidor: sudo fail2ban-client reload"]);
+                }
+
+                // Jail realmente não existe — extrair suggested_rule e oferecer criação
                 $ruleCfg = [];
                 $rawRule = $suggestion['suggested_rule'] ?? '';
                 if (!empty($rawRule)) {
