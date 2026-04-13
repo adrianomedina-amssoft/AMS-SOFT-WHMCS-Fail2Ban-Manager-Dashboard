@@ -28,8 +28,12 @@ class AutoBanEngine
      *   1. Watermark por arquivo: lê apenas bytes novos desde a última análise.
      *   2. Deduplicação de IP: ignora IPs já conhecidos (pending/approved/auto_executed
      *      nos últimos 7 dias) — chamada à IA só ocorre para conteúdo genuinamente novo.
+     *
+     * @param bool $forceReread  Quando true (análise manual), relê as últimas linhas
+     *                           mesmo que o arquivo não tenha crescido desde a última
+     *                           análise — mesmo comportamento do Log Viewer.
      */
-    public function runAnalysis(): array
+    public function runAnalysis(bool $forceReread = false): array
     {
         $mode          = Database::getConfig('ai_mode', 'suggestion');
         $minConfidence = (int)Database::getConfig('ai_min_confidence', 75);
@@ -110,19 +114,25 @@ class AutoBanEngine
             $storedOffset = (int)Database::getConfig($offsetKey, 0);
 
             if ($currentSize === $storedOffset) {
-                // Nenhum conteúdo novo — pular chamada à IA
-                continue;
+                if (!$forceReread) {
+                    // Nenhum conteúdo novo — pular chamada à IA
+                    continue;
+                }
+                // Análise manual forçada: relê as últimas linhas mesmo sem
+                // conteúdo novo (igual ao Log Viewer). Não atualiza o watermark
+                // para não perder bytes novos que cheguem depois.
+                $lines = $viewer->readLines($path, 200);
+            } else {
+                if ($currentSize < $storedOffset) {
+                    // Arquivo foi rotacionado/truncado — ler do início
+                    $storedOffset = 0;
+                }
+
+                $lines = $this->readNewLines($path, $storedOffset, 200);
+
+                // Atualiza o watermark independentemente de haver sugestões
+                Database::setConfig($offsetKey, (string)$currentSize);
             }
-
-            if ($currentSize < $storedOffset) {
-                // Arquivo foi rotacionado/truncado — ler do início
-                $storedOffset = 0;
-            }
-
-            $lines = $this->readNewLines($path, $storedOffset, 200);
-
-            // Atualiza o watermark independentemente de haver sugestões
-            Database::setConfig($offsetKey, (string)$currentSize);
 
             if (empty($lines)) {
                 continue;

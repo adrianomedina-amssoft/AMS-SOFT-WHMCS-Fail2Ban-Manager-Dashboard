@@ -432,7 +432,7 @@ class AIController
         $analyzer = new AIAnalyzer($apiKey);
         $client   = $this->router->makeClient();
         $engine   = new AutoBanEngine($analyzer, $client);
-        $results  = $engine->runAnalysis();
+        $results  = $engine->runAnalysis(true); // forceReread: análise manual sempre relê as últimas linhas
 
         Database::setConfig('ai_last_run', (string)time());
         Database::setConfig('ai_last_ping_ok', '1');
