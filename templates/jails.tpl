@@ -16,9 +16,11 @@
 <div class="alert alert-warning"><?= $e($error) ?></div>
 <?php endif; ?>
 
-<?php if (empty($jail_data)): ?>
+<?php if (empty($jail_data) && ($total ?? 0) === 0): ?>
 <div class="alert alert-info">Nenhum jail encontrado em jail.local. Verifique o caminho nas configurações do módulo.</div>
 <?php else: ?>
+
+<p class="text-muted" style="margin-top:8px;">Total: <strong><?= (int)($total ?? 0) ?></strong> jail(s)</p>
 
 <div class="table-responsive">
     <table class="table table-striped table-hover amsfb-table">
@@ -84,6 +86,35 @@
         </tbody>
     </table>
 </div>
+
+<!-- Pagination -->
+<?php if (($pages ?? 1) > 1): ?>
+<nav aria-label="Paginação">
+    <ul class="pagination pagination-sm">
+        <?php if ($page > 1): ?>
+        <li>
+            <a href="<?= $e($modulelink . '&action=jails&page=' . ($page - 1)) ?>">&laquo;</a>
+        </li>
+        <?php endif; ?>
+
+        <?php
+        $start = max(1, $page - 3);
+        $end   = min($pages, $page + 3);
+        for ($p = $start; $p <= $end; $p++):
+        ?>
+        <li class="<?= $p === $page ? 'active' : '' ?>">
+            <a href="<?= $e($modulelink . '&action=jails&page=' . $p) ?>"><?= $p ?></a>
+        </li>
+        <?php endfor; ?>
+
+        <?php if ($page < $pages): ?>
+        <li>
+            <a href="<?= $e($modulelink . '&action=jails&page=' . ($page + 1)) ?>">&raquo;</a>
+        </li>
+        <?php endif; ?>
+    </ul>
+</nav>
+<?php endif; ?>
 
 <!-- Non-AJAX fallback forms (hidden, submitted via JS) -->
 <?php foreach ($jail_data as $jail => $cfg): ?>

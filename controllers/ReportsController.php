@@ -85,7 +85,7 @@ class ReportsController
         $jailsList = [];
 
         try {
-            $result    = Database::searchHistoryPaged($filters, $page, 50);
+            $result    = Database::searchHistoryPaged($filters, $page, 10);
             $jailsList = Database::getKnownJails();
         } catch (\Throwable $e) {
             $result = ['data' => [], 'total' => 0, 'pages' => 0, 'page' => 1];
