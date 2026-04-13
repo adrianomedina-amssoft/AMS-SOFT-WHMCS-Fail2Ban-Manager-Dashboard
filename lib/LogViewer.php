@@ -36,14 +36,16 @@ class LogViewer
      * Permite que o Log Viewer funcione sem nenhuma configuração manual.
      */
     public const WELL_KNOWN_LOGS = [
-        '/var/log/whmcs_auth.log'           => 'WHMCS Auth',
-        '/var/log/apache2/access.log'        => 'Apache Access',
-        '/var/log/apache2/whmcs_access.log'  => 'WHMCS Apache Access',
-        '/var/log/apache2/error.log'         => 'Apache Error',
-        '/var/log/auth.log'                  => 'Linux Auth (SSH/sudo)',
-        '/var/log/syslog'                    => 'Syslog',
-        '/var/log/nginx/access.log'          => 'Nginx Access',
-        '/var/log/nginx/error.log'           => 'Nginx Error',
+        '/var/log/whmcs_auth.log'             => 'WHMCS Auth',
+        '/var/log/apache2/access.log'          => 'Apache Access',
+        '/var/log/apache2/error.log'           => 'Apache Error',
+        '/var/log/apache2/access_whmcs.log'    => 'WHMCS Apache Access',
+        '/var/log/apache2/error_whmcs.log'     => 'WHMCS Apache Error',
+        '/var/log/apache2/whmcs_access.log'    => 'WHMCS Apache Access (alt)',
+        '/var/log/auth.log'                    => 'Linux Auth (SSH/sudo)',
+        '/var/log/syslog'                      => 'Syslog',
+        '/var/log/nginx/access.log'            => 'Nginx Access',
+        '/var/log/nginx/error.log'             => 'Nginx Error',
     ];
 
     public function getAvailableLogs(array $extra = []): array

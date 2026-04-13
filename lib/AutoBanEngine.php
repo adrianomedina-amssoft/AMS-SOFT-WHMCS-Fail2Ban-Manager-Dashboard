@@ -42,8 +42,24 @@ class AutoBanEngine
             }
         }
 
+        // Coletar logpaths do jail.local para incluir na análise,
+        // igualando o comportamento do Log Viewer (LogViewerController::handle)
+        $extra = [];
+        try {
+            $jailConfig = new JailConfig('/etc/fail2ban/jail.local', $this->client);
+            $jailData   = $jailConfig->readJailLocal();
+            foreach ($jailData as $jail => $cfg) {
+                if ($jail === 'DEFAULT' || empty($cfg['logpath'])) {
+                    continue;
+                }
+                $extra[$cfg['logpath']] = $jail;
+            }
+        } catch (\Throwable $e) {
+            // jail.local inacessível — segue sem extra
+        }
+
         $viewer        = new LogViewer();
-        $availableLogs = $viewer->getAvailableLogs();
+        $availableLogs = $viewer->getAvailableLogs($extra);
 
         if (empty($availableLogs)) {
             return [];
