@@ -204,8 +204,15 @@ class AIController
                 ]);
                 $jailConfig->reloadAll();
             } else {
+                $currentBantime  = (string)(int)Database::getConfig('global_bantime', 604800);
+                $existingBantime = $jailLocal[AutoBanEngine::AI_JAIL]['bantime'] ?? '';
+                $needsReload     = false;
+                if ($existingBantime !== $currentBantime) {
+                    $jailConfig->saveJail(AutoBanEngine::AI_JAIL, ['bantime' => $currentBantime]);
+                    $needsReload = true;
+                }
                 $activeJails = $client->getJails();
-                if (!in_array(AutoBanEngine::AI_JAIL, $activeJails, true)) {
+                if ($needsReload || !in_array(AutoBanEngine::AI_JAIL, $activeJails, true)) {
                     $jailConfig->reloadAll();
                 }
             }
@@ -341,6 +348,15 @@ class AIController
                     'success' => false,
                     'error'   => "Falha ao criar jail '{$jailName}' em jail.local.",
                 ]);
+            }
+        } else {
+            // Jail já existe — sincronizar bantime com global_bantime
+            $globalBantime = (string)(int)Database::getConfig('global_bantime', 604800);
+            $jailCfg       = $this->router->makeJailConfig();
+            $jailLocalData = $jailCfg->readJailLocal();
+            if (isset($jailLocalData[$jailName]) && ($jailLocalData[$jailName]['bantime'] ?? '') !== $globalBantime) {
+                $jailCfg->saveJail($jailName, ['bantime' => $globalBantime]);
+                $filterManager->reloadJail($jailName);
             }
         }
 
