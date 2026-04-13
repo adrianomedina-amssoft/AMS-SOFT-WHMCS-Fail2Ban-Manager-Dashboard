@@ -386,6 +386,15 @@ class JailsController
             }
         }
 
+        // Paginação
+        $perPage  = 10;
+        $page     = max(1, (int)($_GET['page'] ?? 1));
+        $total    = count($jailData);
+        $pages    = $total > 0 ? (int)ceil($total / $perPage) : 1;
+        $page     = min($page, $pages);
+        $offset   = ($page - 1) * $perPage;
+        $jailData = array_slice($jailData, $offset, $perPage, true);
+
         // Collect available filters from filter.d for the "Novo Jail" modal
         $availableFilters = [];
         $filterDir = '/etc/fail2ban/filter.d';
@@ -425,6 +434,9 @@ class JailsController
             'prefill_findtime'   => $prefillFindtime,
             'prefill_bantime'    => $prefillBantime,
             'open_add_modal'     => $openAddModal,
+            'page'               => $page,
+            'pages'              => $pages,
+            'total'              => $total,
         ]);
     }
 }
