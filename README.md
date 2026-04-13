@@ -153,14 +153,34 @@ EOF
 O painel do WHMCS (processo `www-data`) precisa ter permissão de **escrita** no `jail.local` para criar, editar e remover jails pela interface gráfica.
 
 ```bash
+# fail2ban — www-data precisa ler e escrever o jail.local
 chown root:www-data /etc/fail2ban/jail.local
 chmod 664 /etc/fail2ban/jail.local
 chown root:www-data /etc/fail2ban
 chmod 750 /etc/fail2ban
+
+# diretório apache2
 chown root:www-data /var/log/apache2
 chmod 750 /var/log/apache2
-chown root:www-data /var/log/apache2/*.log
+
+# logs do sistema — mantém padrão, www-data não precisa
+chown root:adm /var/log/apache2/*.log
 chmod 640 /var/log/apache2/*.log
+
+# logs whmcs — www-data precisa ler
+chown root:www-data /var/log/apache2/*whmcs*.log
+chmod 640 /var/log/apache2/*whmcs*.log
+
+# alguns logs apache2
+chown root:www-data /var/log/apache2/access.log
+chown root:www-data /var/log/apache2/error.log
+chmod 640 /var/log/apache2/access.log
+chmod 640 /var/log/apache2/error.log
+
+# log de auth do módulo — www-data precisa escrever e ler
+touch /var/log/whmcs_auth.log
+chown www-data:www-data /var/log/whmcs_auth.log
+chmod 640 /var/log/whmcs_auth.log
 ```
 
 > ⚠️ Sem este passo, todas as operações de escrita (criar jail, editar parâmetros, remover jail) falharão com a mensagem "Erro ao criar jail".
