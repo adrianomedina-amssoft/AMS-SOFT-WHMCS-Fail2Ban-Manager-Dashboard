@@ -111,17 +111,19 @@ class AIController
             'medium'   => Database::getConfig('ai_threshold_medium',   '5:30'),
         ];
 
-        $lastPingOk = Database::getConfig('ai_last_ping_ok', '0');
+        $lastPingOk    = Database::getConfig('ai_last_ping_ok', '0');
+        $globalBantime = (int)Database::getConfig('global_bantime', 604800);
 
         return $this->router->render('ai_settings', [
-            'api_key_set'   => $apiKeySet,
-            'ai_mode'       => $mode,
-            'ai_interval'   => $interval,
-            'ai_min_conf'   => $minConf,
-            'ai_whitelist'  => $whitelist,
-            'ai_prompt'     => $prompt,
-            'thresholds'    => $thresholds,
-            'last_ping_ok'  => $lastPingOk,
+            'api_key_set'    => $apiKeySet,
+            'ai_mode'        => $mode,
+            'ai_interval'    => $interval,
+            'ai_min_conf'    => $minConf,
+            'ai_whitelist'   => $whitelist,
+            'ai_prompt'      => $prompt,
+            'thresholds'     => $thresholds,
+            'last_ping_ok'   => $lastPingOk,
+            'global_bantime' => $globalBantime,
         ]);
     }
 
@@ -198,7 +200,7 @@ class AIController
                     'filter'   => $this->findBestFilter(AutoBanEngine::AI_JAIL),
                     'maxretry' => '5',
                     'findtime' => '600',
-                    'bantime'  => '3600',
+                    'bantime'  => (string)(int)Database::getConfig('global_bantime', 604800),
                 ]);
                 $jailConfig->reloadAll();
             } else {
@@ -331,7 +333,7 @@ class AIController
 
         if (!$jailAlreadyExisted) {
             $ok = $filterManager->createJailForFilter($jailName, $filterName, [
-                'bantime' => (int)($suggestion['bantime'] ?? 86400),
+                'bantime' => (int)Database::getConfig('global_bantime', 604800),
                 'logpath' => $this->detectLogPath($failregex, $suggestion['evidence'] ?? ''),
             ]);
             if (!$ok) {
@@ -560,6 +562,13 @@ class AIController
         $prompt = substr(trim($post['ai_prompt'] ?? ''), 0, 8000);
         if ($prompt !== '') {
             Database::setConfig('ai_prompt', $prompt);
+        }
+
+        // Bantime global
+        $validBantimes = [604800, 1209600, 1814400, 2419200, 7776000, 15552000, 31536000];
+        $bt = (int)($post['global_bantime'] ?? 604800);
+        if (in_array($bt, $validBantimes, true)) {
+            Database::setConfig('global_bantime', (string)$bt);
         }
 
         // Thresholds por severidade (formato: "detections:minutes")

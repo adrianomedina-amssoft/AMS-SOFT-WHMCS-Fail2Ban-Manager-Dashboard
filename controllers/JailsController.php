@@ -173,7 +173,7 @@ class JailsController
         $findtime = max(60, min(86400, (int)($_POST['findtime'] ?? 600)));
         $bantime  = (int)($_POST['bantime'] ?? 3600);
         if ($bantime !== -1) {
-            $bantime = max(60, min(2592000, $bantime));
+            $bantime = max(60, min(31536000, $bantime));
         }
 
         $logpath = trim($_POST['logpath'] ?? '');
@@ -306,7 +306,7 @@ class JailsController
         $findtime = max(60, min(86400, (int)($_POST['findtime'] ?? 600)));
         $bantime  = (int)($_POST['bantime'] ?? 3600);
         if ($bantime !== -1) {
-            $bantime = max(60, min(2592000, $bantime));
+            $bantime = max(60, min(31536000, $bantime));
         }
 
         // logpath: validate no path traversal
@@ -414,11 +414,12 @@ class JailsController
         if ($prefillLogpath !== '' && (str_contains($prefillLogpath, '..') || !str_starts_with($prefillLogpath, '/'))) {
             $prefillLogpath = '';
         }
-        $prefillMaxretry = max(1,  min(100,    (int)($_GET['maxretry'] ?? 5)));
-        $prefillFindtime = max(60, min(86400,   (int)($_GET['findtime'] ?? 600)));
-        $prefillBantime  = (int)($_GET['bantime'] ?? 3600);
+        $prefillMaxretry    = max(1,  min(100,   (int)($_GET['maxretry'] ?? 5)));
+        $prefillFindtime    = max(60, min(86400, (int)($_GET['findtime'] ?? 600)));
+        $defaultBantime     = (int)Database::getConfig('global_bantime', 604800);
+        $prefillBantime     = isset($_GET['bantime']) ? (int)$_GET['bantime'] : $defaultBantime;
         if ($prefillBantime !== -1) {
-            $prefillBantime = max(60, min(2592000, $prefillBantime));
+            $prefillBantime = max(60, min(31536000, $prefillBantime));
         }
         $openAddModal   = !empty($_GET['open_modal']) && !empty($prefillJail);
 
