@@ -26,10 +26,12 @@ jail, bantime (segundos), reason (em português), suggested_rule (jail.local ent
 filter_name (string curto [a-z0-9-] max 50 chars, ex: "whmcs-wp-probe" -- nome unico para o tipo de ataque),
 failregex (regex fail2ban usando <HOST> no lugar do IP, compativel com Python re module,
            ex: "^.* \\[client <HOST>:\\d+\\] AH01630:.*wp-.*\\.php").
+           Para multiplos padroes, separe com \\n. NUNCA junte padroes com | quando cada um tem <HOST>.
 
 Regras para filter_name e failregex:
 - filter_name: apenas letras minusculas, numeros e hifens, descritivo do padrao de ataque
 - failregex: use <HOST> exatamente onde o IP aparece no log
+- Multiplos padroes: use \\n entre eles, NUNCA | entre padroes contendo <HOST> (causa erro fatal no Python re)
 - O regex deve capturar o PADRAO do ataque, nao apenas o IP especifico
 - Evite .* excessivo para minimizar falsos positivos
 
@@ -217,6 +219,7 @@ LOGS:
                 . "\n\nRegras:\n"
                 . "- filter_name: apenas [a-z0-9-], maximo 50 caracteres, descritivo do ataque\n"
                 . "- failregex: compativel com Python re module (fail2ban), use <HOST> onde o IP aparece\n"
+                . "- Multiplos padroes: separe com \\n, NUNCA junte com | quando cada padrao tem <HOST>\n"
                 . "- O regex deve capturar o PADRAO do ataque, nao apenas o IP especifico\n"
                 . "- Evite .* excessivo para minimizar falsos positivos\n"
                 . "- Nao inclua texto fora do JSON\n\n"
