@@ -387,6 +387,21 @@ class Database
     }
 
     /**
+     * Retorna IPs com sugestão pendente (aguardando revisão do admin).
+     * Usado para deduplicação em tempo real: evita floodar a fila com
+     * o mesmo IP enquanto o admin ainda não agiu.
+     */
+    public static function getPendingIPs(): array
+    {
+        return Capsule::table('mod_amssoft_fail2ban_ai_suggestions')
+            ->where('status', 'pending')
+            ->distinct()
+            ->pluck('ip')
+            ->map(fn ($ip) => (string)$ip)
+            ->toArray();
+    }
+
+    /**
      * Conta detecções de um IP nas últimas X minutos (para modo threshold).
      * Considera sugestões com status pending ou auto_executed.
      */

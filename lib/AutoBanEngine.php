@@ -49,9 +49,31 @@ class AutoBanEngine
             return [];
         }
 
-        // Carrega IPs já conhecidos ANTES de iterar os logs — evita chamadas
-        // desnecessárias à API para IPs que já estão na fila ou foram banidos.
-        $knownIPs = Database::getKnownIPs(7);
+        // Verificação em tempo real: IPs atualmente banidos no fail2ban.
+        // Mais inteligente que dedup por tempo fixo: se o ban expirou ou foi
+        // removido manualmente, o IP volta a ser detectado na próxima análise.
+        $activeBannedIPs = [];
+        try {
+            if ($this->client->ping()) {
+                $bannedData      = $this->client->getBannedIPs();
+                $activeBannedIPs = array_column($bannedData, 'ip');
+            }
+        } catch (\Throwable $e) {
+            // fail2ban offline — fallback para dedup baseado em tempo no banco
+        }
+
+        // IPs com sugestão pendente (admin ainda não agiu — não floodar a fila)
+        $pendingIPs = Database::getPendingIPs();
+
+        // Fallback quando fail2ban está offline: usa janela dinâmica baseada
+        // no global_bantime em vez de fixar 7 dias
+        if (empty($activeBannedIPs)) {
+            $bantimeDays     = (int)ceil((int)Database::getConfig('global_bantime', 604800) / 86400);
+            $activeBannedIPs = Database::getKnownIPs($bantimeDays);
+        }
+
+        // Lista combinada: banidos ativos + pendentes de revisão
+        $skipIPs = array_unique(array_merge($activeBannedIPs, $pendingIPs));
 
         $results = [];
 
@@ -103,8 +125,8 @@ class AutoBanEngine
                     continue;
                 }
 
-                // 2. IP já conhecido (pending/approved/auto_executed últimos 7 dias)
-                if (in_array($ip, $knownIPs, true)) {
+                // 2. IP atualmente banido no fail2ban ou com sugestão pendente
+                if (in_array($ip, $skipIPs, true)) {
                     continue;
                 }
 
@@ -118,9 +140,9 @@ class AutoBanEngine
                     continue;
                 }
 
-                // Adiciona ao knownIPs em memória para evitar duplicatas dentro
-                // do mesmo ciclo (múltiplos logs com o mesmo IP)
-                $knownIPs[] = $ip;
+                // Dedup em memória: evita processar o mesmo IP duas vezes
+                // no mesmo ciclo (múltiplos logs com o mesmo IP)
+                $skipIPs[] = $ip;
 
                 switch ($mode) {
                     case 'auto':
