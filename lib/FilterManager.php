@@ -120,12 +120,15 @@ class FilterManager
         }
 
         // Montar conteúdo do arquivo no formato padrão fail2ban
+        // Múltiplas linhas de failregex são indentadas — fail2ban compila cada uma separadamente
         $description = preg_replace('/[\x00-\x1F\x7F]/', '', $description);
+        $failregexLines  = array_filter(array_map('trim', explode("\n", $failregex)));
+        $failregexFormatted = implode("\n            ", $failregexLines);
         $content = "# AMS Fail2Ban Manager -- filtro gerado automaticamente\n"
                  . "# " . substr($description, 0, 200) . "\n"
                  . "# Criado em: " . date('Y-m-d H:i:s') . "\n\n"
                  . "[Definition]\n"
-                 . "failregex = " . $failregex . "\n"
+                 . "failregex = " . $failregexFormatted . "\n"
                  . "ignoreregex =\n";
 
         // Escrita atômica via arquivo temporário
@@ -249,21 +252,38 @@ class FilterManager
 
     /**
      * Valida a sintaxe do failregex usando preg_match() do PHP.
-     * Substitui <HOST> por placeholder IPv4 antes de testar.
+     * Cada linha é validada individualmente — fail2ban compila cada linha
+     * como uma regex Python separada.
      *
-     * Nota: fail2ban usa Python re module; diferenças sutis podem existir,
-     * mas a validação básica de sintaxe é suficiente para segurança.
+     * Rejeita linhas com múltiplos <HOST> num mesmo padrão: o Python re module
+     * não permite redefinição de grupos nomeados (ip4, ip6, dns) gerados pela
+     * expansão de <HOST>, causando "redefinition of group name" e crash do servidor.
      */
     private function validateFailregex(string $failregex): bool
     {
         if (strlen($failregex) > 1000 || trim($failregex) === '') {
             return false;
         }
-        // Substituir <HOST> por placeholder IPv4 simples
-        $testRegex = str_replace('<HOST>', '1\\.2\\.3\\.4', $failregex);
-        // Escapar barras para o delimitador PHP
-        $escaped = str_replace('/', '\\/', $testRegex);
-        // Testar sintaxe — preg_match retorna false se inválido
-        return @preg_match('/' . $escaped . '/', '') !== false;
+
+        // Validar cada linha separadamente (fail2ban compila cada linha como regex distinta)
+        $lines = array_filter(array_map('trim', explode("\n", $failregex)));
+        if (empty($lines)) {
+            return false;
+        }
+
+        foreach ($lines as $line) {
+            // Múltiplos <HOST> numa linha = grupos nomeados duplicados no Python re = crash fatal
+            if (substr_count($line, '<HOST>') > 1) {
+                return false;
+            }
+
+            $testRegex = str_replace('<HOST>', '1\\.2\\.3\\.4', $line);
+            $escaped   = str_replace('/', '\\/', $testRegex);
+            if (@preg_match('/' . $escaped . '/', '') === false) {
+                return false;
+            }
+        }
+
+        return true;
     }
 }
