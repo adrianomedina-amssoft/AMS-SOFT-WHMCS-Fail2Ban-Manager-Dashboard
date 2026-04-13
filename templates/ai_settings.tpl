@@ -17,6 +17,39 @@
 <input type="hidden" name="csrf_token" id="amsfb-csrf-settings" value="<?= $e($csrf_token) ?>">
 
 <!-- =========================================================
+     Card 0: Bantime Global
+     ========================================================= -->
+<div class="panel panel-default">
+    <div class="panel-heading"><strong>&#9201; Bantime Global</strong></div>
+    <div class="panel-body">
+        <div class="form-group">
+            <label>Tempo de banimento padrão</label>
+            <select name="global_bantime" class="form-control" style="max-width:260px;">
+                <?php
+                $bantimeOptions = [
+                    604800   => '1 semana',
+                    1209600  => '2 semanas',
+                    1814400  => '3 semanas',
+                    2419200  => '4 semanas',
+                    7776000  => '3 meses',
+                    15552000 => '6 meses',
+                    31536000 => '12 meses',
+                ];
+                foreach ($bantimeOptions as $val => $label):
+                ?>
+                <option value="<?= $val ?>" <?= ($global_bantime ?? 604800) === $val ? 'selected' : '' ?>>
+                    <?= $e($label) ?>
+                </option>
+                <?php endforeach; ?>
+            </select>
+            <span class="help-block">
+                Aplicado automaticamente em jails criados pela IA e como valor padrão no modal "Novo Jail".
+            </span>
+        </div>
+    </div>
+</div>
+
+<!-- =========================================================
      Card 1: API Anthropic
      ========================================================= -->
 <div class="panel panel-default">
