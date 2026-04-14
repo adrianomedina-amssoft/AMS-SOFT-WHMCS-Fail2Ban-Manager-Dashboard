@@ -104,6 +104,7 @@ class AIController
         $minConf   = Database::getConfig('ai_min_confidence', '75');
         $whitelist = Database::getConfig('ai_whitelist_ips', '');
         $prompt    = Database::getConfig('ai_prompt', AIAnalyzer::getDefaultPrompt());
+        $aiModel   = Database::getConfig('ai_model', 'claude-haiku-4-5-20251001');
 
         $thresholds = [
             'critical' => Database::getConfig('ai_threshold_critical', '1:5'),
@@ -117,6 +118,7 @@ class AIController
         return $this->router->render('ai_settings', [
             'api_key_set'    => $apiKeySet,
             'ai_mode'        => $mode,
+            'ai_model'       => $aiModel,
             'ai_interval'    => $interval,
             'ai_min_conf'    => $minConf,
             'ai_whitelist'   => $whitelist,
@@ -299,7 +301,8 @@ class AIController
                 ]);
             }
 
-            $analyzer = new AIAnalyzer($apiKey);
+            $model    = Database::getConfig('ai_model', 'claude-haiku-4-5-20251001');
+            $analyzer = new AIAnalyzer($apiKey, $model);
             $generated = $analyzer->generateFilterRegex($evidenceLines);
 
             if ($generated === null || empty($generated['failregex']) || empty($generated['filter_name'])) {
@@ -429,7 +432,8 @@ class AIController
             return json_encode(['success' => false, 'error' => 'Chave API Anthropic não configurada.']);
         }
 
-        $analyzer = new AIAnalyzer($apiKey);
+        $model    = Database::getConfig('ai_model', 'claude-haiku-4-5-20251001');
+        $analyzer = new AIAnalyzer($apiKey, $model);
         $client   = $this->router->makeClient();
         $engine   = new AutoBanEngine($analyzer, $client);
         $results  = $engine->runAnalysis(true); // forceReread: análise manual sempre relê as últimas linhas
@@ -458,7 +462,8 @@ class AIController
             return json_encode(['success' => false, 'error' => 'Chave API não informada.']);
         }
 
-        $analyzer = new AIAnalyzer($apiKey);
+        $model    = Database::getConfig('ai_model', 'claude-haiku-4-5-20251001');
+        $analyzer = new AIAnalyzer($apiKey, $model);
         $ok       = $analyzer->ping();
 
         Database::setConfig('ai_last_ping_ok', $ok ? '1' : '0');
@@ -549,6 +554,13 @@ class AIController
         $newKey = trim($post['api_key'] ?? '');
         if ($newKey !== '') {
             Database::setConfig('ai_api_key', Helper::encryptApiKey($newKey));
+        }
+
+        // Modelo de IA
+        $validModels = ['claude-haiku-4-5-20251001', 'claude-sonnet-4-6', 'claude-opus-4-6'];
+        $aiModel = $post['ai_model'] ?? 'claude-haiku-4-5-20251001';
+        if (in_array($aiModel, $validModels, true)) {
+            Database::setConfig('ai_model', $aiModel);
         }
 
         // Modo de operação

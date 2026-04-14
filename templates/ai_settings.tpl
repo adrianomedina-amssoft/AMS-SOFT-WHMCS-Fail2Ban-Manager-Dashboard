@@ -84,6 +84,55 @@
 </div>
 
 <!-- =========================================================
+     Card 1b: Modelo de IA
+     ========================================================= -->
+<div class="panel panel-default">
+    <div class="panel-heading"><strong>&#129302; Modelo de IA</strong></div>
+    <div class="panel-body">
+        <div class="form-group">
+
+            <div class="radio">
+                <label>
+                    <input type="radio" name="ai_model" value="claude-haiku-4-5-20251001"
+                        <?= ($ai_model ?? 'claude-haiku-4-5-20251001') === 'claude-haiku-4-5-20251001' ? 'checked' : '' ?>>
+                    <strong>Claude Haiku</strong>
+                </label>
+                <p class="help-block" style="margin-left:20px;">
+                    Modelo mais econômico e veloz da família Claude. Excelente para análise de logs de
+                    segurança: processa rapidamente grandes volumes de texto com custo muito baixo.
+                    <span class="label label-success">&#10003; Recomendado para análise de logs</span>
+                </p>
+            </div>
+
+            <div class="radio">
+                <label>
+                    <input type="radio" name="ai_model" value="claude-sonnet-4-6"
+                        <?= ($ai_model ?? '') === 'claude-sonnet-4-6' ? 'checked' : '' ?>>
+                    <strong>Claude Sonnet</strong>
+                </label>
+                <p class="help-block" style="margin-left:20px;">
+                    Equilíbrio entre capacidade analítica e custo. Ideal quando se deseja maior
+                    profundidade na detecção de padrões de ataque sem abrir mão da performance.
+                </p>
+            </div>
+
+            <div class="radio">
+                <label>
+                    <input type="radio" name="ai_model" value="claude-opus-4-6"
+                        <?= ($ai_model ?? '') === 'claude-opus-4-6' ? 'checked' : '' ?>>
+                    <strong>Claude Opus</strong>
+                </label>
+                <p class="help-block" style="margin-left:20px;">
+                    Modelo mais poderoso e preciso. Recomendado apenas para ambientes críticos com
+                    alto volume de ataques sofisticados. Custo por análise significativamente mais elevado.
+                </p>
+            </div>
+
+        </div>
+    </div>
+</div>
+
+<!-- =========================================================
      Card 2: Modo de operação
      ========================================================= -->
 <div class="panel panel-default">

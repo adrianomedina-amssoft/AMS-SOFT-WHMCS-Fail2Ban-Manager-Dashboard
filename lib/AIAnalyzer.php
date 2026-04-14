@@ -12,7 +12,7 @@ namespace AMS\Fail2Ban;
 class AIAnalyzer
 {
     private string $apiKey;
-    private string $model    = 'claude-sonnet-4-5';
+    private string $model;
     private string $endpoint = 'https://api.anthropic.com/v1/messages';
 
     /** Prompt padrão enviado ao Claude. Pode ser sobrescrito pelo banco. */
@@ -40,9 +40,10 @@ Não inclua texto fora do JSON.
 LOGS:
 {logs}';
 
-    public function __construct(string $apiKey)
+    public function __construct(string $apiKey, string $model = 'claude-haiku-4-5-20251001')
     {
         $this->apiKey = $apiKey;
+        $this->model  = $model;
     }
 
     /**
