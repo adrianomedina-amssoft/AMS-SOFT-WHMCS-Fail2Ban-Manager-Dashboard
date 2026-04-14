@@ -120,6 +120,18 @@ class IpsController
             // jail.local inacessível — usa apenas o que o fail2ban retornou
         }
 
+        // Filtros server-side (antes da paginação e do cross-reference com DB)
+        $filterIp   = substr(preg_replace('/[^0-9a-fA-F.:\\/]/', '', $_GET['ip'] ?? ''), 0, 50);
+        $filterJail = Helper::sanitizeJail($_GET['jail'] ?? '');
+
+        if ($filterIp !== '') {
+            $bannedIPs = array_values(array_filter($bannedIPs, fn($r) => str_contains($r['ip'], $filterIp)));
+        }
+        if ($filterJail !== '') {
+            $bannedIPs = array_values(array_filter($bannedIPs, fn($r) => $r['jail'] === $filterJail));
+        }
+        $filters = ['ip' => $filterIp, 'jail' => $filterJail];
+
         // Cross-reference with DB for ban time / reason
         $ipList  = array_unique(array_column($bannedIPs, 'ip'));
         $banInfo = [];
@@ -158,6 +170,7 @@ class IpsController
             'page'            => $page,
             'pages'           => $pages,
             'total_ips'       => $totalIPs,
+            'filters'         => $filters,
         ]);
     }
 }
