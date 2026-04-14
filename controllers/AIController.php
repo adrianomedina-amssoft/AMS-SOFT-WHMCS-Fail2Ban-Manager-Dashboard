@@ -104,7 +104,8 @@ class AIController
         $minConf   = Database::getConfig('ai_min_confidence', '75');
         $whitelist = Database::getConfig('ai_whitelist_ips', '');
         $prompt    = Database::getConfig('ai_prompt', AIAnalyzer::getDefaultPrompt());
-        $aiModel   = Database::getConfig('ai_model', 'claude-haiku-4-5-20251001');
+        $aiModel    = Database::getConfig('ai_model', 'claude-haiku-4-5-20251001');
+        $aiLogLines = (int)Database::getConfig('ai_log_lines', 200);
 
         $thresholds = [
             'critical' => Database::getConfig('ai_threshold_critical', '1:5'),
@@ -119,6 +120,7 @@ class AIController
             'api_key_set'    => $apiKeySet,
             'ai_mode'        => $mode,
             'ai_model'       => $aiModel,
+            'ai_log_lines'   => $aiLogLines,
             'ai_interval'    => $interval,
             'ai_min_conf'    => $minConf,
             'ai_whitelist'   => $whitelist,
@@ -561,6 +563,13 @@ class AIController
         $aiModel = $post['ai_model'] ?? 'claude-haiku-4-5-20251001';
         if (in_array($aiModel, $validModels, true)) {
             Database::setConfig('ai_model', $aiModel);
+        }
+
+        // Linhas por análise
+        $validLines = [200, 400, 600, 800, 1000];
+        $logLines = (int)($post['ai_log_lines'] ?? 200);
+        if (in_array($logLines, $validLines, true)) {
+            Database::setConfig('ai_log_lines', (string)$logLines);
         }
 
         // Modo de operação

@@ -38,6 +38,7 @@ class AutoBanEngine
         $mode          = Database::getConfig('ai_mode', 'suggestion');
         $minConfidence = (int)Database::getConfig('ai_min_confidence', 75);
         $whitelist     = $this->getWhitelist();
+        $logLineLimit  = (int)Database::getConfig('ai_log_lines', 200);
 
         // Modo automático exige confirmação explícita do admin (segurança dupla)
         if (in_array($mode, ['auto', 'threshold'], true)) {
@@ -92,8 +93,12 @@ class AutoBanEngine
             $activeBannedIPs = Database::getKnownIPs($bantimeDays);
         }
 
-        // Lista combinada: banidos ativos + pendentes de revisão
-        $skipIPs = array_unique(array_merge($activeBannedIPs, $pendingIPs));
+        // Análise manual (forceReread): só pula banidos ativos — IPs com sugestão pendente
+        // podem ser re-encontrados (saveSuggestion faz upsert, não cria duplicatas).
+        // Cron automático: conservador — pula também os pendentes para não floodar a fila.
+        $skipIPs = $forceReread
+            ? array_unique($activeBannedIPs)
+            : array_unique(array_merge($activeBannedIPs, $pendingIPs));
 
         $results = [];
 
@@ -121,14 +126,14 @@ class AutoBanEngine
                 // Análise manual forçada: relê as últimas linhas mesmo sem
                 // conteúdo novo (igual ao Log Viewer). Não atualiza o watermark
                 // para não perder bytes novos que cheguem depois.
-                $lines = $viewer->readLines($path, 200);
+                $lines = $viewer->readLines($path, $logLineLimit);
             } else {
                 if ($currentSize < $storedOffset) {
                     // Arquivo foi rotacionado/truncado — ler do início
                     $storedOffset = 0;
                 }
 
-                $lines = $this->readNewLines($path, $storedOffset, 200);
+                $lines = $this->readNewLines($path, $storedOffset, $logLineLimit);
 
                 // Atualiza o watermark independentemente de haver sugestões
                 Database::setConfig($offsetKey, (string)$currentSize);
