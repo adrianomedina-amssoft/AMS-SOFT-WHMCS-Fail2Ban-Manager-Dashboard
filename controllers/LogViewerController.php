@@ -164,7 +164,8 @@ class LogViewerController
             return json_encode(['success' => false, 'error' => 'Nenhuma linha encontrada no log.']);
         }
 
-        $analyzer    = new AIAnalyzer($apiKey);
+        $model       = Database::getConfig('ai_model', 'claude-haiku-4-5-20251001');
+        $analyzer    = new AIAnalyzer($apiKey, $model);
         $client      = $this->router->makeClient();
         $engine      = new AutoBanEngine($analyzer, $client);
         $suggestions = $analyzer->analyze($rawLines);
