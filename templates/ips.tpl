@@ -12,6 +12,29 @@
     </button>
 </div>
 
+<!-- Filtros -->
+<form method="get" action="<?= $e(strtok($modulelink, '?')) ?>" class="amsfb-filter-form form-inline" style="margin-bottom:12px;">
+    <input type="hidden" name="module" value="amssoft_fail2ban">
+    <input type="hidden" name="action" value="ips">
+
+    <div class="form-group">
+        <input type="text" name="ip" class="form-control form-control-sm"
+               placeholder="Filtrar por IP" value="<?= $e($filters['ip']) ?>" style="width:160px;">
+    </div>
+    <div class="form-group">
+        <select name="jail" class="form-control form-control-sm">
+            <option value="">Todos os jails</option>
+            <?php foreach ($jails as $j): ?>
+            <option value="<?= $e($j) ?>" <?= $filters['jail'] === $j ? 'selected' : '' ?>>
+                <?= $e($j) ?>
+            </option>
+            <?php endforeach; ?>
+        </select>
+    </div>
+    <button type="submit" class="btn btn-sm btn-primary">Filtrar</button>
+    <a href="<?= $e($modulelink . '&action=ips') ?>" class="btn btn-sm btn-default">Limpar</a>
+</form>
+
 <?php if ($error): ?>
 <div class="alert alert-warning"><?= $e($error) ?></div>
 <?php endif; ?>
@@ -25,7 +48,7 @@
 <?php else: ?>
 
 <p class="text-muted" style="margin-bottom:8px;">
-    <?= (int)$total_ips ?> IP(s) banido(s) &mdash; exibindo página <?= (int)$page ?> de <?= (int)$pages ?>
+    <?= (int)$total_ips ?> IP(s) <?= ($filters['ip'] || $filters['jail']) ? 'encontrado(s)' : 'banido(s)' ?> &mdash; exibindo página <?= (int)$page ?> de <?= (int)$pages ?>
 </p>
 
 <div class="table-responsive">
@@ -68,9 +91,12 @@
 <div class="amsfb-pagination-wrap">
     <nav aria-label="Paginação IPs">
         <ul class="pagination pagination-sm">
+            <?php
+            $ipFilterQs = '&ip=' . urlencode($filters['ip']) . '&jail=' . urlencode($filters['jail']);
+            ?>
             <?php if ($page > 1): ?>
             <li>
-                <a href="<?= $e($modulelink . '&action=ips&page=' . ($page - 1)) ?>">&laquo;</a>
+                <a href="<?= $e($modulelink . '&action=ips&page=' . ($page - 1) . $ipFilterQs) ?>">&laquo;</a>
             </li>
             <?php endif; ?>
 
@@ -80,13 +106,13 @@
             for ($p = $ipStart; $p <= $ipEnd; $p++):
             ?>
             <li class="<?= $p === $page ? 'active' : '' ?>">
-                <a href="<?= $e($modulelink . '&action=ips&page=' . $p) ?>"><?= $p ?></a>
+                <a href="<?= $e($modulelink . '&action=ips&page=' . $p . $ipFilterQs) ?>"><?= $p ?></a>
             </li>
             <?php endfor; ?>
 
             <?php if ($page < $pages): ?>
             <li>
-                <a href="<?= $e($modulelink . '&action=ips&page=' . ($page + 1)) ?>">&raquo;</a>
+                <a href="<?= $e($modulelink . '&action=ips&page=' . ($page + 1) . $ipFilterQs) ?>">&raquo;</a>
             </li>
             <?php endif; ?>
         </ul>
