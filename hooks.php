@@ -75,7 +75,8 @@ add_hook('AfterCronJob', 1, function (): void {
         $sudoPath  = $row->get('sudo_path')->value   ?? '/usr/bin/sudo';
         $clientBin = $row->get('fail2ban_client')->value ?? '/usr/bin/fail2ban-client';
 
-        $analyzer = new \AMS\Fail2Ban\AIAnalyzer($apiKey);
+        $model    = \AMS\Fail2Ban\Database::getConfig('ai_model', 'claude-haiku-4-5-20251001');
+        $analyzer = new \AMS\Fail2Ban\AIAnalyzer($apiKey, $model);
         $client   = new \AMS\Fail2Ban\Fail2BanClient($sudoPath, $clientBin);
         $engine   = new \AMS\Fail2Ban\AutoBanEngine($analyzer, $client);
 

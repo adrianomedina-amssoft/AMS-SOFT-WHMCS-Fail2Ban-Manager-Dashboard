@@ -133,6 +133,29 @@
 </div>
 
 <!-- =========================================================
+     Card 1c: Linhas por análise
+     ========================================================= -->
+<div class="panel panel-default">
+    <div class="panel-heading"><strong>&#128196; Linhas por Análise</strong></div>
+    <div class="panel-body">
+        <div class="form-group">
+            <label>Quantidade de linhas lidas por arquivo de log</label>
+            <select name="ai_log_lines" class="form-control" style="max-width:200px;">
+                <?php foreach ([200, 400, 600, 800, 1000] as $n): ?>
+                <option value="<?= $n ?>" <?= ($ai_log_lines ?? 200) === $n ? 'selected' : '' ?>>
+                    <?= $n ?> linhas
+                </option>
+                <?php endforeach; ?>
+            </select>
+            <span class="help-block">
+                Aplicado tanto na análise automática (cron) quanto ao clicar em "Analisar Agora".
+                Valores maiores aumentam a detecção mas elevam o custo de tokens da API.
+            </span>
+        </div>
+    </div>
+</div>
+
+<!-- =========================================================
      Card 2: Modo de operação
      ========================================================= -->
 <div class="panel panel-default">

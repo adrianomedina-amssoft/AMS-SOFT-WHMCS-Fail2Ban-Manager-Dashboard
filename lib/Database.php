@@ -184,6 +184,17 @@ class Database
     /** Salva uma nova sugestão da IA e retorna o ID inserido. */
     public static function saveSuggestion(array $data): int
     {
+        // Upsert: se já existe sugestão pending para o mesmo IP+jail, não duplica
+        $existing = Capsule::table('mod_amssoft_fail2ban_ai_suggestions')
+            ->where('ip',     $data['ip']   ?? '')
+            ->where('jail',   $data['jail'] ?? '')
+            ->where('status', 'pending')
+            ->first();
+
+        if ($existing) {
+            return (int)$existing->id;
+        }
+
         return (int) Capsule::table('mod_amssoft_fail2ban_ai_suggestions')->insertGetId([
             'ip'             => $data['ip']             ?? '',
             'jail'           => $data['jail']           ?? '',
