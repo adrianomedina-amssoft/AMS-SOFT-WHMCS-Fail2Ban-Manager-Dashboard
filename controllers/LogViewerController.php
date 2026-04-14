@@ -171,28 +171,68 @@ class LogViewerController
         $suggestions = $analyzer->analyze($rawLines);
 
         $saved    = 0;
+        $skipped  = 0;
         $minConf  = (int)Database::getConfig('ai_min_confidence', 75);
         $whitelist = $this->getWhitelist();
 
+        // Dedup: IPs já banidos ativamente no fail2ban
+        $activeBannedIPs = [];
+        try {
+            if ($client->ping()) {
+                $bannedData      = $client->getBannedIPs();
+                $activeBannedIPs = array_column($bannedData, 'ip');
+            }
+        } catch (\Throwable $e) {
+            // fail2ban offline — fallback baseado no banco
+        }
+        if (empty($activeBannedIPs)) {
+            $bantimeDays     = (int)ceil((int)Database::getConfig('global_bantime', 604800) / 86400);
+            $activeBannedIPs = Database::getKnownIPs($bantimeDays);
+        }
+
+        // Dedup: IPs com sugestão pendente (admin ainda não agiu)
+        $pendingIPs = Database::getPendingIPs();
+        $skipIPs    = array_unique(array_merge($activeBannedIPs, $pendingIPs));
+
         foreach ($suggestions as $suggestion) {
-            if (in_array($suggestion['ip'], $whitelist, true)) {
+            $ip = $suggestion['ip'] ?? '';
+
+            if (in_array($ip, $whitelist, true)) {
                 continue;
             }
             if ($suggestion['confidence'] < $minConf) {
                 continue;
             }
+            if (($suggestion['action'] ?? 'ban') !== 'ban') {
+                continue;
+            }
+            if (in_array($ip, $skipIPs, true)) {
+                $skipped++;
+                continue;
+            }
+
             $engine->saveSuggestion($suggestion, 'pending');
+            $skipIPs[] = $ip; // dedup em memória para múltiplas ocorrências no mesmo arquivo
             $saved++;
         }
 
         // Atualizar status de ping
         Database::setConfig('ai_last_ping_ok', '1');
 
+        if ($saved > 0) {
+            $msg = "{$saved} sugestão(ões) salva(s). Acesse a aba IA para revisar.";
+        } elseif ($skipped > 0) {
+            $msg = "Nenhuma sugestão nova — {$skipped} IP(s) já pendente(s) ou banido(s).";
+        } else {
+            $msg = "Nenhuma ameaça encontrada no trecho analisado.";
+        }
+
         return json_encode([
-            'success'    => true,
+            'success'     => true,
             'total_found' => count($suggestions),
             'saved'       => $saved,
-            'message'     => "{$saved} sugestão(ões) salva(s). Acesse a aba IA para revisar.",
+            'skipped'     => $skipped,
+            'message'     => $msg,
         ]);
     }
 
