@@ -162,6 +162,27 @@
     <div class="panel-heading"><strong>&#9881; Modo de Operação</strong></div>
     <div class="panel-body">
 
+        <!-- Toggle análise automática -->
+        <div class="form-group">
+            <label>
+                <input type="checkbox" name="ai_auto_enabled" value="1"
+                       id="amsfb-auto-enabled"
+                       <?= ($ai_auto_enabled === '1') ? 'checked' : '' ?>>
+                &nbsp;<strong>Ativar análise automática (via cron do WHMCS)</strong>
+            </label>
+            <p class="help-block">
+                Quando desativado, a IA só analisará logs quando você clicar manualmente em
+                <strong>"Analisar com IA"</strong> nas páginas
+                <a href="<?= $modulelink ?>&action=ai">Sugestões de IA</a> ou
+                <a href="<?= $modulelink ?>&action=logviewer">Log Viewer</a>.
+            </p>
+        </div>
+        <div id="amsfb-auto-disabled-warning" class="alert alert-info"
+             style="<?= ($ai_auto_enabled !== '1') ? '' : 'display:none;' ?>">
+            &#8505; Análise automática <strong>desativada</strong>. O cron do WHMCS não disparará análises de IA.
+        </div>
+        <hr>
+
         <div class="form-group">
             <div class="radio">
                 <label>
@@ -305,6 +326,15 @@
 <script>
 (function () {
     'use strict';
+
+    // Toggle análise automática
+    var autoEnabledChk = document.getElementById('amsfb-auto-enabled');
+    var autoDisabledWarn = document.getElementById('amsfb-auto-disabled-warning');
+    if (autoEnabledChk) {
+        autoEnabledChk.addEventListener('change', function () {
+            if (autoDisabledWarn) autoDisabledWarn.style.display = this.checked ? 'none' : '';
+        });
+    }
 
     // Mostrar/ocultar sub-formulários conforme modo selecionado
     var radios = document.querySelectorAll('input[name="ai_mode"]');
