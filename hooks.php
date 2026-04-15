@@ -53,6 +53,11 @@ add_hook('AfterCronJob', 1, function (): void {
         return;
     }
 
+    // Não executa se modo automático estiver desativado
+    if (\AMS\Fail2Ban\Database::getConfig('ai_auto_enabled', '1') !== '1') {
+        return;
+    }
+
     $interval = (int)\AMS\Fail2Ban\Database::getConfig('ai_interval_minutes', 30);
     $lastRun  = (int)\AMS\Fail2Ban\Database::getConfig('ai_last_run', 0);
 

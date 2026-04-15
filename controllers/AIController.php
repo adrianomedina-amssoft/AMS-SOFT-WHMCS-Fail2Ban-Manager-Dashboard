@@ -115,19 +115,21 @@ class AIController
 
         $lastPingOk    = Database::getConfig('ai_last_ping_ok', '0');
         $globalBantime = (int)Database::getConfig('global_bantime', 604800);
+        $autoEnabled   = Database::getConfig('ai_auto_enabled', '1');
 
         return $this->router->render('ai_settings', [
-            'api_key_set'    => $apiKeySet,
-            'ai_mode'        => $mode,
-            'ai_model'       => $aiModel,
-            'ai_log_lines'   => $aiLogLines,
-            'ai_interval'    => $interval,
-            'ai_min_conf'    => $minConf,
-            'ai_whitelist'   => $whitelist,
-            'ai_prompt'      => $prompt,
-            'thresholds'     => $thresholds,
-            'last_ping_ok'   => $lastPingOk,
-            'global_bantime' => $globalBantime,
+            'api_key_set'      => $apiKeySet,
+            'ai_mode'          => $mode,
+            'ai_model'         => $aiModel,
+            'ai_log_lines'     => $aiLogLines,
+            'ai_interval'      => $interval,
+            'ai_min_conf'      => $minConf,
+            'ai_whitelist'     => $whitelist,
+            'ai_prompt'        => $prompt,
+            'thresholds'       => $thresholds,
+            'last_ping_ok'     => $lastPingOk,
+            'global_bantime'   => $globalBantime,
+            'ai_auto_enabled'  => $autoEnabled,
         ]);
     }
 
@@ -621,6 +623,9 @@ class AIController
         // [SEC-9] Sempre definir o valor (inclusive '0') para que o admin
         // precise re-confirmar ao reativar o modo automático após desativá-lo.
         Database::setConfig('ai_confirmed_auto', !empty($post['confirm_auto']) ? '1' : '0');
+
+        // Toggle análise automática via cron
+        Database::setConfig('ai_auto_enabled', !empty($post['ai_auto_enabled']) ? '1' : '0');
     }
 
     /** Descriptografa a chave API armazenada. */
