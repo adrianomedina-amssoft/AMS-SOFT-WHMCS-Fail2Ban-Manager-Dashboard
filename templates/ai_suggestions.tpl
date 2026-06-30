@@ -504,24 +504,150 @@ $statusLabels = [
     });
 
     // -------------------------------------------------------------------------
-    // Analisar agora
+    // Analisar agora — sequencial com progresso
     // -------------------------------------------------------------------------
     var runNowBtn = document.getElementById('amsfb-run-now-btn');
     if (runNowBtn) {
         runNowBtn.addEventListener('click', function () {
             if (!confirm('Rodar análise de IA agora em todos os logs configurados?')) return;
             runNowBtn.disabled = true;
-            runNowBtn.innerHTML = '&#9654; Analisando...';
 
-            window.AMSFB.post('ai', 'run_now', {}, function (data) {
-                runNowBtn.disabled = false;
-                runNowBtn.innerHTML = '&#9654; Analisar agora';
-                if (data.success) {
-                    alert('✓ ' + (data.message || 'Análise concluída.'));
-                    window.location.reload();
-                } else {
-                    alert('✗ ' + (data.error || 'Erro ao rodar análise.'));
+            // 1. Buscar lista de logs
+            runNowBtn.innerHTML = '&#9203; Buscando logs...';
+            window.AMSFB.post('ai', 'list_logs', {}, function (data) {
+                if (!data.success || !data.logs || data.logs.length === 0) {
+                    runNowBtn.disabled = false;
+                    runNowBtn.innerHTML = '&#9654; Analisar agora';
+                    alert(data.error || 'Nenhum log encontrado para análise.');
+                    return;
                 }
+
+                var logs = data.logs;
+                var total = logs.length;
+                var current = 0;
+                var totalSaved = 0;
+                var pendingTbody = document.getElementById('amsfb-pending-tbody');
+                var badge = document.querySelector('.panel-heading .badge');
+
+                // 2. Analisar cada log sequencialmente
+                function analyzeNext() {
+                    if (current >= logs.length) {
+                        // Finalizado
+                        runNowBtn.disabled = false;
+                        runNowBtn.innerHTML = '&#9654; Analisar agora';
+                        if (totalSaved > 0) {
+                            alert('✓ Análise concluída — ' + totalSaved + ' sugestão(ões) em ' + total + ' log(s).');
+                        } else {
+                            alert('✓ Análise concluída — nenhuma ameaça encontrada em ' + total + ' log(s).');
+                        }
+                        return;
+                    }
+
+                    var log = logs[current];
+                    current++;
+                    runNowBtn.innerHTML = '&#9203; Analisando: ' + (log.label || log.path) + ' (' + current + '/' + total + ')...';
+
+                    window.AMSFB.post('ai', 'analyze_log', { path: log.path }, function (result) {
+                        if (result.success && result.suggestions && result.suggestions.length > 0) {
+                            totalSaved += result.saved;
+
+                            // Adicionar linhas na tabela
+                            result.suggestions.forEach(function (s) {
+                                if (!pendingTbody) return;
+                                // Verificar se já existe (dedup visual)
+                                if (document.getElementById('amsfb-row-' + s.id)) return;
+
+                                var tr = document.createElement('tr');
+                                tr.id = 'amsfb-row-' + s.id;
+                                tr.innerHTML =
+                                    '<td><strong>' + escapeHtml(s.ip || '') + '</strong></td>'
+                                    + '<td>' + escapeHtml(s.threat || '') + '</td>'
+                                    + '<td><span class="amsfb-sev-' + escapeHtml(s.severity || 'medium') + '">'
+                                    + escapeHtml(s.severity || 'medium') + '</span></td>'
+                                    + '<td><div class="amsfb-confidence-bar">'
+                                    + '<div class="amsfb-confidence-fill" style="width:' + (s.confidence || 0) + '%"></div>'
+                                    + '<span>' + (s.confidence || 0) + '%</span></div></td>'
+                                    + '<td>' + escapeHtml(s.jail || '-') + '</td>'
+                                    + '<td>' + (s.filter_name ? '<code style="font-size:11px;">amsfb-' + escapeHtml(s.filter_name) + '</code>' : '-')
+                                    + '</td>'
+                                    + '<td>' + (s.bantime ? escapeHtml(String(s.bantime)) + 's' : '-') + '</td>'
+                                    + '<td>' + escapeHtml(s.created_at || '-') + '</td>'
+                                    + '<td class="amsfb-action-btns">'
+                                    + '<button class="btn btn-xs btn-success amsfb-approve-btn" data-id="' + s.id + '" title="Banir este IP">&#128683; Banir IP</button> '
+                                    + '<button class="btn btn-xs btn-danger amsfb-reject-btn" data-id="' + s.id + '" title="Rejeitar sugestão">&#10007; Rejeitar</button>'
+                                    + '</td>';
+
+                                // Inserir no início da tabela
+                                if (pendingTbody.firstChild) {
+                                    pendingTbody.insertBefore(tr, pendingTbody.firstChild);
+                                } else {
+                                    pendingTbody.appendChild(tr);
+                                }
+
+                                // Bindar eventos
+                                bindApproveReject(tr);
+                            });
+
+                            // Atualizar badge
+                            if (badge) {
+                                var count = pendingTbody.querySelectorAll('tr').length;
+                                badge.textContent = count;
+                            }
+                        }
+
+                        // Próximo log
+                        analyzeNext();
+                    });
+                }
+
+                function escapeHtml(str) {
+                    var div = document.createElement('div');
+                    div.textContent = str;
+                    return div.innerHTML;
+                }
+
+                function bindApproveReject(row) {
+                    var approveBtn = row.querySelector('.amsfb-approve-btn');
+                    var rejectBtn = row.querySelector('.amsfb-reject-btn');
+                    if (approveBtn) {
+                        approveBtn.addEventListener('click', function () {
+                            var id = this.getAttribute('data-id');
+                            if (!confirm('Aprovar sugestão #' + id + ' e executar ban?')) return;
+                            this.disabled = true;
+                            var self = this;
+                            window.AMSFB.post('ai', 'approve', { id: id }, function (data) {
+                                if (data.success) {
+                                    row.remove();
+                                    if (badge) badge.textContent = pendingTbody.querySelectorAll('tr').length;
+                                    alert('✓ ' + (data.message || 'Aprovado.'));
+                                } else {
+                                    self.disabled = false;
+                                    alert('✗ ' + (data.error || 'Erro ao aprovar.'));
+                                }
+                            });
+                        });
+                    }
+                    if (rejectBtn) {
+                        rejectBtn.addEventListener('click', function () {
+                            var id = this.getAttribute('data-id');
+                            if (!confirm('Rejeitar sugestão #' + id + '?')) return;
+                            this.disabled = true;
+                            var self = this;
+                            window.AMSFB.post('ai', 'reject', { id: id }, function (data) {
+                                if (data.success) {
+                                    row.remove();
+                                    if (badge) badge.textContent = pendingTbody.querySelectorAll('tr').length;
+                                } else {
+                                    self.disabled = false;
+                                    alert('✗ ' + (data.error || 'Erro ao rejeitar.'));
+                                }
+                            });
+                        });
+                    }
+                }
+
+                // Iniciar análise
+                analyzeNext();
             });
         });
     }

@@ -171,6 +171,12 @@ class AIController
             case 'create_filter':
                 return $this->ajaxCreateFilter($post);
 
+            case 'list_logs':
+                return $this->ajaxListLogs();
+
+            case 'analyze_log':
+                return $this->ajaxAnalyzeLog($post);
+
             default:
                 return json_encode(['success' => false, 'error' => 'Ação desconhecida.']);
         }
@@ -439,6 +445,138 @@ class AIController
             'success' => true,
             'total'   => count($results),
             'message' => count($results) . ' resultado(s) processado(s).',
+        ]);
+    }
+
+    // -----------------------------------------------------------------------
+    // AJAX: listar logs disponíveis para análise
+    // -----------------------------------------------------------------------
+
+    private function ajaxListLogs(): string
+    {
+        $extra = [];
+        try {
+            $jailConfig = $this->router->makeJailConfig();
+            $jailData   = $jailConfig->readJailLocal();
+            foreach ($jailData as $jail => $cfg) {
+                if ($jail === 'DEFAULT' || empty($cfg['logpath'])) {
+                    continue;
+                }
+                $extra[$cfg['logpath']] = $jail;
+            }
+        } catch (\Throwable $e) {
+            // jail.local inacessível — segue sem extra
+        }
+
+        $viewer = new LogViewer();
+        $logs   = $viewer->getAvailableLogs($extra);
+
+        return json_encode(['success' => true, 'logs' => $logs]);
+    }
+
+    // -----------------------------------------------------------------------
+    // AJAX: analisar um único log
+    // -----------------------------------------------------------------------
+
+    private function ajaxAnalyzeLog(array $post): string
+    {
+        $path = trim($post['path'] ?? '');
+        if (empty($path)) {
+            return json_encode(['success' => false, 'error' => 'Path não informado.']);
+        }
+
+        // [SEC-8] Validar path
+        $viewer = new LogViewer();
+        if (!$viewer->isValidPath($path)) {
+            return json_encode(['success' => false, 'error' => 'Path não autorizado.']);
+        }
+
+        $analyzer = $this->makeAnalyzer();
+        if ($analyzer === null) {
+            return json_encode(['success' => false, 'error' => 'Chave API não configurada para o provedor ativo.']);
+        }
+
+        // Ler últimas N linhas
+        $logLineLimit = (int) Database::getConfig('ai_log_lines', 200);
+        $lines = $viewer->readLines($path, $logLineLimit);
+
+        if (empty($lines)) {
+            return json_encode([
+                'success'    => true,
+                'log'        => $path,
+                'suggestions'=> [],
+                'saved'      => 0,
+                'skipped'    => 0,
+                'message'    => 'Log vazio ou ilegível.',
+            ]);
+        }
+
+        // Chamar IA
+        $suggestions = $analyzer->analyze($lines);
+
+        // Dedup: IPs já banidos ou com sugestão pendente
+        $skipIPs = [];
+        try {
+            $client = $this->router->makeClient();
+            if ($client->ping()) {
+                $bannedData = $client->getBannedIPs();
+                $skipIPs = array_column($bannedData, 'ip');
+            }
+        } catch (\Throwable $e) {}
+        if (empty($skipIPs)) {
+            $bantimeDays = (int) ceil((int) Database::getConfig('global_bantime', 604800) / 86400);
+            $skipIPs = Database::getKnownIPs($bantimeDays);
+        }
+        $pendingIPs = Database::getPendingIPs();
+        $skipIPs = array_unique(array_merge($skipIPs, $pendingIPs));
+
+        // Whitelist
+        $whitelistRaw = Database::getConfig('ai_whitelist_ips', '');
+        $whitelist = [];
+        if (!empty($whitelistRaw)) {
+            foreach (preg_split('/[\r\n,]+/', $whitelistRaw) as $line) {
+                $ip = trim($line);
+                if (filter_var($ip, FILTER_VALIDATE_IP)) {
+                    $whitelist[] = $ip;
+                }
+            }
+        }
+
+        $minConf   = (int) Database::getConfig('ai_min_confidence', 75);
+        $saved     = 0;
+        $skipped   = 0;
+        $savedList = [];
+
+        foreach ($suggestions as $suggestion) {
+            $ip = $suggestion['ip'] ?? '';
+
+            if (in_array($ip, $whitelist, true)) {
+                continue;
+            }
+            if (in_array($ip, $skipIPs, true)) {
+                $skipped++;
+                continue;
+            }
+            if ($suggestion['confidence'] < $minConf) {
+                continue;
+            }
+            if (($suggestion['action'] ?? 'ban') !== 'ban') {
+                continue;
+            }
+
+            $id = Database::saveSuggestion($suggestion);
+            $skipIPs[] = $ip;
+            $saved++;
+            $suggestion['id'] = $id;
+            $savedList[] = $suggestion;
+        }
+
+        return json_encode([
+            'success'     => true,
+            'log'         => $path,
+            'suggestions' => $savedList,
+            'saved'       => $saved,
+            'skipped'     => $skipped,
         ]);
     }
 
