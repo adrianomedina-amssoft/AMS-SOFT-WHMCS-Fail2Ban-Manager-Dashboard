@@ -84,9 +84,6 @@ class AIController
             return '';
         }
 
-        // Lazy migration: migrar chaves antigas (Anthropic-only) para o novo formato
-        $this->migrateOldKeys();
-
         $activeProvider = Database::getConfig('ai_active_provider', 'anthropic');
         $providers      = AIAnalyzer::getProviders();
 
@@ -533,42 +530,6 @@ class AIController
             $config['base_url'],
             $config['protocol'] ?? ''
         );
-    }
-
-    /**
-     * Lazy migration: migra chaves antigas (Anthropic-only) para o novo formato.
-     * Idempotente — só executa se as chaves antigas existirem e as novas não.
-     */
-    private function migrateOldKeys(): void
-    {
-        // Migrar ai_api_key → ai_provider_anthropic_api_key
-        $oldKey = Database::getConfig('ai_api_key', '');
-        if ($oldKey !== '' && Database::getConfig('ai_provider_anthropic_api_key', '') === '') {
-            Database::setConfig('ai_provider_anthropic_api_key', $oldKey);
-            // Não apagar a chave antiga para não quebrar rollback
-        }
-
-        // Migrar ai_model → ai_provider_anthropic_model
-        $oldModel = Database::getConfig('ai_model', '');
-        if ($oldModel !== '' && Database::getConfig('ai_provider_anthropic_model', '') === '') {
-            Database::setConfig('ai_provider_anthropic_model', $oldModel);
-        }
-
-        // Garantir que ai_active_provider existe
-        if (Database::getConfig('ai_active_provider', '') === '') {
-            Database::setConfig('ai_active_provider', 'anthropic');
-        }
-
-        // Limpar base URL salva para provedores que não precisam de URL editável
-        // (corrige URLs erradas salvas antes de needs_base_url=false)
-        foreach (AIAnalyzer::getProviders() as $key => $def) {
-            if (!$def['needs_base_url']) {
-                $saved = Database::getConfig("ai_provider_{$key}_base_url", '');
-                if ($saved !== '') {
-                    Database::setConfig("ai_provider_{$key}_base_url", '');
-                }
-            }
-        }
     }
 
     /** [SEC-17] Valida base URL: deve ser https:// e não apontar para IPs privados. */

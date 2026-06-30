@@ -174,6 +174,43 @@ function amssoft_fail2ban_migrate_v2(): void
 }
 
 /**
+ * Migração automática v4: multi-provider IA.
+ * - Migra chaves antigas (ai_api_key, ai_model) para formato por provedor
+ * - Garante que ai_active_provider exista
+ * - Limpa base URLs de provedores que não precisam de URL editável
+ * Idempotente: só executa se as chaves antigas existirem E as novas estiverem vazias.
+ */
+function amssoft_fail2ban_migrate_v4(): void
+{
+    // Migrar ai_api_key → ai_provider_anthropic_api_key (preserva valor criptografado)
+    $oldKey = \AMS\Fail2Ban\Database::getConfig('ai_api_key', '');
+    if ($oldKey !== '' && \AMS\Fail2Ban\Database::getConfig('ai_provider_anthropic_api_key', '') === '') {
+        \AMS\Fail2Ban\Database::setConfig('ai_provider_anthropic_api_key', $oldKey);
+    }
+
+    // Migrar ai_model → ai_provider_anthropic_model
+    $oldModel = \AMS\Fail2Ban\Database::getConfig('ai_model', '');
+    if ($oldModel !== '' && \AMS\Fail2Ban\Database::getConfig('ai_provider_anthropic_model', '') === '') {
+        \AMS\Fail2Ban\Database::setConfig('ai_provider_anthropic_model', $oldModel);
+    }
+
+    // Garantir que ai_active_provider existe (default: anthropic)
+    if (\AMS\Fail2Ban\Database::getConfig('ai_active_provider', '') === '') {
+        \AMS\Fail2Ban\Database::setConfig('ai_active_provider', 'anthropic');
+    }
+
+    // Limpar base URL salva para provedores que não precisam de URL editável
+    foreach (\AMS\Fail2Ban\AIAnalyzer::getProviders() as $key => $def) {
+        if (!$def['needs_base_url']) {
+            $saved = \AMS\Fail2Ban\Database::getConfig("ai_provider_{$key}_base_url", '');
+            if ($saved !== '') {
+                \AMS\Fail2Ban\Database::setConfig("ai_provider_{$key}_base_url", '');
+            }
+        }
+    }
+}
+
+/**
  * Migração automática v3: adiciona colunas de filtro fail2ban à tabela de sugestões.
  * Idempotente: usa hasColumn() para verificar antes de adicionar.
  */
@@ -207,6 +244,13 @@ function amssoft_fail2ban_output(array $vars): void
     // Migração automática v3: colunas de filtro fail2ban
     try {
         amssoft_fail2ban_migrate_v3();
+    } catch (\Exception $e) {
+        // Silencioso
+    }
+
+    // Migração automática v4: multi-provider IA
+    try {
+        amssoft_fail2ban_migrate_v4();
     } catch (\Exception $e) {
         // Silencioso
     }
