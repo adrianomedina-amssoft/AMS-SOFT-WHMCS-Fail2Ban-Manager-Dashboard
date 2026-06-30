@@ -590,10 +590,15 @@ class AIController
             return false;
         }
 
-        // Bloquear IPs privados
+        // Bloquear IPs privados e link-local (SSRF defense)
         $ip = filter_var($host, FILTER_VALIDATE_IP);
         if ($ip !== false) {
+            // Bloquear redes privadas (10.x, 172.16-31.x, 192.168.x)
             if (filter_var($ip, FILTER_VALIDATE_IP, FILTER_FLAG_NO_PRIV_RANGE) === false) {
+                return false;
+            }
+            // Bloquear link-local (169.254.x.x — metadata endpoint AWS/GCP/Azure)
+            if (preg_match('/^169\.254\./', $ip)) {
                 return false;
             }
         }

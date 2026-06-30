@@ -310,7 +310,7 @@ Procurar por `[SEC-N]` nos comentários para encontrar cada medida de segurança
 - **[SEC-14]** Evitar `Capsule::raw()` com variável interpolada
 - **[SEC-15]** Validação de status contra ENUM antes de UPDATE
 - **[SEC-16]** Mitigação de prompt injection (system prompt + tags `<log_data>`)
-- **[SEC-17]** Base URL editável: validação https:// + bloqueio de IPs privados/localhost (SSRF defense)
+- **[SEC-17]** Base URL editável: validação https:// + bloqueio de IPs privados/localhost/link-local 169.254.x.x (SSRF defense)
 - **[SEC-18]** `ai_active_provider` validado contra registry antes de persistir
 - **[SEC-19]** Erros de API: mensagem genérica no frontend, detalhes nunca expostos
 
