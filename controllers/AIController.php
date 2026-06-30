@@ -454,6 +454,18 @@ class AIController
 
     private function ajaxListLogs(): string
     {
+        // [SEC-10] Rate limit: 60s entre sessões de análise
+        $lastRun = (int) Database::getConfig('ai_last_run', 0);
+        if ((time() - $lastRun) < 60) {
+            return json_encode([
+                'success' => false,
+                'error'   => 'Aguarde pelo menos 60 segundos entre análises.',
+            ]);
+        }
+
+        // Marcar início da sessão de análise (permite analyze_log sem rate limit individual)
+        Database::setConfig('ai_analysis_session_start', (string) time());
+
         $extra = [];
         try {
             $jailConfig = $this->router->makeJailConfig();
@@ -480,6 +492,13 @@ class AIController
 
     private function ajaxAnalyzeLog(array $post): string
     {
+        // Validar que existe uma sessão de análise ativa (iniciada por list_logs)
+        // Previne chamada direta via script sem passar pelo fluxo da UI
+        $sessionStart = (int) Database::getConfig('ai_analysis_session_start', 0);
+        if ($sessionStart === 0 || (time() - $sessionStart) > 300) {
+            return json_encode(['success' => false, 'error' => 'Sessão de análise não iniciada ou expirada. Clique em "Analisar agora" novamente.']);
+        }
+
         $path = trim($post['path'] ?? '');
         if (empty($path)) {
             return json_encode(['success' => false, 'error' => 'Path não informado.']);
