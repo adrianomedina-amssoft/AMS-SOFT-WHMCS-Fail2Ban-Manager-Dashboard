@@ -559,6 +559,20 @@ $statusLabels = [
 
                                 var tr = document.createElement('tr');
                                 tr.id = 'amsfb-row-' + s.id;
+
+                                // Botões de ação (mesmos da carga inicial PHP)
+                                var actionHtml = '<button class="btn btn-xs btn-success amsfb-approve-btn" data-id="' + s.id + '" title="Banir este IP">&#128683; Banir IP</button> '
+                                    + '<button class="btn btn-xs btn-danger amsfb-reject-btn" data-id="' + s.id + '" title="Rejeitar sugestão">&#10007; Rejeitar</button> '
+                                    + '<button class="btn btn-xs btn-info amsfb-evidence-btn" data-id="' + s.id + '" data-evidence="' + escapeHtml(JSON.stringify(s.evidence || [])) + '" title="Ver evidências">&#128220; Evidências</button> ';
+
+                                if (s.suggested_rule) {
+                                    actionHtml += '<button class="btn btn-xs btn-warning amsfb-rule-btn" data-id="' + s.id + '" data-rule="' + escapeHtml(s.suggested_rule) + '" title="Ver regra sugerida">&#128196; Regra</button> ';
+                                }
+
+                                if (s.failregex || (s.evidence && s.evidence.length > 0)) {
+                                    actionHtml += '<button class="btn btn-xs btn-default amsfb-create-filter-btn" data-id="' + s.id + '" data-filter-name="' + escapeHtml(s.filter_name || '') + '" data-has-regex="' + (s.failregex ? '1' : '0') + '" data-failregex="' + escapeHtml(s.failregex || '') + '" title="Criar filtro fail2ban">&#128736; Criar Filtro</button>';
+                                }
+
                                 tr.innerHTML =
                                     '<td><strong>' + escapeHtml(s.ip || '') + '</strong></td>'
                                     + '<td>' + escapeHtml(s.threat || '') + '</td>'
@@ -572,10 +586,7 @@ $statusLabels = [
                                     + '</td>'
                                     + '<td>' + (s.bantime ? escapeHtml(String(s.bantime)) + 's' : '-') + '</td>'
                                     + '<td>' + escapeHtml(s.created_at || '-') + '</td>'
-                                    + '<td class="amsfb-action-btns">'
-                                    + '<button class="btn btn-xs btn-success amsfb-approve-btn" data-id="' + s.id + '" title="Banir este IP">&#128683; Banir IP</button> '
-                                    + '<button class="btn btn-xs btn-danger amsfb-reject-btn" data-id="' + s.id + '" title="Rejeitar sugestão">&#10007; Rejeitar</button>'
-                                    + '</td>';
+                                    + '<td class="amsfb-action-btns">' + actionHtml + '</td>';
 
                                 // Inserir no início da tabela
                                 if (pendingTbody.firstChild) {
@@ -584,8 +595,8 @@ $statusLabels = [
                                     pendingTbody.appendChild(tr);
                                 }
 
-                                // Bindar eventos
-                                bindApproveReject(tr);
+                                // Bindar eventos (mesmos da carga inicial PHP)
+                                bindAllHandlers(tr);
                             });
 
                             // Atualizar badge
@@ -606,9 +617,9 @@ $statusLabels = [
                     return div.innerHTML;
                 }
 
-                function bindApproveReject(row) {
+                function bindAllHandlers(row) {
+                    // Banir IP
                     var approveBtn = row.querySelector('.amsfb-approve-btn');
-                    var rejectBtn = row.querySelector('.amsfb-reject-btn');
                     if (approveBtn) {
                         approveBtn.addEventListener('click', function () {
                             var id = this.getAttribute('data-id');
@@ -627,6 +638,9 @@ $statusLabels = [
                             });
                         });
                     }
+
+                    // Rejeitar
+                    var rejectBtn = row.querySelector('.amsfb-reject-btn');
                     if (rejectBtn) {
                         rejectBtn.addEventListener('click', function () {
                             var id = this.getAttribute('data-id');
@@ -640,6 +654,71 @@ $statusLabels = [
                                 } else {
                                     self.disabled = false;
                                     alert('✗ ' + (data.error || 'Erro ao rejeitar.'));
+                                }
+                            });
+                        });
+                    }
+
+                    // Evidências
+                    var evidenceBtn = row.querySelector('.amsfb-evidence-btn');
+                    if (evidenceBtn) {
+                        evidenceBtn.addEventListener('click', function () {
+                            var rawEvidence = this.getAttribute('data-evidence');
+                            var lines = [];
+                            try { lines = JSON.parse(rawEvidence); } catch (e) { lines = [rawEvidence]; }
+                            var content = document.getElementById('amsfb-evidence-content');
+                            if (content) content.textContent = Array.isArray(lines) ? lines.join('\n') : String(lines);
+                            if (typeof $ !== 'undefined') $('#amsfb-evidence-modal').modal('show');
+                        });
+                    }
+
+                    // Regra sugerida
+                    var ruleBtn = row.querySelector('.amsfb-rule-btn');
+                    if (ruleBtn) {
+                        ruleBtn.addEventListener('click', function () {
+                            var rule = this.getAttribute('data-rule');
+                            var content = document.getElementById('amsfb-rule-content');
+                            if (content) content.textContent = rule;
+                            if (typeof $ !== 'undefined') $('#amsfb-rule-modal').modal('show');
+                        });
+                    }
+
+                    // Criar Filtro
+                    var filterBtn = row.querySelector('.amsfb-create-filter-btn');
+                    if (filterBtn) {
+                        filterBtn.addEventListener('click', function () {
+                            var id = this.getAttribute('data-id');
+                            var filterName = this.getAttribute('data-filter-name');
+                            var hasRegex = this.getAttribute('data-has-regex') === '1';
+                            var failregex = this.getAttribute('data-failregex');
+                            var self = this;
+
+                            var msg;
+                            if (hasRegex) {
+                                msg = 'Criar filtro fail2ban para o padrão de ataque detectado?\n\n'
+                                    + 'Filtro: amsfb-' + filterName + '\n'
+                                    + 'Regex:  ' + failregex + '\n\n'
+                                    + 'Isso NÃO bane nenhum IP agora.';
+                            } else {
+                                msg = 'A IA irá gerar um failregex a partir das evidências e criar o filtro.\n\n'
+                                    + 'Deseja continuar?';
+                            }
+
+                            if (!confirm(msg)) return;
+                            self.disabled = true;
+                            self.innerHTML = hasRegex ? '&#8987; Criando...' : '&#8987; Gerando...';
+
+                            window.AMSFB.post('ai', 'create_filter', { id: id }, function (data) {
+                                if (data.success) {
+                                    self.innerHTML = '&#10003; Filtro criado';
+                                    self.disabled = true;
+                                    self.classList.remove('btn-default');
+                                    self.classList.add('btn-success');
+                                    alert('✓ ' + (data.message || 'Filtro criado.'));
+                                } else {
+                                    self.disabled = false;
+                                    self.innerHTML = '&#128736; Criar Filtro';
+                                    alert('✗ ' + (data.error || 'Erro ao criar filtro.'));
                                 }
                             });
                         });
