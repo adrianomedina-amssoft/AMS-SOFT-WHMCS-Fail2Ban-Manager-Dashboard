@@ -2,7 +2,7 @@
 
 ## Visão Geral
 
-Addon WHMCS que gerencia fail2ban via painel admin visual. Elimina a necessidade de SSH/terminal para operações de ban/unban, gerenciamento de jails, visualização de logs e análise de ameaças por IA (Claude/Anthropic).
+Addon WHMCS que gerencia fail2ban via painel admin visual. Elimina a necessidade de SSH/terminal para operações de ban/unban, gerenciamento de jails, visualização de logs e análise de ameaças por IA (multi-provider: Anthropic, MiMo/Xiaomi, e qualquer provedor OpenAI-compatible futuro).
 
 **Status:** Em desenvolvimento (v2.0.0, MIT License)
 **Autor:** AMS SOFT — https://www.amssoft.com.br
@@ -88,7 +88,15 @@ Log de eventos (ban/unban/manual_ban/manual_unban). Indexada por ip, jail, times
 
 ### mod_amssoft_fail2ban_config
 Key-value store genérico. Usado para:
-- Configurações da IA (`ai_api_key`, `ai_mode`, `ai_model`, `ai_prompt`, etc.)
+- **Multi-provider IA:**
+  - `ai_active_provider` — provedor ativo (`anthropic` | `mimo`)
+  - `ai_provider_{name}_api_key` — chave API criptografada por provedor
+  - `ai_provider_{name}_model` — modelo selecionado por provedor
+  - `ai_provider_{name}_protocol` — protocolo escolhido (provedores com seletor)
+  - `ai_provider_{name}_base_url` — endpoint (provedores editáveis)
+  - `ai_provider_{name}_last_ping` — último ping OK por provedor
+- **Config compartilhada IA:** `ai_mode`, `ai_prompt`, `ai_interval_minutes`, `ai_min_confidence`, `ai_whitelist_ips`, `ai_auto_enabled`, `ai_log_lines`, `ai_threshold_*`
+- **Legado (migrado automaticamente):** `ai_api_key`, `ai_model`
 - Watermarks de offset por log (`ai_log_offset.<md5>`)
 - Logs customizados (`custom_log.<key>`)
 - Chave de criptografia (`_enc_key`)
@@ -147,12 +155,25 @@ Arquivo `setup/sudoers/amssoft_fail2ban` concede NOPASSWD para:
 
 ### AIAnalyzer — Registry de Provedores
 
-Arquitetura multi-provider com dispatch por **protocolo** (não por nome):
+Arquitetura multi-provider com dispatch por **protocolo** (não por nome). Cada provedor define protocolo, modelos, e se a URL é editável.
 
 ```php
 AIAnalyzer::PROVIDERS = [
-    'anthropic' => ['protocol' => 'anthropic', ...],  // protocolo próprio
-    'mimo'      => ['protocol' => 'openai', ...],     // OpenAI-compatible
+    'anthropic' => [
+        'protocol' => 'anthropic',        // protocolo próprio
+        'models'   => ['claude-haiku-4-5-20251001', 'claude-sonnet-4-6', 'claude-opus-4-6'],
+        ...
+    ],
+    'mimo' => [
+        'protocol' => 'anthropic',        // default, mas editável via seletor na UI
+        'has_protocol_selector' => true,   // mostra seletor Anthropic/OpenAI
+        'protocol_options' => [
+            'anthropic' => ['base_url' => 'https://token-plan-sgp.xiaomimimo.com/anthropic'],
+            'openai'    => ['base_url' => 'https://token-plan-sgp.xiaomimimo.com/v1'],
+        ],
+        'models' => ['mimo-v2.5-pro', 'mimo-v2.5'],
+        ...
+    ],
 ];
 ```
 
@@ -160,18 +181,32 @@ Adicionar provedor futuro = 1 entrada no array `PROVIDERS`.
 
 **Provedores suportados:**
 - **Anthropic (Claude)** — protocolo próprio, endpoint `https://api.anthropic.com/v1/messages`
-- **MiMo (Xiaomi)** — protocolo OpenAI-compatible, base URL editável pelo admin
+- **MiMo (Xiaomi)** — suporta protocolo Anthropic e OpenAI, cliente escolhe via seletor na UI
+
+**Seletor de protocolo (MiMo):**
+Provedores com `has_protocol_selector => true` mostram radio buttons na UI para o cliente escolher entre protocolos disponíveis. O endpoint é aplicado automaticamente:
+- **Anthropic:** `https://token-plan-sgp.xiaomimimo.com/anthropic` → código adiciona `/v1/messages`
+- **OpenAI:** `https://token-plan-sgp.xiaomimimo.com/v1` → código adiciona `/chat/completions`
+
+O método `buildEndpointUrl()` monta a URL final a partir da base + path do protocolo.
 
 **Configuração no banco (chaves dinâmicas por provedor):**
 - `ai_active_provider` — provedor ativo (`anthropic` | `mimo`)
 - `ai_provider_{name}_api_key` — chave API criptografada (AES-256-CBC)
 - `ai_provider_{name}_model` — modelo selecionado
-- `ai_provider_{name}_base_url` — endpoint (apenas para provedores editáveis)
+- `ai_provider_{name}_protocol` — protocolo escolhido (apenas para provedores com seletor)
+- `ai_provider_{name}_base_url` — endpoint (apenas para provedores com `needs_base_url`)
 
-**Migração lazy:** chaves antigas `ai_api_key` e `ai_model` são migradas automaticamente para `ai_provider_anthropic_*`.
+**Migração lazy:**
+- Chaves antigas `ai_api_key` e `ai_model` são migradas automaticamente para `ai_provider_anthropic_*`
+- Base URLs salvas para provedores com `needs_base_url=false` são limpas automaticamente
+
+**Configurações compartilhadas entre provedores:**
+- Prompt (`ai_prompt`) — mesmo prompt para todos os provedores
+- Modo de operação, intervalo, confiança mínima, whitelist, thresholds
 
 - Logs truncados em N linhas (configurável: 200/400/600/800/1000)
-- Prompt customizável pelo admin (max 8000 chars, compartilhado entre provedores)
+- Prompt customizável pelo admin (max 8000 chars)
 - **Mitigação de prompt injection:** instruções no system prompt, logs em `<log_data>` com aviso explícito
 
 ### AutoBanEngine — 3 modos
@@ -232,12 +267,12 @@ Todas as requisições AJAX são:
 - `do=reload_all` — reload geral do fail2ban
 
 ### IA (action=ai)
-- `do=approve` — aprova sugestão (bane IP)
+- `do=approve` — aprova sugestão (bane IP via provedor ativo)
 - `do=reject` — rejeita sugestão
-- `do=run_now` — executa análise manual (rate limit: 60s)
-- `do=ping_api` — testa conexão com API Anthropic
-- `do=save_settings` — salva configurações da IA
-- `do=create_filter` — cria filtro fail2ban a partir de sugestão
+- `do=run_now` — executa análise manual via provedor ativo (rate limit: 60s)
+- `do=ping_api` — testa conexão com API (aceita `provider` e `protocol` no POST)
+- `do=save_settings` — salva configurações (multi-provider: provedor ativo, protocolo, chave, modelo)
+- `do=create_filter` — cria filtro fail2ban a partir de sugestão (usa provedor ativo)
 
 ### Log Viewer (action=logviewer)
 - `do=fetch_lines` — lê linhas do log
