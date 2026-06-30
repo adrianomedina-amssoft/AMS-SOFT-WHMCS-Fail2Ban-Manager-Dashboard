@@ -104,11 +104,16 @@ LOGS:
         string $baseUrl = '',
         string $protocol = ''
     ) {
+        if (!isset(self::PROVIDERS[$provider])) {
+            throw new \InvalidArgumentException("Provedor de IA inválido: {$provider}");
+        }
+
+        $def            = self::PROVIDERS[$provider];
         $this->provider = $provider;
         $this->apiKey   = $apiKey;
-        $this->protocol = $protocol ?: (self::PROVIDERS[$provider]['protocol'] ?? 'anthropic');
-        $this->model    = $model ?: (self::PROVIDERS[$provider]['default_model'] ?? '');
-        $this->baseUrl  = $baseUrl ?: (self::PROVIDERS[$provider]['default_base_url'] ?? '');
+        $this->protocol = $protocol ?: $def['protocol'];
+        $this->model    = $model ?: $def['default_model'];
+        $this->baseUrl  = $baseUrl ?: $def['default_base_url'];
     }
 
     // -----------------------------------------------------------------------
@@ -228,24 +233,13 @@ LOGS:
      */
     public function ping(): bool
     {
-        $protocol = $this->protocol;
+        $body = json_encode([
+            'model'      => $this->model,
+            'max_tokens' => 10,
+            'messages'   => [['role' => 'user', 'content' => 'ping']],
+        ]);
 
-        if ($protocol === 'anthropic') {
-            $body = json_encode([
-                'model'      => $this->model,
-                'max_tokens' => 10,
-                'messages'   => [['role' => 'user', 'content' => 'ping']],
-            ]);
-        } else {
-            // openai-compatible
-            $body = json_encode([
-                'model'      => $this->model,
-                'max_tokens' => 10,
-                'messages'   => [['role' => 'user', 'content' => 'ping']],
-            ]);
-        }
-
-        $raw = $this->httpPost($body, $protocol);
+        $raw = $this->httpPost($body, $this->protocol);
         if ($raw === false) {
             return false;
         }
