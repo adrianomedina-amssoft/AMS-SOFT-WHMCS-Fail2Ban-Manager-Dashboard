@@ -199,7 +199,15 @@ O método `buildEndpointUrl()` monta a URL final a partir da base + path do prot
 
 **Migração lazy:**
 - Chaves antigas `ai_api_key` e `ai_model` são migradas automaticamente para `ai_provider_anthropic_*`
+- Migração preserva valor já criptografado (copia direto, sem decriptar/recriptografar)
+- Guard idempotente: só migra se a chave antiga existir E a nova estiver vazia
 - Base URLs salvas para provedores com `needs_base_url=false` são limpas automaticamente
+
+**Criptografia de API keys (todos os provedores):**
+- Todas as chaves usam `Helper::encryptApiKey()` → AES-256-CBC com mesma `_enc_key`
+- Chave nunca é decriptada e exibida na UI (campo mascarado `●●●●●●●●`)
+- `showSettings()` só verifica se a chave existe (boolean `api_key_set`), não o valor
+- `persistSettings()` só salva se o campo não estiver vazio (mantém a existente)
 
 **Configurações compartilhadas entre provedores:**
 - Prompt (`ai_prompt`) — mesmo prompt para todos os provedores
