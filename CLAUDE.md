@@ -108,7 +108,7 @@ Key-value store genérico. Usado para:
 - Chave de criptografia (`_enc_key`)
 
 ### mod_amssoft_fail2ban_ai_suggestions
-Sugestões da IA com status (pending/approved/rejected/auto_executed). Inclui campos v3: `filter_name`, `failregex`, `filter_created_at`.
+Sugestões da IA com status (pending/approved/rejected/auto_executed). Inclui campos v3: `filter_name`, `failregex`, `filter_created_at`. **Agrupamento por país:** `getPendingGroupedByCountry()` faz JOIN com `geo_cache` para agrupar pendentes por `country_code`. `getPendingIdsByCountry($cc)` retorna IDs pendentes de um país específico (vazio = sem geo data). Usado para ações em massa (bulk approve/reject) na UI.
 
 ### mod_amssoft_fail2ban_geo_cache
 Cache de dados geográficos de IPs (via ip-api.com). PRIMARY KEY em `ip`, com `updated_at` para TTL (30 dias). Campos: `country` (nome por extenso), `country_code` (ISO 3166-1 alpha-2, ex: "BR"), `region`, `isp`, `asn` (apenas o número, ex: "AS28573" — extraído do campo `as` da API). Chaves na tabela config: `geoip_requests_this_minute`, `geoip_minute_window_start`, `geoip_cooldown_until` (rate limiting global).
@@ -356,6 +356,8 @@ Todas as requisições AJAX são:
 - `do=ping_api` — testa conexão com API (aceita `provider` e `protocol` no POST)
 - `do=save_settings` — salva configurações (multi-provider: provedor ativo, protocolo, chave, modelo)
 - `do=create_filter` — cria filtro fail2ban a partir de sugestão (usa provedor ativo)
+- `do=bulk_approve_country` — aprova todas as sugestões pendentes de um país (best-effort, retorna `approved_ids`, `failed_ids`, `dismissed_ids`)
+- `do=bulk_reject_country` — rejeita todas as sugestões pendentes de um país (batch UPDATE)
 
 **Fluxo "Analisar agora" (sequencial com progresso):**
 1. JS chama `do=list_logs` → retorna todos os logs disponíveis (rate limit 60s, marca sessão)
@@ -405,6 +407,7 @@ Procurar por `[SEC-N]` nos comentários para encontrar cada medida de segurança
 - **[SEC-17]** Base URL editável: validação https:// + bloqueio de IPs privados/localhost/link-local 169.254.x.x (SSRF defense)
 - **[SEC-18]** `ai_active_provider` validado contra registry antes de persistir
 - **[SEC-19]** Erros de API: mensagem genérica no frontend, detalhes nunca expostos
+- **[SEC-20]** Validação de `country_code` em bulk actions: regex `/^[A-Z]{0,2}$/` (2 letras maiúsculas ou vazio)
 
 ## Problemas Conhecidos
 

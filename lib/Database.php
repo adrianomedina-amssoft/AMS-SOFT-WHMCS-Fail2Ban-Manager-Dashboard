@@ -414,6 +414,61 @@ class Database
     }
 
     /**
+     * Retorna sugestões pendentes agrupadas por país (JOIN com geo_cache).
+     * IPs sem dados geo ou com country_code nulo/vazio ficam no grupo "Desconhecido".
+     *
+     * @return array [{country_code: string, country: string, ip_count: int}, ...]
+     */
+    public static function getPendingGroupedByCountry(): array
+    {
+        return Capsule::table('mod_amssoft_fail2ban_ai_suggestions as s')
+            ->leftJoin('mod_amssoft_fail2ban_geo_cache as g', 's.ip', '=', 'g.ip')
+            ->select(
+                Capsule::raw("COALESCE(g.country_code, '') as country_code"),
+                Capsule::raw("COALESCE(NULLIF(g.country, ''), 'Desconhecido') as country"),
+                Capsule::raw('COUNT(*) as ip_count')
+            )
+            ->where('s.status', 'pending')
+            ->groupBy(Capsule::raw("COALESCE(g.country_code, '')"), Capsule::raw("COALESCE(NULLIF(g.country, ''), 'Desconhecido')"))
+            ->orderByRaw('COUNT(*) DESC')
+            ->get()
+            ->map(fn ($r) => [
+                'country_code' => (string) $r->country_code,
+                'country'      => (string) $r->country,
+                'ip_count'     => (int) $r->ip_count,
+            ])
+            ->all();
+    }
+
+    /**
+     * Retorna IDs de sugestões pendentes de um país específico.
+     * country_code vazio = IPs sem dados geo (não estão no geo_cache ou country_code nulo/vazio).
+     *
+     * @param string $countryCode ISO 3166-1 alpha-2 ou vazio para "Desconhecido"
+     * @return int[] IDs das sugestões
+     */
+    public static function getPendingIdsByCountry(string $countryCode): array
+    {
+        $q = Capsule::table('mod_amssoft_fail2ban_ai_suggestions as s')
+            ->leftJoin('mod_amssoft_fail2ban_geo_cache as g', 's.ip', '=', 'g.ip')
+            ->where('s.status', 'pending');
+
+        if ($countryCode !== '') {
+            $q->where('g.country_code', $countryCode);
+        } else {
+            $q->where(function ($sub) {
+                $sub->whereNull('g.ip')
+                    ->orWhereNull('g.country_code')
+                    ->orWhere('g.country_code', '');
+            });
+        }
+
+        return $q->pluck('s.id')
+            ->map(fn ($id) => (int) $id)
+            ->toArray();
+    }
+
+    /**
      * Conta detecções de um IP nas últimas X minutos (para modo threshold).
      * Considera sugestões com status pending ou auto_executed.
      */

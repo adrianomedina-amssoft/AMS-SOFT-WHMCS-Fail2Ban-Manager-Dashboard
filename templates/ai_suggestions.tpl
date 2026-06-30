@@ -28,6 +28,51 @@ $statusLabels = [
 </div>
 
 <!-- =========================================================
+     Seção 0: Ações por País (bulk)
+     ========================================================= -->
+<?php if (!empty($country_groups)): ?>
+<div class="panel panel-default amsfb-country-panel">
+    <div class="panel-heading">
+        <strong>&#127758; Ações por País</strong>
+        <span class="badge" style="background:#337ab7; margin-left:8px;"><?= count($country_groups) ?></span>
+    </div>
+    <div class="panel-body">
+        <div class="amsfb-country-grid">
+        <?php foreach ($country_groups as $cg):
+            $cc = $cg['country_code'];
+            $flag = $cc !== '' ? \AMS\Fail2Ban\GeoIP::countryToFlag($cc) : '&#127760;';
+            $label = $e($cg['country']);
+        ?>
+            <div class="amsfb-country-card" data-country-code="<?= $e($cc) ?>">
+                <div>
+                    <span class="amsfb-country-flag"><?= $flag ?></span>
+                    <span class="amsfb-country-name"><?= $label ?></span>
+                    <span class="amsfb-country-count"><?= (int)$cg['ip_count'] ?></span>
+                </div>
+                <div class="amsfb-country-actions">
+                    <button class="btn btn-xs btn-success amsfb-bulk-approve-country"
+                            data-country-code="<?= $e($cc) ?>"
+                            data-country-name="<?= $label ?>"
+                            data-count="<?= (int)$cg['ip_count'] ?>"
+                            title="Banir todos os IPs deste país">
+                        &#128683; Banir Todos
+                    </button>
+                    <button class="btn btn-xs btn-danger amsfb-bulk-reject-country"
+                            data-country-code="<?= $e($cc) ?>"
+                            data-country-name="<?= $label ?>"
+                            data-count="<?= (int)$cg['ip_count'] ?>"
+                            title="Rejeitar todas as sugestões deste país">
+                        &#10007; Rejeitar
+                    </button>
+                </div>
+            </div>
+        <?php endforeach; ?>
+        </div>
+    </div>
+</div>
+<?php endif; ?>
+
+<!-- =========================================================
      Seção 1: Fila Pendente
      ========================================================= -->
 <div class="panel panel-default">
@@ -58,7 +103,8 @@ $statusLabels = [
             </thead>
             <tbody id="amsfb-pending-tbody">
             <?php foreach ($pending as $s): ?>
-                <tr id="amsfb-row-<?= (int)$s['id'] ?>">
+                <tr id="amsfb-row-<?= (int)$s['id'] ?>"
+                    data-country-code="<?= $e($geo_data[$s['ip']]['country_code'] ?? '') ?>">
                     <td>
                         <strong><?= $e($s['ip']) ?></strong>
                         <?php if (!empty($geo_data[$s['ip']])): ?>
@@ -355,6 +401,62 @@ $statusLabels = [
     'use strict';
 
     // -------------------------------------------------------------------------
+    // Helpers: country card sync
+    // -------------------------------------------------------------------------
+
+    /**
+     * Decrementa o badge de contagem de um card de país e remove o card se
+     * a contagem chegar a 0. Se o painel ficar sem nenhum card, esconde o
+     * painel inteiro.
+     *
+     * Decisão de design: atualização via textContent decremental (sem AJAX
+     * re-fetch). O valor inicial vem do PHP via getPendingGroupedByCountry()
+     * e é decrementado localmente a cada ação (individual ou bulk). Isso
+     * evita requests extras ao servidor. A consistência é garantida porque
+     * cada linha removida da tabela corresponde exatamente a um decremento.
+     */
+    function updateCountryCard(countryCode, delta) {
+        var cards = document.querySelectorAll('.amsfb-country-card');
+        for (var i = 0; i < cards.length; i++) {
+            var card = cards[i];
+            if (card.getAttribute('data-country-code') === countryCode) {
+                var countEl = card.querySelector('.amsfb-country-count');
+                if (!countEl) break;
+                var current = parseInt(countEl.textContent, 10) || 0;
+                var next = current + delta;
+                if (next <= 0) {
+                    card.remove();
+                    // Esconder painel se não restam cards
+                    var remaining = document.querySelectorAll('.amsfb-country-card');
+                    if (remaining.length === 0) {
+                        var panel = document.querySelector('.amsfb-country-panel');
+                        if (panel) panel.style.display = 'none';
+                    }
+                } else {
+                    countEl.textContent = next;
+                }
+                break;
+            }
+        }
+    }
+
+    function getIPsByCountry(countryCode) {
+        var ips = [];
+        var rows = document.querySelectorAll('#amsfb-pending-tbody tr[data-country-code="' + countryCode + '"]');
+        rows.forEach(function (row) {
+            var ipCell = row.querySelector('td:first-child strong');
+            if (ipCell) ips.push(ipCell.textContent.trim());
+        });
+        return ips;
+    }
+
+    function escapeHtml(str) {
+        var div = document.createElement('div');
+        div.textContent = str;
+        return div.innerHTML;
+    }
+
+    // -------------------------------------------------------------------------
     // Approve
     // -------------------------------------------------------------------------
     document.querySelectorAll('.amsfb-approve-btn').forEach(function (btn) {
@@ -368,12 +470,20 @@ $statusLabels = [
             window.AMSFB.post('ai', 'approve', { id: id }, function (data) {
                 if (data.success) {
                     var row = document.getElementById('amsfb-row-' + id);
-                    if (row) row.remove();
+                    var cc = row ? row.getAttribute('data-country-code') : '';
+                    if (row) {
+                        updateCountryCard(cc, -1);
+                        row.remove();
+                    }
                     // Remover duplicatas do mesmo IP dispensadas automaticamente
                     if (Array.isArray(data.dismissed_ids)) {
                         data.dismissed_ids.forEach(function (did) {
                             var dup = document.getElementById('amsfb-row-' + did);
-                            if (dup) dup.remove();
+                            if (dup) {
+                                var dupCc = dup.getAttribute('data-country-code');
+                                updateCountryCard(dupCc, -1);
+                                dup.remove();
+                            }
                         });
                     }
                     alert('✓ ' + (data.message || 'Aprovado.'));
@@ -399,7 +509,11 @@ $statusLabels = [
             window.AMSFB.post('ai', 'reject', { id: id }, function (data) {
                 if (data.success) {
                     var row = document.getElementById('amsfb-row-' + id);
-                    if (row) row.remove();
+                    if (row) {
+                        var cc = row.getAttribute('data-country-code');
+                        updateCountryCard(cc, -1);
+                        row.remove();
+                    }
                 } else {
                     self.disabled = false;
                     alert('✗ ' + (data.error || 'Erro ao rejeitar.'));
@@ -582,6 +696,7 @@ $statusLabels = [
 
                                 var tr = document.createElement('tr');
                                 tr.id = 'amsfb-row-' + s.id;
+                                tr.setAttribute('data-country-code', '');
 
                                 // Botões de ação (mesmos da carga inicial PHP)
                                 var actionHtml = '<button class="btn btn-xs btn-success amsfb-approve-btn" data-id="' + s.id + '" title="Banir este IP">&#128683; Banir IP</button> '
@@ -651,6 +766,8 @@ $statusLabels = [
                             var self = this;
                             window.AMSFB.post('ai', 'approve', { id: id }, function (data) {
                                 if (data.success) {
+                                    var cc = row.getAttribute('data-country-code');
+                                    updateCountryCard(cc, -1);
                                     row.remove();
                                     if (badge) badge.textContent = pendingTbody.querySelectorAll('tr').length;
                                     alert('✓ ' + (data.message || 'Aprovado.'));
@@ -672,6 +789,8 @@ $statusLabels = [
                             var self = this;
                             window.AMSFB.post('ai', 'reject', { id: id }, function (data) {
                                 if (data.success) {
+                                    var cc = row.getAttribute('data-country-code');
+                                    updateCountryCard(cc, -1);
                                     row.remove();
                                     if (badge) badge.textContent = pendingTbody.querySelectorAll('tr').length;
                                 } else {
@@ -753,6 +872,132 @@ $statusLabels = [
             });
         });
     }
+
+    // -------------------------------------------------------------------------
+    // Bulk: Banir Todos por País
+    // -------------------------------------------------------------------------
+    document.querySelectorAll('.amsfb-bulk-approve-country').forEach(function (btn) {
+        btn.addEventListener('click', function () {
+            var cc    = this.getAttribute('data-country-code');
+            var name  = this.getAttribute('data-country-name');
+            var count = parseInt(this.getAttribute('data-count'), 10) || 0;
+            var ips   = getIPsByCountry(cc);
+
+            var msg = 'Banir todos os ' + count + ' IP(s) de ' + name + '?\n\n';
+            if (ips.length > 0) {
+                msg += 'IPs: ' + ips.slice(0, 5).join(', ');
+                if (ips.length > 5) msg += '\n...e mais ' + (ips.length - 5);
+                msg += '\n';
+            }
+            msg += '\nOs IPs serão banidos pelo fail2ban imediatamente.';
+            if (!confirm(msg)) return;
+
+            btn.disabled = true;
+            btn.innerHTML = '&#8987; Banindo...';
+            var card = btn.closest('.amsfb-country-card');
+
+            window.AMSFB.post('ai', 'bulk_approve_country', { country_code: cc }, function (data) {
+                if (data.success) {
+                    // Remover linhas da tabela (aprovadas + falhadas permanecem)
+                    if (Array.isArray(data.approved_ids)) {
+                        data.approved_ids.forEach(function (aid) {
+                            var row = document.getElementById('amsfb-row-' + aid);
+                            if (row) row.remove();
+                        });
+                    }
+                    // Remover duplicatas dispensadas
+                    if (Array.isArray(data.dismissed_ids)) {
+                        data.dismissed_ids.forEach(function (did) {
+                            var dup = document.getElementById('amsfb-row-' + did);
+                            if (dup) dup.remove();
+                        });
+                    }
+                    // Atualizar ou remover card
+                    if (card) {
+                        if (Array.isArray(data.failed_ids) && data.failed_ids.length > 0) {
+                            // Alguns falharam — atualizar contagem
+                            var countEl = card.querySelector('.amsfb-country-count');
+                            if (countEl) countEl.textContent = data.failed_ids.length;
+                            btn.disabled = false;
+                            btn.innerHTML = '&#128683; Banir Todos';
+                        } else {
+                            card.remove();
+                            // Esconder painel se não restam cards
+                            var remaining = document.querySelectorAll('.amsfb-country-card');
+                            if (remaining.length === 0) {
+                                var panel = document.querySelector('.amsfb-country-panel');
+                                if (panel) panel.style.display = 'none';
+                            }
+                        }
+                    }
+                    // Atualizar badge geral
+                    var badge = document.querySelector('.panel-heading .badge');
+                    var pendingTbody = document.getElementById('amsfb-pending-tbody');
+                    if (badge && pendingTbody) {
+                        badge.textContent = pendingTbody.querySelectorAll('tr').length;
+                    }
+                    alert('✓ ' + (data.message || 'Ação concluída.'));
+                } else {
+                    btn.disabled = false;
+                    btn.innerHTML = '&#128683; Banir Todos';
+                    alert('✗ ' + (data.error || 'Erro ao banir IPs.'));
+                }
+            });
+        });
+    });
+
+    // -------------------------------------------------------------------------
+    // Bulk: Rejeitar Todos por País
+    // -------------------------------------------------------------------------
+    document.querySelectorAll('.amsfb-bulk-reject-country').forEach(function (btn) {
+        btn.addEventListener('click', function () {
+            var cc    = this.getAttribute('data-country-code');
+            var name  = this.getAttribute('data-country-name');
+            var count = parseInt(this.getAttribute('data-count'), 10) || 0;
+            var ips   = getIPsByCountry(cc);
+
+            var msg = 'Rejeitar todas as ' + count + ' sugestão(ões) de ' + name + '?\n\n';
+            if (ips.length > 0) {
+                msg += 'IPs: ' + ips.slice(0, 5).join(', ');
+                if (ips.length > 5) msg += '\n...e mais ' + (ips.length - 5);
+                msg += '\n';
+            }
+            if (!confirm(msg)) return;
+
+            btn.disabled = true;
+            btn.innerHTML = '&#8987; Rejeitando...';
+            var card = btn.closest('.amsfb-country-card');
+
+            window.AMSFB.post('ai', 'bulk_reject_country', { country_code: cc }, function (data) {
+                if (data.success) {
+                    // Remover todas as linhas do país
+                    var rows = document.querySelectorAll('#amsfb-pending-tbody tr[data-country-code="' + cc + '"]');
+                    rows.forEach(function (row) { row.remove(); });
+                    // Remover card
+                    if (card) {
+                        card.remove();
+                        // Esconder painel se não restam cards
+                        var remaining = document.querySelectorAll('.amsfb-country-card');
+                        if (remaining.length === 0) {
+                            var panel = document.querySelector('.amsfb-country-panel');
+                            if (panel) panel.style.display = 'none';
+                        }
+                    }
+                    // Atualizar badge geral
+                    var badge = document.querySelector('.panel-heading .badge');
+                    var pendingTbody = document.getElementById('amsfb-pending-tbody');
+                    if (badge && pendingTbody) {
+                        badge.textContent = pendingTbody.querySelectorAll('tr').length;
+                    }
+                    alert('✓ ' + (data.message || 'Ação concluída.'));
+                } else {
+                    btn.disabled = false;
+                    btn.innerHTML = '&#10007; Rejeitar';
+                    alert('✗ ' + (data.error || 'Erro ao rejeitar.'));
+                }
+            });
+        });
+    });
 
 })();
 </script>

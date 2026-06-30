@@ -65,17 +65,28 @@ class AIController
             // GeoIP indisponível — segue sem dados geo
         }
 
+        // Grupos por país para ações em massa (só se há pendentes)
+        $countryGroups = [];
+        if ($pendingResult['total'] > 0) {
+            try {
+                $countryGroups = Database::getPendingGroupedByCountry();
+            } catch (\Throwable $e) {
+                // fallback: sem agrupamento
+            }
+        }
+
         return $this->router->render('ai_suggestions', [
-            'pending'       => $pending,
-            'pending_total' => $pendingResult['total'],
-            'pending_pages' => $pendingResult['pages'],
-            'pending_page'  => $pendingResult['page'],
-            'history'       => $history,
-            'history_total' => $historyResult['total'],
-            'history_pages' => $historyResult['pages'],
-            'history_page'  => $historyResult['page'],
-            'filters'       => $filters,
-            'geo_data'      => $geoData,
+            'pending'        => $pending,
+            'pending_total'  => $pendingResult['total'],
+            'pending_pages'  => $pendingResult['pages'],
+            'pending_page'   => $pendingResult['page'],
+            'history'        => $history,
+            'history_total'  => $historyResult['total'],
+            'history_pages'  => $historyResult['pages'],
+            'history_page'   => $historyResult['page'],
+            'filters'        => $filters,
+            'geo_data'       => $geoData,
+            'country_groups' => $countryGroups,
         ]);
     }
 
@@ -196,6 +207,12 @@ class AIController
 
             case 'clear_geoip_cache':
                 return $this->ajaxClearGeoipCache();
+
+            case 'bulk_approve_country':
+                return $this->ajaxBulkApproveCountry($post);
+
+            case 'bulk_reject_country':
+                return $this->ajaxBulkRejectCountry($post);
 
             default:
                 return json_encode(['success' => false, 'error' => 'Ação desconhecida.']);
@@ -913,6 +930,137 @@ class AIController
         } catch (\Throwable $e) {
             return json_encode(['success' => false, 'error' => 'Erro ao limpar cache.']);
         }
+    }
+
+    // -----------------------------------------------------------------------
+    // AJAX: aprovar todas as sugestões pendentes de um país (bulk)
+    // -----------------------------------------------------------------------
+
+    private function ajaxBulkApproveCountry(array $post): string
+    {
+        // [SEC-20] Validar country_code: 2 letras maiúsculas ou vazio (Desconhecido)
+        $countryCode = strtoupper(trim($post['country_code'] ?? ''));
+        if ($countryCode !== '' && !preg_match('/^[A-Z]{2}$/', $countryCode)) {
+            return json_encode(['success' => false, 'error' => 'Código de país inválido.']);
+        }
+
+        $ids = Database::getPendingIdsByCountry($countryCode);
+        if (empty($ids)) {
+            return json_encode(['success' => false, 'error' => 'Nenhuma sugestão pendente para este país.']);
+        }
+
+        $client   = $this->router->makeClient();
+        $analyzer = $this->makeAnalyzer();
+        $engine   = new AutoBanEngine($analyzer, $client);
+        $adminId  = Helper::adminId();
+
+        // Garantir que a jail ai-bans existe (mesma lógica de ajaxApprove)
+        try {
+            $jailConfig = $this->router->makeJailConfig();
+            $jailLocal  = $jailConfig->readJailLocal();
+            if (!isset($jailLocal[AutoBanEngine::AI_JAIL])) {
+                $jailConfig->addJail(AutoBanEngine::AI_JAIL, [
+                    'enabled'  => 'true',
+                    'filter'   => $this->findBestFilter(AutoBanEngine::AI_JAIL),
+                    'maxretry' => '5',
+                    'findtime' => '600',
+                    'bantime'  => (string)(int)Database::getConfig('global_bantime', 604800),
+                ]);
+                $jailConfig->reloadAll();
+            } else {
+                $currentBantime  = (string)(int)Database::getConfig('global_bantime', 604800);
+                $existingBantime = $jailLocal[AutoBanEngine::AI_JAIL]['bantime'] ?? '';
+                $needsReload     = false;
+                if ($existingBantime !== $currentBantime) {
+                    $jailConfig->saveJail(AutoBanEngine::AI_JAIL, ['bantime' => $currentBantime]);
+                    $needsReload = true;
+                }
+                $activeJails = $client->getJails();
+                if ($needsReload || !in_array(AutoBanEngine::AI_JAIL, $activeJails, true)) {
+                    $jailConfig->reloadAll();
+                }
+            }
+        } catch (\Throwable $e) {
+            // silencioso — tenta banir mesmo sem jail configurada
+        }
+
+        // Best-effort: aprovar cada sugestão individualmente
+        // approveSuggestion() retorna false e NÃO altera status se o ban falhar
+        // (o IP permanece pending para o admin tentar novamente)
+        $approvedIds  = [];
+        $failedIds    = [];
+        $dismissedAll = [];
+
+        foreach ($ids as $id) {
+            // Buscar IP antes de aprovar (precisamos para autoDismissDuplicates)
+            $suggestion = Database::getSuggestion($id);
+            if (!$suggestion || $suggestion['status'] !== 'pending') {
+                $failedIds[] = $id;
+                continue;
+            }
+
+            $ok = $engine->approveSuggestion($id, $adminId);
+            if ($ok) {
+                $approvedIds[] = $id;
+                $dismissed = Database::autoDismissDuplicates($suggestion['ip'], $id, $adminId);
+                $dismissedAll = array_merge($dismissedAll, $dismissed);
+            } else {
+                $failedIds[] = $id;
+            }
+        }
+
+        $countryLabel = $countryCode !== '' ? $countryCode : 'Desconhecido';
+        $msg = count($approvedIds) . ' IP(s) do país ' . $countryLabel . ' banido(s).';
+        if (count($failedIds) > 0) {
+            $msg .= ' ' . count($failedIds) . ' falhou.';
+        }
+
+        return json_encode([
+            'success'       => true,
+            'approved'      => count($approvedIds),
+            'failed'        => count($failedIds),
+            'approved_ids'  => $approvedIds,
+            'failed_ids'    => $failedIds,
+            'dismissed_ids' => array_unique($dismissedAll),
+            'message'       => $msg,
+        ]);
+    }
+
+    // -----------------------------------------------------------------------
+    // AJAX: rejeitar todas as sugestões pendentes de um país (bulk)
+    // -----------------------------------------------------------------------
+
+    private function ajaxBulkRejectCountry(array $post): string
+    {
+        // [SEC-20] Validar country_code
+        $countryCode = strtoupper(trim($post['country_code'] ?? ''));
+        if ($countryCode !== '' && !preg_match('/^[A-Z]{2}$/', $countryCode)) {
+            return json_encode(['success' => false, 'error' => 'Código de país inválido.']);
+        }
+
+        $ids = Database::getPendingIdsByCountry($countryCode);
+        if (empty($ids)) {
+            return json_encode(['success' => false, 'error' => 'Nenhuma sugestão pendente para este país.']);
+        }
+
+        $adminId = Helper::adminId();
+
+        // UPDATE batch — [SEC-15] status validado contra ENUM
+        $affected = \WHMCS\Database\Capsule::table('mod_amssoft_fail2ban_ai_suggestions')
+            ->whereIn('id', $ids)
+            ->where('status', 'pending')
+            ->update([
+                'status'      => 'rejected',
+                'resolved_at' => \WHMCS\Database\Capsule::raw('NOW()'),
+                'resolved_by' => $adminId,
+            ]);
+
+        $countryLabel = $countryCode !== '' ? $countryCode : 'Desconhecido';
+        return json_encode([
+            'success'  => true,
+            'rejected' => (int) $affected,
+            'message'  => $affected . ' sugestão(ões) do país ' . $countryLabel . ' rejeitada(s).',
+        ]);
     }
 
     // -----------------------------------------------------------------------

@@ -476,3 +476,34 @@
     opacity: 0.85;
     margin-top: 4px;
 }
+
+/* ── Country bulk action cards ────────────────────────────────────────────── */
+.amsfb-country-panel { margin-bottom: 20px; }
+.amsfb-country-grid {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 12px;
+}
+.amsfb-country-card {
+    border: 1px solid #ddd;
+    border-radius: 6px;
+    padding: 12px 16px;
+    min-width: 180px;
+    background: #fafafa;
+    transition: border-color .2s;
+}
+.amsfb-country-card:hover { border-color: #337ab7; }
+.amsfb-country-flag { font-size: 24px; margin-right: 6px; vertical-align: middle; }
+.amsfb-country-name { font-weight: 600; vertical-align: middle; }
+.amsfb-country-count {
+    display: inline-block;
+    background: #e74c3c;
+    color: #fff;
+    border-radius: 10px;
+    padding: 1px 8px;
+    font-size: 12px;
+    margin-left: 6px;
+    vertical-align: middle;
+}
+.amsfb-country-actions { margin-top: 8px; }
+.amsfb-country-actions .btn { margin-right: 4px; }
