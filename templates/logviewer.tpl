@@ -130,6 +130,8 @@
                 STATUS.textContent = 'Erro: ' + (data.error || 'desconhecido');
                 return;
             }
+            // Armazenar geo_data globalmente para uso no renderLines
+            window.AMSFB.geoData = data.geo_data || {};
             renderLines(data.lines || []);
             COUNT.textContent = (data.total || 0) + ' linhas';
             STATUS.textContent = 'Atualizado: ' + new Date().toLocaleTimeString();
@@ -158,7 +160,18 @@
             // Botões de ban inline para cada IP
             var ipBtns = '';
             ips.forEach(function (ip) {
-                ipBtns += '<button class="amsfb-inline-ban btn btn-xs btn-danger" data-ip="' + ip + '" title="Banir ' + ip + '">&#128683; ' + ip + '</button> ';
+                var geoTitle = 'Banir ' + ip;
+                if (window.AMSFB.geoData && window.AMSFB.geoData[ip]) {
+                    var g = window.AMSFB.geoData[ip];
+                    var parts = [];
+                    if (g.country_code) parts.push(g.country_code);
+                    if (g.region)       parts.push(g.region);
+                    if (g.isp)          parts.push(g.isp);
+                    if (parts.length)   geoTitle += ' (' + parts.join(', ') + ')';
+                }
+                // Escape HTML entities no title para evitar XSS via ISP/region
+                var safeTitle = geoTitle.replace(/&/g,'&amp;').replace(/"/g,'&quot;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
+                ipBtns += '<button class="amsfb-inline-ban btn btn-xs btn-danger" data-ip="' + ip + '" title="' + safeTitle + '">&#128683; ' + ip + '</button> ';
             });
 
             html += '<div class="' + lineCls + '">' + (ipBtns ? '<span class="amsfb-ip-btns">' + ipBtns + '</span>' : '') + '<code>' + escaped + '</code></div>';
@@ -260,7 +273,19 @@
     function openBanModal(ip) {
         banIp = ip;
         var display = document.getElementById('amsfb-ban-ip-display');
-        if (display) display.textContent = ip;
+        if (display) {
+            var geoText = '';
+            if (window.AMSFB.geoData && window.AMSFB.geoData[ip]) {
+                var g = window.AMSFB.geoData[ip];
+                var parts = [];
+                if (g.country_code) parts.push(g.country_code);
+                if (g.region)       parts.push(g.region);
+                if (g.isp)          parts.push(g.isp);
+                if (parts.length)   geoText = ' (' + parts.join(', ') + ')';
+            }
+            // textContent já é seguro contra XSS (não interpreta HTML)
+            display.textContent = ip + geoText;
+        }
         var jailInput = document.getElementById('amsfb-ban-jail-input');
         if (jailInput) jailInput.value = '';
         if (typeof $ !== 'undefined') {

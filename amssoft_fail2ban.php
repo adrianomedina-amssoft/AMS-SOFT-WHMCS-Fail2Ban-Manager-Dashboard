@@ -232,6 +232,27 @@ function amssoft_fail2ban_migrate_v3(): void
     });
 }
 
+/**
+ * Migração automática v5: tabela de cache GeoIP.
+ * Idempotente: usa hasTable() para verificar antes de criar.
+ */
+function amssoft_fail2ban_migrate_v5(): void
+{
+    if (Capsule::schema()->hasTable('mod_amssoft_fail2ban_geo_cache')) {
+        return;
+    }
+    Capsule::schema()->create('mod_amssoft_fail2ban_geo_cache', function ($t) {
+        $t->string('ip', 45)->primary();
+        $t->string('country', 64)->nullable();
+        $t->string('country_code', 2)->nullable();
+        $t->string('region', 128)->nullable();
+        $t->string('isp', 255)->nullable();
+        $t->string('asn', 32)->nullable();
+        $t->timestamp('updated_at')->useCurrent();
+        $t->index('updated_at', 'idx_updated');
+    });
+}
+
 function amssoft_fail2ban_output(array $vars): void
 {
     // Migração automática: garante que tabelas do v2 existam mesmo em instalações antigas
@@ -251,6 +272,13 @@ function amssoft_fail2ban_output(array $vars): void
     // Migração automática v4: multi-provider IA
     try {
         amssoft_fail2ban_migrate_v4();
+    } catch (\Exception $e) {
+        // Silencioso
+    }
+
+    // Migração automática v5: tabela de cache GeoIP
+    try {
+        amssoft_fail2ban_migrate_v5();
     } catch (\Exception $e) {
         // Silencioso
     }

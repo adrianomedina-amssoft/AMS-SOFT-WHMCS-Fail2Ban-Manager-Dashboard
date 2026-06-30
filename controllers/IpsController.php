@@ -2,6 +2,7 @@
 namespace AMS\Fail2Ban\Controllers;
 
 use AMS\Fail2Ban\Database;
+use AMS\Fail2Ban\GeoIP;
 use AMS\Fail2Ban\Helper;
 use AMS\Fail2Ban\Router;
 
@@ -160,6 +161,15 @@ class IpsController
         $page      = max(1, min((int)($_GET['page'] ?? 1), $pages));
         $bannedIPs = array_slice($bannedIPs, ($page - 1) * $perPage, $perPage);
 
+        // GeoIP: lookup apenas dos IPs visíveis na página atual
+        $geoData = [];
+        try {
+            $visibleIps = array_column($bannedIPs, 'ip');
+            $geoData    = GeoIP::bulkLookup($visibleIps);
+        } catch (\Throwable $e) {
+            // GeoIP indisponível — segue sem dados geo
+        }
+
         return $this->router->render('ips', [
             'fail2ban_online' => $fail2banOnline,
             'error'           => $error,
@@ -171,6 +181,7 @@ class IpsController
             'pages'           => $pages,
             'total_ips'       => $totalIPs,
             'filters'         => $filters,
+            'geo_data'        => $geoData,
         ]);
     }
 }

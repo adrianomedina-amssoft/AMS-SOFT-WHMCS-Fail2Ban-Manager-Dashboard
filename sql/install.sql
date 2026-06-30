@@ -20,3 +20,15 @@ CREATE TABLE IF NOT EXISTS `mod_amssoft_fail2ban_config` (
     PRIMARY KEY (`id`),
     UNIQUE KEY `uq_key` (`key`)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+
+CREATE TABLE IF NOT EXISTS `mod_amssoft_fail2ban_geo_cache` (
+    `ip`         VARCHAR(45) NOT NULL,
+    `country`    VARCHAR(64)  DEFAULT NULL,
+    `country_code` VARCHAR(2) DEFAULT NULL,
+    `region`     VARCHAR(128) DEFAULT NULL,
+    `isp`        VARCHAR(255) DEFAULT NULL,
+    `asn`        VARCHAR(32)  DEFAULT NULL,
+    `updated_at` TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+    PRIMARY KEY (`ip`),
+    KEY `idx_updated` (`updated_at`)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;

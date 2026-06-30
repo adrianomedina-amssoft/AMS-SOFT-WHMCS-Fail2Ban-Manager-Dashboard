@@ -29,6 +29,11 @@ class AutoBanEngine
      *   2. Deduplicação de IP: ignora IPs já conhecidos (pending/approved/auto_executed
      *      nos últimos 7 dias) — chamada à IA só ocorre para conteúdo genuinamente novo.
      *
+     * Watermark compartilhado: a chave `ai_log_offset.{md5}` é a mesma usada por
+     * ajaxAnalyzeLog() (botão manual "Analisar agora"). Ambos os fluxos competem
+     * pelo mesmo ponteiro — decisão de design, não bug. Se o cron avançar o offset
+     * entre dois cliques manuais, o botão pulará o que o cron já viu. Ver CLAUDE.md.
+     *
      * @param bool $forceReread  Quando true (análise manual), relê as últimas linhas
      *                           mesmo que o arquivo não tenha crescido desde a última
      *                           análise — mesmo comportamento do Log Viewer.
@@ -112,7 +117,8 @@ class AutoBanEngine
                 continue;
             }
 
-            // ── Watermark ────────────────────────────────────────────────────
+            // ── Watermark (chave compartilhada com ajaxAnalyzeLog) ─────────
+            // Leitura sem lock — aceita corrida (ver CLAUDE.md "Concorrência").
             $offsetKey    = 'ai_log_offset.' . md5($path);
             $storedOffset = (int)Database::getConfig($offsetKey, 0);
 
@@ -127,7 +133,9 @@ class AutoBanEngine
                 $lines = $viewer->readLines($path, $logLineLimit);
             } else {
                 if ($currentSize < $storedOffset) {
-                    // Arquivo foi rotacionado/truncado — ler do início
+                    // Arquivo rotacionado/truncado — ler do início.
+                    // Edge case: logrotate copytruncate pode causar falso positivo.
+                    // Impacto: reanálise pontual, sem perda de dados. Ver CLAUDE.md.
                     $storedOffset = 0;
                 }
 
@@ -283,41 +291,17 @@ class AutoBanEngine
 
     /**
      * Lê apenas as linhas novas de um arquivo a partir de $offset bytes.
-     * Retorna no máximo $maxLines linhas (as mais recentes do trecho novo).
+     * Delega para LogViewer::readNewLinesFromOffset() — lógica centralizada em um único lugar.
      *
-     * Seguro contra log rotation: se o arquivo tiver sido truncado o caller
-     * já terá resetado o offset para 0 antes de chamar este método.
+     * @param string $path     Path do arquivo
+     * @param int    $offset   Byte offset para iniciar a leitura
+     * @param int    $maxLines Máximo de linhas a retornar
+     * @return array           Linhas lidas (sem newline)
      */
     private function readNewLines(string $path, int $offset, int $maxLines = 200): array
     {
         $viewer = new LogViewer();
-        if (!$viewer->isValidPath($path) || !is_readable($path)) {
-            return [];
-        }
-
-        $fp = @fopen($path, 'r');
-        if (!$fp) {
-            return [];
-        }
-
-        if ($offset > 0) {
-            fseek($fp, $offset);
-        }
-
-        $content = stream_get_contents($fp);
-        fclose($fp);
-
-        if ($content === false || trim($content) === '') {
-            return [];
-        }
-
-        $lines = array_values(array_filter(
-            array_map('rtrim', explode("\n", $content)),
-            fn ($l) => $l !== ''
-        ));
-
-        // Retorna apenas as últimas $maxLines linhas do trecho novo
-        return array_slice($lines, -$maxLines);
+        return $viewer->readNewLinesFromOffset($path, $offset, $maxLines);
     }
 
     /** Retorna a whitelist de IPs como array. */

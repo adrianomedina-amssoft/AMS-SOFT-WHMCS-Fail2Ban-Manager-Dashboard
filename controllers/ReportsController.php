@@ -2,6 +2,7 @@
 namespace AMS\Fail2Ban\Controllers;
 
 use AMS\Fail2Ban\Database;
+use AMS\Fail2Ban\GeoIP;
 use AMS\Fail2Ban\Helper;
 use AMS\Fail2Ban\Router;
 
@@ -37,6 +38,15 @@ class ReportsController
         $filters = $this->collectFilters();
         $rows    = Database::searchHistory($filters)->all();
 
+        // GeoIP: lookup de todos os IPs do CSV (sem paginação)
+        $geoData = [];
+        try {
+            $allIps = array_unique(array_column($rows, 'ip'));
+            $geoData = GeoIP::bulkLookup($allIps);
+        } catch (\Throwable $e) {
+            // GeoIP indisponível — segue sem dados geo
+        }
+
         // Clear any buffered WHMCS output
         while (ob_get_level() > 0) {
             ob_end_clean();
@@ -56,16 +66,22 @@ class ReportsController
         fputs($fh, "\xEF\xBB\xBF");
 
         // Header row
-        fputcsv($fh, ['timestamp', 'ip', 'jail', 'action', 'reason', 'admin_id']);
+        fputcsv($fh, ['timestamp', 'ip', 'jail', 'action', 'reason', 'admin_id', 'country', 'region', 'isp', 'asn']);
 
         foreach ($rows as $row) {
+            $ip  = $row['ip'] ?? '';
+            $geo = $geoData[$ip] ?? null;
             fputcsv($fh, [
-                $row['timestamp'] ?? '',
-                $row['ip']        ?? '',
-                $row['jail']      ?? '',
-                $row['action']    ?? '',
-                $row['reason']    ?? '',
-                $row['admin_id']  ?? '',
+                $row['timestamp']       ?? '',
+                $ip,
+                $row['jail']            ?? '',
+                $row['action']          ?? '',
+                $row['reason']          ?? '',
+                $row['admin_id']        ?? '',
+                $geo['country']         ?? '',
+                $geo['region']          ?? '',
+                $geo['isp']             ?? '',
+                $geo['asn']             ?? '',
             ]);
         }
 
@@ -91,6 +107,15 @@ class ReportsController
             $result = ['data' => [], 'total' => 0, 'pages' => 0, 'page' => 1];
         }
 
+        // GeoIP: lookup apenas dos IPs visíveis na página atual
+        $geoData = [];
+        try {
+            $visibleIps = array_column($result['data'], 'ip');
+            $geoData    = GeoIP::bulkLookup($visibleIps);
+        } catch (\Throwable $e) {
+            // GeoIP indisponível — segue sem dados geo
+        }
+
         return $this->router->render('reports', [
             'rows'      => $result['data'],
             'total'     => $result['total'],
@@ -99,6 +124,7 @@ class ReportsController
             'filters'   => $filters,
             'jails'     => $jailsList,
             'actions'   => ['ban', 'unban', 'manual_ban', 'manual_unban'],
+            'geo_data'  => $geoData,
         ]);
     }
 

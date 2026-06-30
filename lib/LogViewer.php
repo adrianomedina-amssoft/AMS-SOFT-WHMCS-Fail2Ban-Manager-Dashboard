@@ -154,13 +154,21 @@ class LogViewer
      * @param int    $maxLines Máximo de linhas a retornar
      * @return array           Linhas lidas (sem newline)
      */
-    public function readFromOffset(string $path, int $offset, int $maxLines = 200): array
+    public function readNewLinesFromOffset(string $path, int $offset, int $maxLines = 200): array
     {
         if (!$this->isValidPath($path) || !is_readable($path)) {
             return [];
         }
 
         $maxLines = max(10, min(500, $maxLines));
+
+        // Proteção contra offset inválido (ex: caller não verificou filesize)
+        if ($offset > 0) {
+            $fileSize = @filesize($path);
+            if ($fileSize !== false && $offset > $fileSize) {
+                $offset = 0; // fallback: ler do início
+            }
+        }
 
         $fp = @fopen($path, 'r');
         if (!$fp) {

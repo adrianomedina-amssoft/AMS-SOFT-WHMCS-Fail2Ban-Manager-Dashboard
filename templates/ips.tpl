@@ -65,7 +65,12 @@
         <tbody>
         <?php foreach ($banned_ips as $row): ?>
             <tr>
-                <td><code><?= $e($row['ip']) ?></code></td>
+                <td>
+                    <code><?= $e($row['ip']) ?></code>
+                    <?php if (!empty($geo_data[$row['ip']])): ?>
+                    <br><small class="amsfb-geo-info"><?= $e(\AMS\Fail2Ban\GeoIP::formatGeo($geo_data[$row['ip']])) ?></small>
+                    <?php endif; ?>
+                </td>
                 <td><?= $e($row['jail']) ?></td>
                 <td><?= $e(\AMS\Fail2Ban\Helper::fmtDate($row['timestamp'] ?? '')) ?></td>
                 <td><?= $e($row['reason'] ?? '-') ?></td>

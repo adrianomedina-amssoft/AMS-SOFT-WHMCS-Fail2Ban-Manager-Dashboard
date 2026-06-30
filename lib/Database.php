@@ -483,4 +483,139 @@ class Database
         }
         return $map;
     }
+
+    // -----------------------------------------------------------------------
+    // GeoIP cache
+    // -----------------------------------------------------------------------
+
+    /**
+     * Retorna dados geo cacheados para um array de IPs.
+     * Retorna array keyado por IP: ['1.2.3.4' => ['country'=>'BR', ...], ...]
+     * Apenas registros dentro do TTL são retornados.
+     *
+     * [SEC-14] Usa whereIn com bind (Eloquent) e whereRaw com bind para DATE_SUB.
+     */
+    public static function getGeoCache(array $ips, int $ttlDays = 30): array
+    {
+        if (empty($ips)) {
+            return [];
+        }
+        // Cálculo de data no MySQL para evitar discrepância de timezone PHP vs MySQL
+        $rows = Capsule::table('mod_amssoft_fail2ban_geo_cache')
+            ->whereIn('ip', $ips)
+            ->whereRaw('updated_at >= DATE_SUB(NOW(), INTERVAL ? DAY)', [$ttlDays])
+            ->get()
+            ->map(fn ($r) => (array)$r)
+            ->all();
+
+        $map = [];
+        foreach ($rows as $r) {
+            $map[$r['ip']] = $r;
+        }
+        return $map;
+    }
+
+    /**
+     * Upsert em batch de dados geo.
+     * Usa INSERT ... ON DUPLICATE KEY UPDATE em uma única query.
+     */
+    public static function setGeoCacheBatch(array $entries): void
+    {
+        if (empty($entries)) {
+            return;
+        }
+
+        // Filtrar entries sem IP
+        $valid = array_filter($entries, fn ($e) => !empty($e['ip']));
+        if (empty($valid)) {
+            return;
+        }
+
+        // Construir VALUES para multi-row INSERT
+        $values   = [];
+        $bindings = [];
+        foreach ($valid as $entry) {
+            $values[]   = '(?, ?, ?, ?, ?, ?)';
+            $bindings[] = $entry['ip'];
+            $bindings[] = $entry['country']      ?? null;
+            $bindings[] = $entry['country_code'] ?? null;
+            $bindings[] = $entry['region']       ?? null;
+            $bindings[] = $entry['isp']          ?? null;
+            $bindings[] = $entry['asn']          ?? null;
+        }
+
+        // [SEC-14] Nenhuma variável interpolada no SQL — todos os valores via bind params.
+        $sql = 'INSERT INTO mod_amssoft_fail2ban_geo_cache '
+             . '(ip, country, country_code, region, isp, asn) VALUES '
+             . implode(', ', $values)
+             . ' ON DUPLICATE KEY UPDATE '
+             . 'country = VALUES(country), country_code = VALUES(country_code), '
+             . 'region = VALUES(region), isp = VALUES(isp), asn = VALUES(asn), '
+             . 'updated_at = NOW()';
+
+        Capsule::connection()->statement($sql, $bindings);
+    }
+
+    /** Trunca a tabela de cache geo. */
+    public static function clearGeoCache(): void
+    {
+        Capsule::table('mod_amssoft_fail2ban_geo_cache')->truncate();
+    }
+
+    /**
+     * Remove registros expirados do cache geo.
+     * [SEC-14] Usa DATE_SUB com bind param — sem interpolação de variável.
+     */
+    public static function cleanExpiredGeoCache(int $ttlDays = 30): int
+    {
+        // DELETE com bind param: DATE_SUB(NOW(), INTERVAL ? DAY)
+        // Eloquent where() com operador '<' e valor numérico faz bind correto,
+        // mas usamos raw() aqui para garantir que o cálculo de data seja feito no MySQL
+        // (evita discrepância de timezone PHP vs MySQL).
+        return Capsule::table('mod_amssoft_fail2ban_geo_cache')
+            ->whereRaw('updated_at < DATE_SUB(NOW(), INTERVAL ? DAY)', [$ttlDays])
+            ->delete();
+    }
+
+    // -----------------------------------------------------------------------
+    // GeoIP rate limit state
+    // -----------------------------------------------------------------------
+
+    /**
+     * Retorna o estado do rate limit global do GeoIP.
+     * ['requests_this_minute' => N, 'minute_window_start' => timestamp, 'cooldown_until' => timestamp]
+     */
+    public static function getGeoRateState(): array
+    {
+        $count    = (int) self::getConfig('geoip_requests_this_minute', '0');
+        $window   = (int) self::getConfig('geoip_minute_window_start', '0');
+        $cooldown = (int) self::getConfig('geoip_cooldown_until', '0');
+        return [
+            'requests_this_minute' => $count,
+            'minute_window_start'  => $window,
+            'cooldown_until'       => $cooldown,
+        ];
+    }
+
+    /**
+     * Salva o estado do rate limit global do GeoIP.
+     *
+     * ⚠️ Limitação conhecida: são 2-3 queries separadas (UPDATE por chave),
+     * não uma transação atômica. Em cenário de admins simultâneos, um pode
+     * sobrescrever a escrita do outro. Pior caso: contador ligeiramente
+     * desatualizado — sem perda de dados, sem falha crítica. A margem de
+     * segurança (40 em vez de 45) absorve esta imprecisão.
+     *
+     * @param int $count       Requests feitos no minuto atual
+     * @param int $windowStart Timestamp do início da janela de 60s
+     * @param int $cooldownUntil Timestamp até quando o cooldown 429 está ativo (0 = sem cooldown)
+     */
+    public static function setGeoRateState(int $count, int $windowStart, int $cooldownUntil = 0): void
+    {
+        self::setConfig('geoip_requests_this_minute', (string) $count);
+        self::setConfig('geoip_minute_window_start', (string) $windowStart);
+        if ($cooldownUntil > 0) {
+            self::setConfig('geoip_cooldown_until', (string) $cooldownUntil);
+        }
+    }
 }

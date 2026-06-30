@@ -45,6 +45,9 @@
             <div class="amsfb-kpi-value amsfb-kpi-sm">
                 <?= $last_ban ? $e($last_ban['ip']) : '-' ?>
             </div>
+            <?php if ($last_ban && !empty($geo_data[$last_ban['ip']])): ?>
+            <div class="amsfb-kpi-geo"><?= $e(\AMS\Fail2Ban\GeoIP::formatGeo($geo_data[$last_ban['ip']])) ?></div>
+            <?php endif; ?>
             <div class="amsfb-kpi-label">Último ban</div>
         </div>
     </div>

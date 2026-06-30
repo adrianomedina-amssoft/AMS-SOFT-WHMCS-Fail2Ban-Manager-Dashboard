@@ -2,6 +2,7 @@
 namespace AMS\Fail2Ban\Controllers;
 
 use AMS\Fail2Ban\Database;
+use AMS\Fail2Ban\GeoIP;
 use AMS\Fail2Ban\Router;
 
 class DashboardController
@@ -62,6 +63,16 @@ class DashboardController
 
         $lastBan = !empty($recentBans) ? $recentBans[0] : null;
 
+        // GeoIP: lookup do último IP banido
+        $geoData = [];
+        if ($lastBan && !empty($lastBan['ip'])) {
+            try {
+                $geoData = GeoIP::bulkLookup([$lastBan['ip']]);
+            } catch (\Throwable $e) {
+                // GeoIP indisponível — segue sem dados geo
+            }
+        }
+
         // Build a full 7-day series filling in zeroes for missing days
         $seriesMap = [];
         foreach ($banSeries as $row) {
@@ -104,6 +115,7 @@ class DashboardController
             'ai_last_suggestion'=> $aiLastSuggestion,
             'ai_mode'           => $aiMode,
             'ai_api_ok'         => $aiApiOk,
+            'geo_data'          => $geoData,
         ]);
     }
 }

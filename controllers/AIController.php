@@ -2,6 +2,7 @@
 namespace AMS\Fail2Ban\Controllers;
 
 use AMS\Fail2Ban\Database;
+use AMS\Fail2Ban\GeoIP;
 use AMS\Fail2Ban\Helper;
 use AMS\Fail2Ban\Router;
 use AMS\Fail2Ban\AIAnalyzer;
@@ -52,6 +53,18 @@ class AIController
         $historyResult = Database::getAllSuggestionsPaged($filters, $historyPage, 10);
         $history       = $this->decodeSuggestions($historyResult['data']);
 
+        // GeoIP: lookup de todos os IPs visíveis (pending + history)
+        $geoData = [];
+        try {
+            $allIps = array_merge(
+                array_column($pending, 'ip'),
+                array_column($history, 'ip')
+            );
+            $geoData = GeoIP::bulkLookup(array_unique($allIps));
+        } catch (\Throwable $e) {
+            // GeoIP indisponível — segue sem dados geo
+        }
+
         return $this->router->render('ai_suggestions', [
             'pending'       => $pending,
             'pending_total' => $pendingResult['total'],
@@ -62,6 +75,7 @@ class AIController
             'history_pages' => $historyResult['pages'],
             'history_page'  => $historyResult['page'],
             'filters'       => $filters,
+            'geo_data'      => $geoData,
         ]);
     }
 
@@ -176,6 +190,12 @@ class AIController
 
             case 'analyze_log':
                 return $this->ajaxAnalyzeLog($post);
+
+            case 'ping_geoip':
+                return $this->ajaxPingGeoip();
+
+            case 'clear_geoip_cache':
+                return $this->ajaxClearGeoipCache();
 
             default:
                 return json_encode(['success' => false, 'error' => 'Ação desconhecida.']);
@@ -515,13 +535,21 @@ class AIController
             return json_encode(['success' => false, 'error' => 'Chave API não configurada para o provedor ativo.']);
         }
 
-        // Watermark: só analisar conteúdo novo
+        // Parâmetro force: ignora watermark e relê as últimas linhas.
+        // Útil após trocar prompt/modelo de IA para reanalisar logs já vistos.
+        $force = !empty($post['force']);
+
+        // Watermark compartilhado entre AutoBanEngine (cron) e ajaxAnalyzeLog (manual).
+        // Decisão de design: ambos competem pelo mesmo ponteiro (ai_log_offset.{md5}).
+        // Se o cron avançar o watermark entre dois cliques manuais, o botão manual
+        // "perde" visibilidade do que o cron já viu — comportamento desejado.
         $logLineLimit = (int) Database::getConfig('ai_log_lines', 200);
         $offsetKey    = 'ai_log_offset.' . md5($path);
+        // Leitura sem lock — aceita corrida (ver CLAUDE.md "Concorrência").
         $storedOffset = (int) Database::getConfig($offsetKey, 0);
         $currentSize  = @filesize($path) ?: 0;
 
-        if ($currentSize === $storedOffset) {
+        if (!$force && $currentSize === $storedOffset) {
             return json_encode([
                 'success'    => true,
                 'log'        => $path,
@@ -533,14 +561,17 @@ class AIController
         }
 
         if ($currentSize < $storedOffset) {
-            // Arquivo rotacionado/truncado — ler do início
+            // Arquivo rotacionado/truncado — ler do início.
+            // Edge case: logrotate copytruncate pode causar falso positivo aqui
+            // se o analysis rodar na janela em que o arquivo está vazio.
+            // Impacto: reanálise pontual, sem perda de dados. Ver CLAUDE.md.
             $storedOffset = 0;
         }
 
-        $lines = $viewer->readFromOffset($path, $storedOffset, $logLineLimit);
-
-        // Atualizar watermark
-        Database::setConfig($offsetKey, (string) $currentSize);
+        // force: relê as últimas N linhas do arquivo (ignora offset)
+        $lines = $force
+            ? $viewer->readLines($path, $logLineLimit)
+            : $viewer->readNewLinesFromOffset($path, $storedOffset, $logLineLimit);
 
         if (empty($lines)) {
             return json_encode([
@@ -553,8 +584,17 @@ class AIController
             ]);
         }
 
-        // Chamar IA
-        $rawSuggestions = $analyzer->analyze($lines);
+        // Chamar IA — protegido por try-catch para garantir que o watermark
+        // não avance em caso de erro inesperado na API.
+        try {
+            $rawSuggestions = $analyzer->analyze($lines);
+        } catch (\Throwable $e) {
+            return json_encode([
+                'success' => false,
+                'log'     => $path,
+                'error'   => 'Erro ao chamar a API de análise. O log será reanalisado na próxima tentativa.',
+            ]);
+        }
 
         // Dedup: IPs já banidos ou com sugestão pendente
         $skipIPs = [];
@@ -580,6 +620,14 @@ class AIController
             $id = Database::saveSuggestion($suggestion);
             $suggestion['id'] = $id;
             $savedList[] = $suggestion;
+        }
+
+        // Atualizar watermark SOMENTE após sucesso (IA + save).
+        // Se a chamada à IA falhar (exception), o watermark não avança
+        // e o trecho será reanalisado na próxima tentativa.
+        // force: não atualiza watermark para não perder bytes novos que cheguem depois.
+        if (!$force) {
+            Database::setConfig($offsetKey, (string) $currentSize);
         }
 
         return json_encode([
@@ -834,6 +882,37 @@ class AIController
             }
         }
         return $suggestions;
+    }
+
+    // -----------------------------------------------------------------------
+    // AJAX: testar conectividade GeoIP
+    // -----------------------------------------------------------------------
+
+    private function ajaxPingGeoip(): string
+    {
+        $ok = GeoIP::isAvailable();
+        $status = GeoIP::getStatus();
+        return json_encode([
+            'success' => $ok,
+            'message' => $ok
+                ? "API ip-api.com respondeu com sucesso. Requests restantes no minuto: {$status['requests_remaining']}."
+                : 'Falha na conexão com a API ip-api.com.',
+            'status'  => $status,
+        ]);
+    }
+
+    // -----------------------------------------------------------------------
+    // AJAX: limpar cache GeoIP
+    // -----------------------------------------------------------------------
+
+    private function ajaxClearGeoipCache(): string
+    {
+        try {
+            GeoIP::clearCache();
+            return json_encode(['success' => true, 'message' => 'Cache GeoIP limpo com sucesso.']);
+        } catch (\Throwable $e) {
+            return json_encode(['success' => false, 'error' => 'Erro ao limpar cache.']);
+        }
     }
 
     // -----------------------------------------------------------------------

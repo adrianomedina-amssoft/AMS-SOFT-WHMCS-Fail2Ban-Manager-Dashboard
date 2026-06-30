@@ -2,6 +2,7 @@
 namespace AMS\Fail2Ban\Controllers;
 
 use AMS\Fail2Ban\Database;
+use AMS\Fail2Ban\GeoIP;
 use AMS\Fail2Ban\Helper;
 use AMS\Fail2Ban\Router;
 use AMS\Fail2Ban\LogViewer;
@@ -90,10 +91,28 @@ class LogViewerController
         $rawLines   = $viewer->readLines($path, $lines);
         $highlighted = $viewer->highlightSuspicious($rawLines);
 
+        // GeoIP: extrair IPs únicos das linhas (máx 20) e lookup
+        $geoData = [];
+        try {
+            $allIps = [];
+            foreach ($highlighted as $item) {
+                foreach (($item['ips'] ?? []) as $ip) {
+                    $allIps[$ip] = ($allIps[$ip] ?? 0) + 1;
+                }
+            }
+            // Ordenar por frequência (mais frequentes primeiro) e limitar a 20
+            arsort($allIps);
+            $topIps   = array_slice(array_keys($allIps), 0, 20);
+            $geoData  = GeoIP::bulkLookup($topIps);
+        } catch (\Throwable $e) {
+            // GeoIP indisponível — segue sem dados geo
+        }
+
         return json_encode([
-            'success' => true,
-            'lines'   => $highlighted,
-            'total'   => count($highlighted),
+            'success'  => true,
+            'lines'    => $highlighted,
+            'total'    => count($highlighted),
+            'geo_data' => $geoData,
         ]);
     }
 

@@ -59,7 +59,12 @@ $statusLabels = [
             <tbody id="amsfb-pending-tbody">
             <?php foreach ($pending as $s): ?>
                 <tr id="amsfb-row-<?= (int)$s['id'] ?>">
-                    <td><strong><?= $e($s['ip']) ?></strong></td>
+                    <td>
+                        <strong><?= $e($s['ip']) ?></strong>
+                        <?php if (!empty($geo_data[$s['ip']])): ?>
+                        <br><small class="amsfb-geo-info"><?= $e(\AMS\Fail2Ban\GeoIP::formatGeo($geo_data[$s['ip']])) ?></small>
+                        <?php endif; ?>
+                    </td>
                     <td><?= $e($s['threat']) ?></td>
                     <td>
                         <span class="<?= $e($severityLabels[$s['severity']]['class'] ?? 'amsfb-sev-medium') ?>">
@@ -233,7 +238,12 @@ $statusLabels = [
             <?php foreach ($history as $s): ?>
                 <tr>
                     <td><?= (int)$s['id'] ?></td>
-                    <td><?= $e($s['ip']) ?></td>
+                    <td>
+                        <?= $e($s['ip']) ?>
+                        <?php if (!empty($geo_data[$s['ip']])): ?>
+                        <br><small class="amsfb-geo-info"><?= $e(\AMS\Fail2Ban\GeoIP::formatGeo($geo_data[$s['ip']])) ?></small>
+                        <?php endif; ?>
+                    </td>
                     <td><?= $e($s['threat']) ?></td>
                     <td>
                         <span class="<?= $e($severityLabels[$s['severity']]['class'] ?? 'amsfb-sev-medium') ?>">
@@ -526,6 +536,7 @@ $statusLabels = [
                 var total = logs.length;
                 var current = 0;
                 var totalSaved = 0;
+                var totalSkipped = 0;
                 var pendingTbody = document.getElementById('amsfb-pending-tbody');
                 var badge = document.querySelector('.panel-heading .badge');
 
@@ -535,11 +546,17 @@ $statusLabels = [
                         // Finalizado
                         runNowBtn.disabled = false;
                         runNowBtn.innerHTML = '&#9654; Analisar agora';
-                        if (totalSaved > 0) {
-                            alert('✓ Análise concluída — ' + totalSaved + ' sugestão(ões) em ' + total + ' log(s).');
-                        } else {
-                            alert('✓ Análise concluída — nenhuma ameaça encontrada em ' + total + ' log(s).');
+                        var analyzed = total - totalSkipped;
+                        var msg = '✓ Análise concluída — ' + analyzed + ' log(s) analisado(s)';
+                        if (totalSkipped > 0) {
+                            msg += ', ' + totalSkipped + ' pulado(s) (sem dados novos)';
                         }
+                        if (totalSaved > 0) {
+                            msg += '. ' + totalSaved + ' sugestão(ões) encontrada(s).';
+                        } else {
+                            msg += '. Nenhuma ameaça encontrada.';
+                        }
+                        alert(msg);
                         return;
                     }
 
@@ -548,6 +565,12 @@ $statusLabels = [
                     runNowBtn.innerHTML = '&#9203; Analisando: ' + (log.label || log.path) + ' (' + current + '/' + total + ')...';
 
                     window.AMSFB.post('ai', 'analyze_log', { path: log.path }, function (result) {
+                        // Diferenciar "sem conteúdo novo" (pulado) de "analisado sem ameaças"
+                        if (result.success && result.message) {
+                            // Log pulado — sem conteúdo novo (watermark)
+                            totalSkipped++;
+                        }
+
                         if (result.success && result.suggestions && result.suggestions.length > 0) {
                             totalSaved += result.saved;
 

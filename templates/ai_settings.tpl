@@ -372,6 +372,34 @@
 
 </form>
 
+<!-- =========================================================
+     Seção: GeoIP
+     ========================================================= -->
+<div class="panel panel-default" style="margin-top:24px;">
+    <div class="panel-heading"><strong>&#127757; GeoIP — Dados Geográficos</strong></div>
+    <div class="panel-body">
+        <p class="text-muted" style="margin-bottom:12px;">
+            Dados geográficos dos IPs exibidos na interface (país, estado, ISP).
+            Powered by <a href="https://ip-api.com/" target="_blank">ip-api.com</a> (gratuito, sem chave).
+        </p>
+        <div class="row">
+            <div class="col-sm-6">
+                <p><strong>Status da API:</strong> <span id="amsfb-geoip-status">—</span></p>
+                <p><strong>Requests este minuto:</strong> <span id="amsfb-geoip-rate">—</span></p>
+            </div>
+            <div class="col-sm-6">
+                <button type="button" id="amsfb-ping-geoip" class="btn btn-sm btn-primary">
+                    &#128270; Testar conexão
+                </button>
+                <button type="button" id="amsfb-clear-geoip" class="btn btn-sm btn-default" style="margin-left:8px;">
+                    &#128465; Limpar cache geo
+                </button>
+                <span id="amsfb-geoip-result" class="help-block" style="display:block; margin-top:8px;"></span>
+            </div>
+        </div>
+    </div>
+</div>
+
 <script>
 (function () {
     'use strict';
@@ -499,6 +527,66 @@
                 runResult.innerHTML = data.success
                     ? '<span class="text-success">&#10003; ' + data.message + '</span>'
                     : '<span class="text-danger">&#10007; ' + (data.error || 'Erro.') + '</span>';
+            });
+        });
+    }
+
+    // -------------------------------------------------------------------------
+    // GeoIP: testar conexão
+    // -------------------------------------------------------------------------
+    var pingGeoBtn = document.getElementById('amsfb-ping-geoip');
+    var geoipStatus = document.getElementById('amsfb-geoip-status');
+    var geoipRate = document.getElementById('amsfb-geoip-rate');
+    var geoipResult = document.getElementById('amsfb-geoip-result');
+
+    if (pingGeoBtn) {
+        pingGeoBtn.addEventListener('click', function () {
+            pingGeoBtn.disabled = true;
+            pingGeoBtn.innerHTML = '&#9685; Testando...';
+            if (geoipResult) geoipResult.textContent = '';
+
+            window.AMSFB.post('ai', 'ping_geoip', {}, function (data) {
+                pingGeoBtn.disabled = false;
+                pingGeoBtn.innerHTML = '&#128270; Testar conexão';
+                if (geoipStatus) {
+                    geoipStatus.innerHTML = data.success
+                        ? '<span class="text-success">&#10003; Conectado</span>'
+                        : '<span class="text-danger">&#10007; Indisponível</span>';
+                }
+                if (geoipRate && data.status) {
+                    var rateText = data.status.requests_this_minute + ' / 40 (restam ' + data.status.requests_remaining + ')';
+                    if (data.status.in_cooldown) {
+                        rateText += ' — COOLDOWN ATIVO (429 recebido)';
+                    }
+                    geoipRate.textContent = rateText;
+                }
+                if (geoipResult) {
+                    geoipResult.innerHTML = data.success
+                        ? '<span class="text-success">' + data.message + '</span>'
+                        : '<span class="text-danger">' + (data.message || 'Erro.') + '</span>';
+                }
+            });
+        });
+    }
+
+    // -------------------------------------------------------------------------
+    // GeoIP: limpar cache
+    // -------------------------------------------------------------------------
+    var clearGeoBtn = document.getElementById('amsfb-clear-geoip');
+    if (clearGeoBtn) {
+        clearGeoBtn.addEventListener('click', function () {
+            if (!confirm('Limpar todo o cache de dados geo? IPs serão re-consultados na próxima visita.')) return;
+            clearGeoBtn.disabled = true;
+            clearGeoBtn.innerHTML = '&#9685; Limpando...';
+
+            window.AMSFB.post('ai', 'clear_geoip_cache', {}, function (data) {
+                clearGeoBtn.disabled = false;
+                clearGeoBtn.innerHTML = '&#128465; Limpar cache geo';
+                if (geoipResult) {
+                    geoipResult.innerHTML = data.success
+                        ? '<span class="text-success">&#10003; ' + data.message + '</span>'
+                        : '<span class="text-danger">&#10007; ' + (data.error || 'Erro.') + '</span>';
+                }
             });
         });
     }
