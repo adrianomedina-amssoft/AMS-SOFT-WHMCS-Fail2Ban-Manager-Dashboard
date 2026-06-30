@@ -48,14 +48,25 @@ class AIAnalyzer
         ],
         'mimo' => [
             'label'            => 'MiMo (Xiaomi)',
-            'protocol'         => 'anthropic',
+            'protocol'         => 'anthropic',   // default, mas editável via seletor
             'default_base_url' => 'https://token-plan-sgp.xiaomimimo.com/anthropic',
             'default_model'    => 'mimo-v2.5-pro',
             'models'           => [
                 'mimo-v2.5-pro' => 'MiMo v2.5 Pro',
                 'mimo-v2.5'     => 'MiMo v2.5',
             ],
-            'needs_base_url'   => false, // fixo — só funciona com protocolo Anthropic
+            'needs_base_url'   => false,
+            'has_protocol_selector' => true,     // mostra seletor Anthropic/OpenAI na UI
+            'protocol_options'      => [
+                'anthropic' => [
+                    'label'   => 'Anthropic',
+                    'base_url'=> 'https://token-plan-sgp.xiaomimimo.com/anthropic',
+                ],
+                'openai'    => [
+                    'label'   => 'OpenAI',
+                    'base_url'=> 'https://token-plan-sgp.xiaomimimo.com/v1',
+                ],
+            ],
         ],
     ];
 
@@ -84,14 +95,18 @@ Não inclua texto fora do JSON.
 LOGS:
 {logs}';
 
+    private string $protocol; // protocolo efetivo (pode diferir do default do provider)
+
     public function __construct(
         string $provider,
         string $apiKey,
         string $model = '',
-        string $baseUrl = ''
+        string $baseUrl = '',
+        string $protocol = ''
     ) {
         $this->provider = $provider;
         $this->apiKey   = $apiKey;
+        $this->protocol = $protocol ?: (self::PROVIDERS[$provider]['protocol'] ?? 'anthropic');
         $this->model    = $model ?: (self::PROVIDERS[$provider]['default_model'] ?? '');
         $this->baseUrl  = $baseUrl ?: (self::PROVIDERS[$provider]['default_base_url'] ?? '');
     }
@@ -131,11 +146,23 @@ LOGS:
 
         $def = self::PROVIDERS[$provider];
 
+        // Protocolo: usar salvo no banco, ou default do provider
+        $protocol = Database::getConfig("ai_provider_{$provider}_protocol", $def['protocol']);
+
+        // Base URL: depende do protocolo se o provider tem seletor
+        $baseUrl = '';
+        if (!empty($def['has_protocol_selector']) && isset($def['protocol_options'][$protocol])) {
+            $baseUrl = $def['protocol_options'][$protocol]['base_url'];
+        } else {
+            $baseUrl = Database::getConfig("ai_provider_{$provider}_base_url", $def['default_base_url']);
+        }
+
         return [
             'provider' => $provider,
+            'protocol' => $protocol,
             'api_key'  => Helper::decryptApiKey(Database::getConfig("ai_provider_{$provider}_api_key", '')),
             'model'    => Database::getConfig("ai_provider_{$provider}_model", $def['default_model']),
-            'base_url' => Database::getConfig("ai_provider_{$provider}_base_url", $def['default_base_url']),
+            'base_url' => $baseUrl,
         ];
     }
 
@@ -201,12 +228,7 @@ LOGS:
      */
     public function ping(): bool
     {
-        $def = self::PROVIDERS[$this->provider] ?? null;
-        if (!$def) {
-            return false;
-        }
-
-        $protocol = $def['protocol'];
+        $protocol = $this->protocol;
 
         if ($protocol === 'anthropic') {
             $body = json_encode([
@@ -281,8 +303,7 @@ LOGS:
      */
     private function callApi(string $userContent, string $systemPrompt = ''): ?string
     {
-        $def      = self::PROVIDERS[$this->provider] ?? null;
-        $protocol = $def ? $def['protocol'] : 'anthropic';
+        $protocol = $this->protocol;
 
         if ($protocol === 'anthropic') {
             $body = $this->buildAnthropicBody($userContent, $systemPrompt);

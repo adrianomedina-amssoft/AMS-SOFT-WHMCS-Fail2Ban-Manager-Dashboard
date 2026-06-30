@@ -67,9 +67,11 @@
                         data-provider-toggle="<?= $e($key) ?>">
                     <strong><?= $e($def['label']) ?></strong>
                     <?php if ($key === 'anthropic'): ?>
-                        <span class="label label-info" style="margin-left:6px;">Protocolo próprio</span>
+                        <span class="label label-info" style="margin-left:6px;">Protocolo Anthropic</span>
+                    <?php elseif (!empty($def['has_protocol_selector'])): ?>
+                        <span class="label label-default" style="margin-left:6px;">Anthropic / OpenAI</span>
                     <?php else: ?>
-                        <span class="label label-default" style="margin-left:6px;">OpenAI-compatible</span>
+                        <span class="label label-default" style="margin-left:6px;">Protocolo <?= $e($def['protocol']) ?></span>
                     <?php endif; ?>
                 </label>
             </div>
@@ -119,6 +121,31 @@
             </p>
             <?php endif; ?>
         </div>
+
+        <?php if (!empty($def['has_protocol_selector'])): ?>
+        <!-- Seletor de protocolo (ex: MiMo Anthropic vs OpenAI) -->
+        <div class="form-group">
+            <label>Protocolo da API</label>
+            <?php
+            $savedProtocol = $provider_configs[$key]['protocol'] ?? $def['protocol'];
+            foreach ($def['protocol_options'] as $protoKey => $protoDef):
+            ?>
+            <div class="radio">
+                <label>
+                    <input type="radio" name="ai_provider_<?= $e($key) ?>_protocol" value="<?= $e($protoKey) ?>"
+                        <?= ($savedProtocol === $protoKey) ? 'checked' : '' ?>>
+                    <strong><?= $e($protoDef['label']) ?></strong>
+                    <span class="help-block" style="margin:0;">
+                        <code><?= $e($protoDef['base_url']) ?></code>
+                    </span>
+                </label>
+            </div>
+            <?php endforeach; ?>
+            <span class="help-block">
+                Escolha o protocolo compatível com sua chave API.
+            </span>
+        </div>
+        <?php endif; ?>
 
         <?php if ($def['needs_base_url']): ?>
         <!-- Base URL (apenas para provedores editáveis) -->
@@ -398,11 +425,15 @@
             var resultSpan = document.querySelector('.amsfb-ping-result[data-provider="' + provider + '"]');
             var key = keyInput ? keyInput.value : '';
 
+            // Capturar protocolo se o provedor tem seletor
+            var protoRadio = document.querySelector('input[name="ai_provider_' + provider + '_protocol"]:checked');
+            var protocol = protoRadio ? protoRadio.value : '';
+
             btn.disabled = true;
             btn.innerHTML = '&#9685; Testando...';
             if (resultSpan) resultSpan.style.display = 'none';
 
-            window.AMSFB.post('ai', 'ping_api', { provider: provider, api_key: key }, function (data) {
+            window.AMSFB.post('ai', 'ping_api', { provider: provider, api_key: key, protocol: protocol }, function (data) {
                 btn.disabled = false;
                 btn.innerHTML = '&#128268; Testar API';
                 if (!resultSpan) return;

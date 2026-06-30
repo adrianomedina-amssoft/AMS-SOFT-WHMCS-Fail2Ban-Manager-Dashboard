@@ -105,6 +105,7 @@ class AIController
                 'model'       => Database::getConfig("ai_provider_{$key}_model", $def['default_model']),
                 'base_url'    => Database::getConfig("ai_provider_{$key}_base_url", $def['default_base_url']),
                 'last_ping'   => Database::getConfig("ai_provider_{$key}_last_ping", '0'),
+                'protocol'    => Database::getConfig("ai_provider_{$key}_protocol", $def['protocol']),
             ];
             // Verificar se chave corrompida pode ser descriptografada
             if ($providerConfigs[$key]['api_key_set']) {
@@ -465,18 +466,30 @@ class AIController
             return json_encode(['success' => false, 'error' => 'Chave API não informada.']);
         }
 
-        $model   = $post['model'] ?? Database::getConfig("ai_provider_{$provider}_model", '');
-        $baseUrl = $post['base_url'] ?? Database::getConfig("ai_provider_{$provider}_base_url", '');
+        $model    = $post['model'] ?? Database::getConfig("ai_provider_{$provider}_model", '');
+        $def      = AIAnalyzer::getProviderDef($provider);
+        $protocol = '';
 
-        // [SEC-17] Validar base URL se editável
-        $def = AIAnalyzer::getProviderDef($provider);
-        if ($def && $def['needs_base_url'] && $baseUrl !== '') {
-            if (!$this->validateBaseUrl($baseUrl)) {
-                return json_encode(['success' => false, 'error' => 'Base URL inválida. Deve ser HTTPS e não apontar para IPs privados.']);
+        // Protocolo: usar do POST se o provider tem seletor
+        if ($def && !empty($def['has_protocol_selector'])) {
+            $protocol = $post['protocol'] ?? Database::getConfig("ai_provider_{$provider}_protocol", $def['protocol']);
+            $validProtocols = array_keys($def['protocol_options'] ?? []);
+            if (!in_array($protocol, $validProtocols, true)) {
+                $protocol = $def['protocol'];
+            }
+            // Base URL vem do protocolo selecionado
+            $baseUrl = $def['protocol_options'][$protocol]['base_url'] ?? $def['default_base_url'];
+        } else {
+            $baseUrl = $post['base_url'] ?? Database::getConfig("ai_provider_{$provider}_base_url", '');
+            // [SEC-17] Validar base URL se editável
+            if ($def && $def['needs_base_url'] && $baseUrl !== '') {
+                if (!$this->validateBaseUrl($baseUrl)) {
+                    return json_encode(['success' => false, 'error' => 'Base URL inválida. Deve ser HTTPS e não apontar para IPs privados.']);
+                }
             }
         }
 
-        $analyzer = new AIAnalyzer($provider, $apiKey, $model, $baseUrl);
+        $analyzer = new AIAnalyzer($provider, $apiKey, $model, $baseUrl, $protocol);
         $ok       = $analyzer->ping();
 
         Database::setConfig("ai_provider_{$provider}_last_ping", $ok ? '1' : '0');
@@ -517,7 +530,8 @@ class AIController
             $config['provider'],
             $config['api_key'],
             $config['model'],
-            $config['base_url']
+            $config['base_url'],
+            $config['protocol'] ?? ''
         );
     }
 
@@ -610,6 +624,15 @@ class AIController
             $model = $post["ai_provider_{$key}_model"] ?? $def['default_model'];
             if (isset($def['models'][$model])) {
                 Database::setConfig("ai_provider_{$key}_model", $model);
+            }
+
+            // Protocolo — só para provedores com seletor (ex: MiMo)
+            if (!empty($def['has_protocol_selector'])) {
+                $protocol = $post["ai_provider_{$key}_protocol"] ?? $def['protocol'];
+                $validProtocols = array_keys($def['protocol_options'] ?? []);
+                if (in_array($protocol, $validProtocols, true)) {
+                    Database::setConfig("ai_provider_{$key}_protocol", $protocol);
+                }
             }
 
             // Base URL — só para provedores que precisam
