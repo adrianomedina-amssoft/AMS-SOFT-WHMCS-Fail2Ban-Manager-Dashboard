@@ -48,8 +48,8 @@ class AIAnalyzer
         ],
         'mimo' => [
             'label'            => 'MiMo (Xiaomi)',
-            'protocol'         => 'openai',
-            'default_base_url' => 'https://token-plan-sgp.xiaomimimo.com/v1',
+            'protocol'         => 'anthropic',
+            'default_base_url' => 'https://token-plan-sgp.xiaomimimo.com/anthropic/v1/messages',
             'default_model'    => 'mimo-v2.5-pro',
             'models'           => [
                 'mimo-v2.5-pro' => 'MiMo v2.5 Pro',
