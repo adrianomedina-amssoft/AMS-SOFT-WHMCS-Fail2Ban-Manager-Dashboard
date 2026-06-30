@@ -20,7 +20,7 @@ Addon WHMCS que gerencia fail2ban via painel admin visual. Elimina a necessidade
 
 ```
 amssoft_fail2ban/
-├── amssoft_fail2ban.php        # Entry point WHMCS (5 funções obrigatórias + migrações v2/v3)
+├── amssoft_fail2ban.php        # Entry point WHMCS (5 funções obrigatórias + migrações v2/v3/v4)
 ├── hooks.php                   # Hooks: ClientLoginFailed, AdminUserLoginFailed, AfterCronJob (IA)
 ├── lib/
 │   ├── Router.php              # Autoloader PSR-4 + roteamento + renderização de templates
@@ -30,7 +30,7 @@ amssoft_fail2ban/
 │   ├── Helper.php              # CSRF, session, flash, sanitização, criptografia AES-256-CBC
 │   ├── LogParser.php           # Parser de /var/log/fail2ban.log (ban/unban events)
 │   ├── LogViewer.php           # Leitura de logs com highlight (suspicious/error patterns)
-│   ├── AIAnalyzer.php          # Integração API Anthropic (Claude) — análise + geração de failregex
+│   ├── AIAnalyzer.php          # Integração multi-provider IA (Anthropic, MiMo) — análise + geração de failregex
 │   ├── FilterManager.php       # Cria filtros (.conf) e jails para filtros gerados pela IA
 │   └── AutoBanEngine.php       # Motor de ban automático (3 modos: suggestion/auto/threshold)
 ├── controllers/
@@ -107,8 +107,9 @@ Sugestões da IA com status (pending/approved/rejected/auto_executed). Inclui ca
 ### Migrações
 - **v2** (`amssoft_fail2ban_migrate_v2`): cria tabela ai_suggestions se não existir
 - **v3** (`amssoft_fail2ban_migrate_v3`): adiciona colunas filter_name, failregex, filter_created_at
+- **v4** (`amssoft_fail2ban_migrate_v4`): multi-provider IA — migra chaves antigas para formato por provedor, garante `ai_active_provider`
 
-Ambas são idempotentes e executadas automaticamente em cada carregamento do módulo (`amssoft_fail2ban_output`).
+Todas são idempotentes e executadas automaticamente em cada carregamento do módulo (`amssoft_fail2ban_output`).
 
 ## Hooks WHMCS
 
@@ -197,11 +198,12 @@ O método `buildEndpointUrl()` monta a URL final a partir da base + path do prot
 - `ai_provider_{name}_protocol` — protocolo escolhido (apenas para provedores com seletor)
 - `ai_provider_{name}_base_url` — endpoint (apenas para provedores com `needs_base_url`)
 
-**Migração lazy:**
+**Migração v4 (multi-provider):**
 - Chaves antigas `ai_api_key` e `ai_model` são migradas automaticamente para `ai_provider_anthropic_*`
 - Migração preserva valor já criptografado (copia direto, sem decriptar/recriptografar)
 - Guard idempotente: só migra se a chave antiga existir E a nova estiver vazia
 - Base URLs salvas para provedores com `needs_base_url=false` são limpas automaticamente
+- Executada em `amssoft_fail2ban_output()` (padrão v2/v3), não no controller
 
 **Criptografia de API keys (todos os provedores):**
 - Todas as chaves usam `Helper::encryptApiKey()` → AES-256-CBC com mesma `_enc_key`
