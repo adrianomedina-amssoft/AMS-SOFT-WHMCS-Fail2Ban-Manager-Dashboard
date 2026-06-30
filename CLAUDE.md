@@ -143,13 +143,35 @@ Arquivo `setup/sudoers/amssoft_fail2ban` concede NOPASSWD para:
 - `/bin/chmod 644 /etc/fail2ban/filter.d/amsfb-*`
 - `Defaults:www-data !requiretty`
 
-## Integração com IA (Claude / Anthropic)
+## Integração com IA (Multi-Provider)
 
-### AIAnalyzer
-- Endpoint: `https://api.anthropic.com/v1/messages`
-- Modelos suportados: `claude-haiku-4-5-20251001`, `claude-sonnet-4-6`, `claude-opus-4-6`
-- Logs truncados em 200 linhas (configurável: 200/400/600/800/1000)
-- Prompt customizável pelo admin (max 8000 chars)
+### AIAnalyzer — Registry de Provedores
+
+Arquitetura multi-provider com dispatch por **protocolo** (não por nome):
+
+```php
+AIAnalyzer::PROVIDERS = [
+    'anthropic' => ['protocol' => 'anthropic', ...],  // protocolo próprio
+    'mimo'      => ['protocol' => 'openai', ...],     // OpenAI-compatible
+];
+```
+
+Adicionar provedor futuro = 1 entrada no array `PROVIDERS`.
+
+**Provedores suportados:**
+- **Anthropic (Claude)** — protocolo próprio, endpoint `https://api.anthropic.com/v1/messages`
+- **MiMo (Xiaomi)** — protocolo OpenAI-compatible, base URL editável pelo admin
+
+**Configuração no banco (chaves dinâmicas por provedor):**
+- `ai_active_provider` — provedor ativo (`anthropic` | `mimo`)
+- `ai_provider_{name}_api_key` — chave API criptografada (AES-256-CBC)
+- `ai_provider_{name}_model` — modelo selecionado
+- `ai_provider_{name}_base_url` — endpoint (apenas para provedores editáveis)
+
+**Migração lazy:** chaves antigas `ai_api_key` e `ai_model` são migradas automaticamente para `ai_provider_anthropic_*`.
+
+- Logs truncados em N linhas (configurável: 200/400/600/800/1000)
+- Prompt customizável pelo admin (max 8000 chars, compartilhado entre provedores)
 - **Mitigação de prompt injection:** instruções no system prompt, logs em `<log_data>` com aviso explícito
 
 ### AutoBanEngine — 3 modos
@@ -245,6 +267,9 @@ Procurar por `[SEC-N]` nos comentários para encontrar cada medida de segurança
 - **[SEC-14]** Evitar `Capsule::raw()` com variável interpolada
 - **[SEC-15]** Validação de status contra ENUM antes de UPDATE
 - **[SEC-16]** Mitigação de prompt injection (system prompt + tags `<log_data>`)
+- **[SEC-17]** Base URL editável: validação https:// + bloqueio de IPs privados/localhost (SSRF defense)
+- **[SEC-18]** `ai_active_provider` validado contra registry antes de persistir
+- **[SEC-19]** Erros de API: mensagem genérica no frontend, detalhes nunca expostos
 
 ## Problemas Conhecidos
 

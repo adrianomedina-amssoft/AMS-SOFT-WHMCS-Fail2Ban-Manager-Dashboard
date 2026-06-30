@@ -1,8 +1,10 @@
 <?php
 /**
- * AI Settings template
- * Disponível: $api_key_set, $ai_mode, $ai_interval, $ai_min_conf,
- *             $ai_whitelist, $ai_prompt, $thresholds, $last_ping_ok
+ * AI Settings template — multi-provider
+ * Disponível: $active_provider, $providers, $provider_configs,
+ *             $ai_mode, $ai_interval, $ai_min_conf, $ai_whitelist,
+ *             $ai_prompt, $thresholds, $ai_log_lines, $global_bantime,
+ *             $ai_auto_enabled
  */
 ?>
 
@@ -50,90 +52,109 @@
 </div>
 
 <!-- =========================================================
-     Card 1: API Anthropic
+     Card 1: Provedor de IA Ativo
      ========================================================= -->
 <div class="panel panel-default">
-    <div class="panel-heading"><strong>&#128273; Chave API Anthropic</strong></div>
+    <div class="panel-heading"><strong>&#129302; Provedor de IA Ativo</strong></div>
     <div class="panel-body">
+        <div class="form-group">
+            <p class="help-block">Selecione qual provedor de IA será usado para análise de logs. Apenas 1 provedor ativo por vez.</p>
+            <?php foreach ($providers as $key => $def): ?>
+            <div class="radio">
+                <label>
+                    <input type="radio" name="ai_active_provider" value="<?= $e($key) ?>"
+                        <?= ($active_provider === $key) ? 'checked' : '' ?>
+                        data-provider-toggle="<?= $e($key) ?>">
+                    <strong><?= $e($def['label']) ?></strong>
+                    <?php if ($key === 'anthropic'): ?>
+                        <span class="label label-info" style="margin-left:6px;">Protocolo próprio</span>
+                    <?php else: ?>
+                        <span class="label label-default" style="margin-left:6px;">OpenAI-compatible</span>
+                    <?php endif; ?>
+                </label>
+            </div>
+            <?php endforeach; ?>
+        </div>
+    </div>
+</div>
+
+<!-- =========================================================
+     Card 2: Configurações por Provedor
+     ========================================================= -->
+<?php foreach ($providers as $key => $def): ?>
+<?php $pcfg = $provider_configs[$key]; ?>
+<div class="panel panel-default amsfb-provider-panel" id="amsfb-provider-<?= $e($key) ?>"
+     style="<?= ($active_provider !== $key) ? 'display:none;' : '' ?>">
+    <div class="panel-heading">
+        <strong><?= $e($def['label']) ?> — Configurações</strong>
+        <?php if ($active_provider === $key): ?>
+            <span class="label label-success pull-right">&#10003; Ativo</span>
+        <?php endif; ?>
+    </div>
+    <div class="panel-body">
+
+        <!-- Chave API -->
         <div class="form-group">
             <label>Chave API</label>
             <div class="input-group">
                 <input type="password"
-                       id="amsfb-api-key"
-                       name="api_key"
-                       class="form-control"
-                       placeholder="<?= $api_key_set ? '●●●●●●●● (já configurada — preencha para alterar)' : 'sk-ant-...' ?>"
+                       name="ai_provider_<?= $e($key) ?>_api_key"
+                       class="form-control amsfb-api-key"
+                       data-provider="<?= $e($key) ?>"
+                       placeholder="<?= $pcfg['api_key_set'] ? '●●●●●●●● (já configurada — preencha para alterar)' : 'Insira sua chave API...' ?>"
                        autocomplete="new-password">
                 <span class="input-group-btn">
-                    <button type="button" id="amsfb-ping-btn" class="btn btn-default">
+                    <button type="button" class="btn btn-default amsfb-ping-btn" data-provider="<?= $e($key) ?>">
                         &#128268; Testar API
                     </button>
                 </span>
             </div>
-            <span id="amsfb-ping-result" class="help-block" style="display:none;"></span>
-            <?php if ($api_key_set): ?>
+            <span class="amsfb-ping-result help-block" style="display:none;" data-provider="<?= $e($key) ?>"></span>
+            <?php if ($pcfg['api_key_set']): ?>
             <p class="help-block">
-                <span class="label <?= $last_ping_ok === '1' ? 'label-success' : 'label-default' ?>">
-                    <?= $last_ping_ok === '1' ? '&#10003; Último ping OK' : '&#9679; Ping não testado' ?>
+                <span class="label <?= $pcfg['last_ping'] === '1' ? 'label-success' : 'label-default' ?>">
+                    <?= $pcfg['last_ping'] === '1' ? '&#10003; Último ping OK' : '&#9679; Ping não testado' ?>
                 </span>
                 &nbsp; Chave já configurada. Deixe em branco para manter.
             </p>
             <?php endif; ?>
         </div>
-    </div>
-</div>
 
-<!-- =========================================================
-     Card 1b: Modelo de IA
-     ========================================================= -->
-<div class="panel panel-default">
-    <div class="panel-heading"><strong>&#129302; Modelo de IA</strong></div>
-    <div class="panel-body">
+        <?php if ($def['needs_base_url']): ?>
+        <!-- Base URL (apenas para provedores editáveis) -->
         <div class="form-group">
-
-            <div class="radio">
-                <label>
-                    <input type="radio" name="ai_model" value="claude-haiku-4-5-20251001"
-                        <?= ($ai_model ?? 'claude-haiku-4-5-20251001') === 'claude-haiku-4-5-20251001' ? 'checked' : '' ?>>
-                    <strong>Claude Haiku</strong>
-                </label>
-                <p class="help-block" style="margin-left:20px;">
-                    Modelo mais econômico e veloz da família Claude. Excelente para análise de logs de
-                    segurança: processa rapidamente grandes volumes de texto com custo muito baixo.
-                    <span class="label label-success">&#10003; Recomendado para análise de logs</span>
-                </p>
-            </div>
-
-            <div class="radio">
-                <label>
-                    <input type="radio" name="ai_model" value="claude-sonnet-4-6"
-                        <?= ($ai_model ?? '') === 'claude-sonnet-4-6' ? 'checked' : '' ?>>
-                    <strong>Claude Sonnet</strong>
-                </label>
-                <p class="help-block" style="margin-left:20px;">
-                    Equilíbrio entre capacidade analítica e custo. Ideal quando se deseja maior
-                    profundidade na detecção de padrões de ataque sem abrir mão da performance.
-                </p>
-            </div>
-
-            <div class="radio">
-                <label>
-                    <input type="radio" name="ai_model" value="claude-opus-4-6"
-                        <?= ($ai_model ?? '') === 'claude-opus-4-6' ? 'checked' : '' ?>>
-                    <strong>Claude Opus</strong>
-                </label>
-                <p class="help-block" style="margin-left:20px;">
-                    Modelo mais poderoso e preciso. Recomendado apenas para ambientes críticos com
-                    alto volume de ataques sofisticados. Custo por análise significativamente mais elevado.
-                </p>
-            </div>
-
+            <label>Base URL</label>
+            <input type="url"
+                   name="ai_provider_<?= $e($key) ?>_base_url"
+                   class="form-control"
+                   value="<?= $e($pcfg['base_url']) ?>"
+                   placeholder="<?= $e($def['default_base_url']) ?>">
+            <span class="help-block">
+                Endpoint da API. Default: <code><?= $e($def['default_base_url']) ?></code>
+            </span>
         </div>
+        <?php endif; ?>
+
+        <!-- Modelo -->
+        <div class="form-group">
+            <label>Modelo</label>
+            <?php foreach ($def['models'] as $modelId => $modelLabel): ?>
+            <div class="radio">
+                <label>
+                    <input type="radio" name="ai_provider_<?= $e($key) ?>_model" value="<?= $e($modelId) ?>"
+                        <?= ($pcfg['model'] === $modelId) ? 'checked' : '' ?>>
+                    <strong><?= $e($modelLabel) ?></strong>
+                </label>
+            </div>
+            <?php endforeach; ?>
+        </div>
+
     </div>
 </div>
+<?php endforeach; ?>
 
 <!-- =========================================================
-     Card 1c: Linhas por análise
+     Card 3: Linhas por análise
      ========================================================= -->
 <div class="panel panel-default">
     <div class="panel-heading"><strong>&#128196; Linhas por Análise</strong></div>
@@ -156,7 +177,7 @@
 </div>
 
 <!-- =========================================================
-     Card 2: Modo de operação
+     Card 4: Modo de operação
      ========================================================= -->
 <div class="panel panel-default">
     <div class="panel-heading"><strong>&#9881; Modo de Operação</strong></div>
@@ -257,7 +278,7 @@
 </div>
 
 <!-- =========================================================
-     Card 3: Parâmetros gerais
+     Card 5: Parâmetros gerais
      ========================================================= -->
 <div class="panel panel-default">
     <div class="panel-heading"><strong>&#128203; Parâmetros Gerais</strong></div>
@@ -293,16 +314,17 @@
 </div>
 
 <!-- =========================================================
-     Card 4: Prompt customizável
+     Card 6: Prompt customizável (compartilhado)
      ========================================================= -->
 <div class="panel panel-default">
-    <div class="panel-heading"><strong>&#128172; Prompt enviado ao Claude</strong></div>
+    <div class="panel-heading"><strong>&#128172; Prompt enviado à IA</strong></div>
     <div class="panel-body">
         <div class="form-group">
             <label>Template do prompt (use <code>{logs}</code> onde as linhas serão inseridas)</label>
             <textarea name="ai_prompt" class="form-control amsfb-prompt-textarea" rows="14"><?= $e($ai_prompt) ?></textarea>
             <p class="help-block">
-                Altere para personalizar como o Claude analisa os logs. Use <code>{logs}</code> como placeholder.
+                Altere para personalizar como a IA analisa os logs. Use <code>{logs}</code> como placeholder.
+                Este prompt é compartilhado entre todos os provedores.
             </p>
         </div>
     </div>
@@ -327,6 +349,24 @@
 (function () {
     'use strict';
 
+    // -------------------------------------------------------------------------
+    // Toggle provedor ativo — mostra/esconde seções
+    // -------------------------------------------------------------------------
+    var providerRadios = document.querySelectorAll('input[name="ai_active_provider"]');
+    var providerPanels = document.querySelectorAll('.amsfb-provider-panel');
+
+    function toggleProviderPanels(activeProvider) {
+        providerPanels.forEach(function (panel) {
+            panel.style.display = panel.id === 'amsfb-provider-' + activeProvider ? '' : 'none';
+        });
+    }
+
+    providerRadios.forEach(function (r) {
+        r.addEventListener('change', function () {
+            toggleProviderPanels(this.value);
+        });
+    });
+
     // Toggle análise automática
     var autoEnabledChk = document.getElementById('amsfb-auto-enabled');
     var autoDisabledWarn = document.getElementById('amsfb-auto-disabled-warning');
@@ -349,29 +389,30 @@
     });
 
     // -------------------------------------------------------------------------
-    // Testar API
+    // Testar API (multi-provider)
     // -------------------------------------------------------------------------
-    var pingBtn    = document.getElementById('amsfb-ping-btn');
-    var pingResult = document.getElementById('amsfb-ping-result');
+    document.querySelectorAll('.amsfb-ping-btn').forEach(function (btn) {
+        btn.addEventListener('click', function () {
+            var provider = this.getAttribute('data-provider');
+            var keyInput = document.querySelector('.amsfb-api-key[data-provider="' + provider + '"]');
+            var resultSpan = document.querySelector('.amsfb-ping-result[data-provider="' + provider + '"]');
+            var key = keyInput ? keyInput.value : '';
 
-    if (pingBtn) {
-        pingBtn.addEventListener('click', function () {
-            var key = document.getElementById('amsfb-api-key').value;
-            pingBtn.disabled = true;
-            pingBtn.innerHTML = '&#9685; Testando...';
-            if (pingResult) { pingResult.style.display = 'none'; }
+            btn.disabled = true;
+            btn.innerHTML = '&#9685; Testando...';
+            if (resultSpan) resultSpan.style.display = 'none';
 
-            window.AMSFB.post('ai', 'ping_api', { api_key: key }, function (data) {
-                pingBtn.disabled = false;
-                pingBtn.innerHTML = '&#128268; Testar API';
-                if (!pingResult) return;
-                pingResult.style.display = 'block';
-                pingResult.innerHTML = data.success
+            window.AMSFB.post('ai', 'ping_api', { provider: provider, api_key: key }, function (data) {
+                btn.disabled = false;
+                btn.innerHTML = '&#128268; Testar API';
+                if (!resultSpan) return;
+                resultSpan.style.display = 'block';
+                resultSpan.innerHTML = data.success
                     ? '<span class="text-success">&#10003; ' + data.message + '</span>'
                     : '<span class="text-danger">&#10007; ' + (data.error || data.message) + '</span>';
             });
         });
-    }
+    });
 
     // -------------------------------------------------------------------------
     // Salvar configurações
@@ -385,7 +426,7 @@
             var data = {};
             var inputs = form.querySelectorAll('input[name], select[name], textarea[name]');
             inputs.forEach(function (el) {
-                if (el.name === 'csrf_token') return; // já incluído pelo AMSFB.post via window.AMSFB.csrfToken
+                if (el.name === 'csrf_token') return;
                 if (el.type === 'radio' && !el.checked) return;
                 if (el.type === 'checkbox') {
                     if (el.checked) data[el.name] = el.value;

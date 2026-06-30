@@ -152,9 +152,10 @@ class LogViewerController
             return json_encode(['success' => false, 'error' => 'Path não autorizado.']);
         }
 
-        $apiKey = $this->decryptApiKey();
-        if (empty($apiKey)) {
-            return json_encode(['success' => false, 'error' => 'Chave API Anthropic não configurada. Configure em IA &gt; Configurações.']);
+        // Usar provedor ativo (multi-provider)
+        $aiConfig = AIAnalyzer::getActiveConfig();
+        if (empty($aiConfig['api_key'])) {
+            return json_encode(['success' => false, 'error' => 'Chave API não configurada para o provedor ativo. Configure em IA &gt; Configurações.']);
         }
 
         $viewer   = new LogViewer();
@@ -164,8 +165,7 @@ class LogViewerController
             return json_encode(['success' => false, 'error' => 'Nenhuma linha encontrada no log.']);
         }
 
-        $model       = Database::getConfig('ai_model', 'claude-haiku-4-5-20251001');
-        $analyzer    = new AIAnalyzer($apiKey, $model);
+        $analyzer    = new AIAnalyzer($aiConfig['provider'], $aiConfig['api_key'], $aiConfig['model'], $aiConfig['base_url']);
         $client      = $this->router->makeClient();
         $engine      = new AutoBanEngine($analyzer, $client);
         $suggestions = $analyzer->analyze($rawLines);

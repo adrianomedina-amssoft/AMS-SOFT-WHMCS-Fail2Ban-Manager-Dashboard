@@ -38,12 +38,10 @@ class AIController
 
     private function showSuggestions(): string
     {
-        // Pending (paginado)
         $pendingPage   = max(1, (int)($_GET['pending_page'] ?? 1));
         $pendingResult = Database::getPendingSuggestionsPaged($pendingPage, 10);
         $pending       = $this->decodeSuggestions($pendingResult['data']);
 
-        // Histórico (filtros + paginado)
         $filters = [
             'status'    => $_GET['filter_status']   ?? '',
             'severity'  => $_GET['filter_severity'] ?? '',
@@ -68,7 +66,7 @@ class AIController
     }
 
     // -----------------------------------------------------------------------
-    // Página: configurações da IA
+    // Página: configurações da IA (multi-provider)
     // -----------------------------------------------------------------------
 
     private function showSettings(): string
@@ -86,16 +84,35 @@ class AIController
             return '';
         }
 
-        $apiKeySet = Database::getConfig('ai_api_key', '') !== '';
+        // Lazy migration: migrar chaves antigas (Anthropic-only) para o novo formato
+        $this->migrateOldKeys();
 
-        // Migração: se há chave no DB mas não consegue descriptografar (chave corrompida
-        // pela troca do método de derivação da chave de criptografia), apaga para forçar
-        // re-cadastro pelo usuário.
-        if ($apiKeySet) {
-            $decrypted = Helper::decryptApiKey(Database::getConfig('ai_api_key', ''));
-            if ($decrypted === '') {
-                Database::setConfig('ai_api_key', '');
-                $apiKeySet = false;
+        $activeProvider = Database::getConfig('ai_active_provider', 'anthropic');
+        $providers      = AIAnalyzer::getProviders();
+
+        // [SEC-18] Validar provedor ativo contra o registry
+        if (!isset($providers[$activeProvider])) {
+            $activeProvider = 'anthropic';
+            Database::setConfig('ai_active_provider', 'anthropic');
+        }
+
+        // Carregar config de cada provedor
+        $providerConfigs = [];
+        foreach ($providers as $key => $def) {
+            $encrypted = Database::getConfig("ai_provider_{$key}_api_key", '');
+            $providerConfigs[$key] = [
+                'api_key_set' => $encrypted !== '',
+                'model'       => Database::getConfig("ai_provider_{$key}_model", $def['default_model']),
+                'base_url'    => Database::getConfig("ai_provider_{$key}_base_url", $def['default_base_url']),
+                'last_ping'   => Database::getConfig("ai_provider_{$key}_last_ping", '0'),
+            ];
+            // Verificar se chave corrompida pode ser descriptografada
+            if ($providerConfigs[$key]['api_key_set']) {
+                $decrypted = Helper::decryptApiKey($encrypted);
+                if ($decrypted === '') {
+                    Database::setConfig("ai_provider_{$key}_api_key", '');
+                    $providerConfigs[$key]['api_key_set'] = false;
+                }
             }
         }
 
@@ -104,7 +121,6 @@ class AIController
         $minConf   = Database::getConfig('ai_min_confidence', '75');
         $whitelist = Database::getConfig('ai_whitelist_ips', '');
         $prompt    = Database::getConfig('ai_prompt', AIAnalyzer::getDefaultPrompt());
-        $aiModel    = Database::getConfig('ai_model', 'claude-haiku-4-5-20251001');
         $aiLogLines = (int)Database::getConfig('ai_log_lines', 200);
 
         $thresholds = [
@@ -113,21 +129,20 @@ class AIController
             'medium'   => Database::getConfig('ai_threshold_medium',   '5:30'),
         ];
 
-        $lastPingOk    = Database::getConfig('ai_last_ping_ok', '0');
         $globalBantime = (int)Database::getConfig('global_bantime', 604800);
         $autoEnabled   = Database::getConfig('ai_auto_enabled', '1');
 
         return $this->router->render('ai_settings', [
-            'api_key_set'      => $apiKeySet,
+            'active_provider'  => $activeProvider,
+            'providers'        => $providers,
+            'provider_configs' => $providerConfigs,
             'ai_mode'          => $mode,
-            'ai_model'         => $aiModel,
             'ai_log_lines'     => $aiLogLines,
             'ai_interval'      => $interval,
             'ai_min_conf'      => $minConf,
             'ai_whitelist'     => $whitelist,
             'ai_prompt'        => $prompt,
             'thresholds'       => $thresholds,
-            'last_ping_ok'     => $lastPingOk,
             'global_bantime'   => $globalBantime,
             'ai_auto_enabled'  => $autoEnabled,
         ]);
@@ -188,15 +203,13 @@ class AIController
             return json_encode(['success' => false, 'error' => "Sugestão já foi {$label}."]);
         }
 
-        $ip      = $suggestion['ip'];
-        $apiKey  = $this->decryptApiKey();
-        $client  = $this->router->makeClient();
-        $analyzer = new AIAnalyzer($apiKey ?: 'placeholder');
-        $engine  = new AutoBanEngine($analyzer, $client);
-        $adminId = Helper::adminId();
+        $ip       = $suggestion['ip'];
+        $client   = $this->router->makeClient();
+        $analyzer = $this->makeAnalyzer();
+        $engine   = new AutoBanEngine($analyzer, $client);
+        $adminId  = Helper::adminId();
 
-        // Garantir que a jail ai-bans existe em jail.local e está ativa no fail2ban.
-        // Todo ban de sugestão IA vai para essa jail dedicada.
+        // Garantir que a jail ai-bans existe
         try {
             $jailConfig = $this->router->makeJailConfig();
             $jailLocal  = $jailConfig->readJailLocal();
@@ -223,7 +236,7 @@ class AIController
                 }
             }
         } catch (\Throwable $e) {
-            // silencioso — approveSuggestion retornará false se offline
+            // silencioso
         }
 
         $ok = $engine->approveSuggestion($id, $adminId);
@@ -233,12 +246,10 @@ class AIController
             return json_encode(['success' => true, 'message' => "IP {$ip} banido com sucesso.", 'dismissed_ids' => $dismissed]);
         }
 
-        // Diagnosticar causa da falha
         if (!$client->ping()) {
             return json_encode(['success' => false, 'error' => "fail2ban está offline — não foi possível banir {$ip}."]);
         }
 
-        // IP já banido em qualquer jail — tratar como sucesso
         try {
             $bannedIPs = array_column($client->getBannedIPs(), 'ip');
             if (in_array($ip, $bannedIPs, true)) {
@@ -256,15 +267,6 @@ class AIController
     // AJAX: criar filtro fail2ban a partir de sugestão da IA
     // -----------------------------------------------------------------------
 
-    /**
-     * Cria filtro em /etc/fail2ban/filter.d/ e jail em jail.local para
-     * bloquear automaticamente o padrão de ataque detectado pela IA.
-     *
-     * Cenário A: sugestão já tem failregex → cria diretamente.
-     * Cenário B: sugestão sem failregex mas com evidence → chama IA para gerar.
-     *
-     * Completamente independente do fluxo de aprovação de IP.
-     */
     private function ajaxCreateFilter(array $post): string
     {
         $id = (int)($post['id'] ?? 0);
@@ -281,7 +283,7 @@ class AIController
         $filterName  = $suggestion['filter_name'] ?? '';
         $generatedByAi = false;
 
-        // Cenário B: sem failregex — tentar gerar on-demand via IA a partir da evidence
+        // Cenário B: sem failregex — gerar on-demand via IA
         if (empty($failregex)) {
             $evidenceRaw = $suggestion['evidence'] ?? null;
             $evidenceLines = [];
@@ -297,16 +299,14 @@ class AIController
                 ]);
             }
 
-            $apiKey = $this->decryptApiKey();
-            if (empty($apiKey)) {
+            $analyzer = $this->makeAnalyzer();
+            if ($analyzer === null) {
                 return json_encode([
                     'success' => false,
-                    'error'   => 'Chave API Anthropic não configurada. Configure em Configurações da IA.',
+                    'error'   => 'Chave API não configurada para o provedor ativo. Configure em Configurações da IA.',
                 ]);
             }
 
-            $model    = Database::getConfig('ai_model', 'claude-haiku-4-5-20251001');
-            $analyzer = new AIAnalyzer($apiKey, $model);
             $generated = $analyzer->generateFilterRegex($evidenceLines);
 
             if ($generated === null || empty($generated['failregex']) || empty($generated['filter_name'])) {
@@ -320,7 +320,6 @@ class AIController
             $filterName = $generated['filter_name'];
             $generatedByAi = true;
 
-            // Persistir para uso futuro e exibição na UI
             Database::updateSuggestionFilter($id, $filterName, $failregex);
         }
 
@@ -328,7 +327,6 @@ class AIController
             return json_encode(['success' => false, 'error' => 'Nome do filtro ou failregex ausentes.']);
         }
 
-        // Criar filtro e jail via FilterManager
         $filterManager  = $this->router->makeFilterManager();
         $jailName       = 'amsfb-' . $filterName;
         $filterAlreadyExisted = $filterManager->filterExists($filterName);
@@ -339,8 +337,7 @@ class AIController
             if (!$ok) {
                 return json_encode([
                     'success' => false,
-                    'error'   => "Falha ao criar arquivo de filtro 'amsfb-{$filterName}.conf'. "
-                               . 'Verifique as permissões em /etc/fail2ban/filter.d/ e as regras do sudoers.',
+                    'error'   => "Falha ao criar arquivo de filtro 'amsfb-{$filterName}'. Verifique permissões em /etc/fail2ban/filter.d/ e sudoers.",
                 ]);
             }
         }
@@ -357,7 +354,6 @@ class AIController
                 ]);
             }
         } else {
-            // Jail já existe — sincronizar bantime com global_bantime
             $globalBantime = (string)(int)Database::getConfig('global_bantime', 604800);
             $jailCfg       = $this->router->makeJailConfig();
             $jailLocalData = $jailCfg->readJailLocal();
@@ -367,7 +363,6 @@ class AIController
             }
         }
 
-        // Recarregar jail (não-fatal)
         if (!$filterAlreadyExisted || !$jailAlreadyExisted) {
             $filterManager->reloadJail($jailName);
         }
@@ -402,9 +397,8 @@ class AIController
             return json_encode(['success' => false, 'error' => 'ID inválido.']);
         }
 
-        $apiKey   = $this->decryptApiKey();
         $client   = $this->router->makeClient();
-        $analyzer = new AIAnalyzer($apiKey ?: 'placeholder');
+        $analyzer = $this->makeAnalyzer();
         $engine   = new AutoBanEngine($analyzer, $client);
         $adminId  = Helper::adminId();
 
@@ -421,8 +415,7 @@ class AIController
 
     private function ajaxRunNow(): string
     {
-        // [SEC-10] Rate limiting: mínimo 60 segundos entre chamadas manuais
-        // para evitar esgotamento do orçamento da API Anthropic via loop rápido.
+        // [SEC-10] Rate limiting
         $lastRun = (int)Database::getConfig('ai_last_run', 0);
         if ((time() - $lastRun) < 60) {
             return json_encode([
@@ -431,19 +424,18 @@ class AIController
             ]);
         }
 
-        $apiKey = $this->decryptApiKey();
-        if (empty($apiKey)) {
-            return json_encode(['success' => false, 'error' => 'Chave API Anthropic não configurada.']);
+        $analyzer = $this->makeAnalyzer();
+        if ($analyzer === null) {
+            return json_encode(['success' => false, 'error' => 'Chave API não configurada para o provedor ativo.']);
         }
 
-        $model    = Database::getConfig('ai_model', 'claude-haiku-4-5-20251001');
-        $analyzer = new AIAnalyzer($apiKey, $model);
-        $client   = $this->router->makeClient();
-        $engine   = new AutoBanEngine($analyzer, $client);
-        $results  = $engine->runAnalysis(true); // forceReread: análise manual sempre relê as últimas linhas
+        $client  = $this->router->makeClient();
+        $engine  = new AutoBanEngine($analyzer, $client);
+        $results = $engine->runAnalysis(true);
 
         Database::setConfig('ai_last_run', (string)time());
-        Database::setConfig('ai_last_ping_ok', '1');
+        $activeProvider = Database::getConfig('ai_active_provider', 'anthropic');
+        Database::setConfig("ai_provider_{$activeProvider}_last_ping", '1');
 
         return json_encode([
             'success' => true,
@@ -453,33 +445,52 @@ class AIController
     }
 
     // -----------------------------------------------------------------------
-    // AJAX: testar conexão com a API
+    // AJAX: testar conexão com a API (multi-provider)
     // -----------------------------------------------------------------------
 
     private function ajaxPingApi(array $post): string
     {
-        // Permite testar com uma chave nova (ainda não salva)
-        $newKey = $post['api_key'] ?? '';
-        $apiKey = !empty($newKey) ? $newKey : $this->decryptApiKey();
+        // [SEC-18] Validar provedor contra registry
+        $provider = $post['provider'] ?? Database::getConfig('ai_active_provider', 'anthropic');
+        if (!in_array($provider, AIAnalyzer::getValidProviders(), true)) {
+            return json_encode(['success' => false, 'error' => 'Provedor inválido.']);
+        }
+
+        $newKey = trim($post['api_key'] ?? '');
+        $apiKey = $newKey !== '' ? $newKey : Helper::decryptApiKey(
+            Database::getConfig("ai_provider_{$provider}_api_key", '')
+        );
 
         if (empty($apiKey)) {
             return json_encode(['success' => false, 'error' => 'Chave API não informada.']);
         }
 
-        $model    = Database::getConfig('ai_model', 'claude-haiku-4-5-20251001');
-        $analyzer = new AIAnalyzer($apiKey, $model);
+        $model   = $post['model'] ?? Database::getConfig("ai_provider_{$provider}_model", '');
+        $baseUrl = $post['base_url'] ?? Database::getConfig("ai_provider_{$provider}_base_url", '');
+
+        // [SEC-17] Validar base URL se editável
+        $def = AIAnalyzer::getProviderDef($provider);
+        if ($def && $def['needs_base_url'] && $baseUrl !== '') {
+            if (!$this->validateBaseUrl($baseUrl)) {
+                return json_encode(['success' => false, 'error' => 'Base URL inválida. Deve ser HTTPS e não apontar para IPs privados.']);
+            }
+        }
+
+        $analyzer = new AIAnalyzer($provider, $apiKey, $model, $baseUrl);
         $ok       = $analyzer->ping();
 
-        Database::setConfig('ai_last_ping_ok', $ok ? '1' : '0');
+        Database::setConfig("ai_provider_{$provider}_last_ping", $ok ? '1' : '0');
 
+        // [SEC-19] Mensagem genérica — detalhes do erro não expostos
+        $label = $def['label'] ?? $provider;
         return json_encode([
             'success' => $ok,
-            'message' => $ok ? 'API Anthropic respondeu com sucesso.' : 'Falha na conexão com a API Anthropic.',
+            'message' => $ok ? "API {$label} respondeu com sucesso." : "Falha na conexão com a API {$label}.",
         ]);
     }
 
     // -----------------------------------------------------------------------
-    // AJAX: salvar configurações
+    // AJAX: salvar configurações (multi-provider)
     // -----------------------------------------------------------------------
 
     private function ajaxSaveSettings(array $post): string
@@ -489,83 +500,121 @@ class AIController
     }
 
     // -----------------------------------------------------------------------
-    // Helpers privados
+    // Helpers privados — multi-provider
     // -----------------------------------------------------------------------
 
     /**
-     * Detecta o logpath mais adequado com base no failregex e nas evidências.
-     * Analisa palavras-chave para identificar o tipo de log.
+     * Cria uma instância de AIAnalyzer com a config do provedor ativo.
+     * Retorna null se a chave API não estiver configurada.
      */
-    private function detectLogPath(string $failregex, string $evidenceJson): string
+    private function makeAnalyzer(): ?AIAnalyzer
     {
-        $evidenceLines = [];
-        if (!empty($evidenceJson) && is_string($evidenceJson)) {
-            $decoded = json_decode($evidenceJson, true);
-            $evidenceLines = is_array($decoded) ? $decoded : [$evidenceJson];
+        $config = AIAnalyzer::getActiveConfig();
+        if (empty($config['api_key'])) {
+            return null;
         }
-
-        $allText = strtolower($failregex . ' ' . implode(' ', $evidenceLines));
-
-        // WHMCS auth log
-        if (strpos($allText, 'whmcs') !== false
-            || strpos($allText, 'login failed') !== false
-        ) {
-            if (file_exists('/var/log/whmcs_auth.log')) {
-                return '/var/log/whmcs_auth.log';
-            }
-        }
-
-        // Apache error log
-        if (strpos($allText, 'ah0') !== false
-            || strpos($allText, 'authz') !== false
-            || strpos($allText, 'client denied') !== false
-        ) {
-            if (file_exists('/var/log/apache2/error.log')) {
-                return '/var/log/apache2/error.log';
-            }
-        }
-
-        // SSH / sistema
-        if (strpos($allText, 'sshd') !== false
-            || strpos($allText, 'invalid user') !== false
-            || strpos($allText, 'failed password') !== false
-        ) {
-            if (file_exists('/var/log/auth.log')) {
-                return '/var/log/auth.log';
-            }
-        }
-
-        // Fallback: primeiro log existente em ordem de relevância
-        $fallbacks = [
-            '/var/log/whmcs_auth.log',
-            '/var/log/apache2/error.log',
-            '/var/log/apache2/access.log',
-            '/var/log/auth.log',
-        ];
-        foreach ($fallbacks as $path) {
-            if (file_exists($path)) {
-                return $path;
-            }
-        }
-
-        return '/var/log/apache2/error.log';
+        return new AIAnalyzer(
+            $config['provider'],
+            $config['api_key'],
+            $config['model'],
+            $config['base_url']
+        );
     }
 
-    /** Salva as configurações da IA no banco. */
-    private function persistSettings(array $post): void
+    /**
+     * Lazy migration: migra chaves antigas (Anthropic-only) para o novo formato.
+     * Idempotente — só executa se as chaves antigas existirem e as novas não.
+     */
+    private function migrateOldKeys(): void
     {
-        // Chave API — só salva se foi preenchida
-        $newKey = trim($post['api_key'] ?? '');
-        if ($newKey !== '') {
-            Database::setConfig('ai_api_key', Helper::encryptApiKey($newKey));
+        // Migrar ai_api_key → ai_provider_anthropic_api_key
+        $oldKey = Database::getConfig('ai_api_key', '');
+        if ($oldKey !== '' && Database::getConfig('ai_provider_anthropic_api_key', '') === '') {
+            Database::setConfig('ai_provider_anthropic_api_key', $oldKey);
+            // Não apagar a chave antiga para não quebrar rollback
         }
 
-        // Modelo de IA
-        $validModels = ['claude-haiku-4-5-20251001', 'claude-sonnet-4-6', 'claude-opus-4-6'];
-        $aiModel = $post['ai_model'] ?? 'claude-haiku-4-5-20251001';
-        if (in_array($aiModel, $validModels, true)) {
-            Database::setConfig('ai_model', $aiModel);
+        // Migrar ai_model → ai_provider_anthropic_model
+        $oldModel = Database::getConfig('ai_model', '');
+        if ($oldModel !== '' && Database::getConfig('ai_provider_anthropic_model', '') === '') {
+            Database::setConfig('ai_provider_anthropic_model', $oldModel);
         }
+
+        // Garantir que ai_active_provider existe
+        if (Database::getConfig('ai_active_provider', '') === '') {
+            Database::setConfig('ai_active_provider', 'anthropic');
+        }
+    }
+
+    /** [SEC-17] Valida base URL: deve ser https:// e não apontar para IPs privados. */
+    private function validateBaseUrl(string $url): bool
+    {
+        if (!str_starts_with($url, 'https://')) {
+            return false;
+        }
+
+        $parsed = parse_url($url);
+        if (!$parsed || empty($parsed['host'])) {
+            return false;
+        }
+
+        $host = $parsed['host'];
+
+        // Bloquear localhost
+        if (in_array($host, ['localhost', '127.0.0.1', '::1', '0.0.0.0'], true)) {
+            return false;
+        }
+
+        // Bloquear IPs privados
+        $ip = filter_var($host, FILTER_VALIDATE_IP);
+        if ($ip !== false) {
+            if (filter_var($ip, FILTER_VALIDATE_IP, FILTER_FLAG_NO_PRIV_RANGE) === false) {
+                return false;
+            }
+        }
+
+        return true;
+    }
+
+    /** Salva as configurações da IA no banco (multi-provider). */
+    private function persistSettings(array $post): void
+    {
+        // ── Provedor ativo ──────────────────────────────────────────────
+        // [SEC-18] Validar contra registry
+        $activeProvider = $post['ai_active_provider'] ?? 'anthropic';
+        if (!in_array($activeProvider, AIAnalyzer::getValidProviders(), true)) {
+            $activeProvider = 'anthropic';
+        }
+        Database::setConfig('ai_active_provider', $activeProvider);
+
+        // ── Config por provedor ─────────────────────────────────────────
+        foreach (AIAnalyzer::getProviders() as $key => $def) {
+            // Chave API — só salva se foi preenchida
+            $newKey = trim($post["ai_provider_{$key}_api_key"] ?? '');
+            if ($newKey !== '') {
+                Database::setConfig("ai_provider_{$key}_api_key", Helper::encryptApiKey($newKey));
+            }
+
+            // Modelo — validar contra lista do provedor
+            $model = $post["ai_provider_{$key}_model"] ?? $def['default_model'];
+            if (isset($def['models'][$model])) {
+                Database::setConfig("ai_provider_{$key}_model", $model);
+            }
+
+            // Base URL — só para provedores que precisam
+            if ($def['needs_base_url']) {
+                $baseUrl = trim($post["ai_provider_{$key}_base_url"] ?? $def['default_base_url']);
+                // [SEC-17] Validar URL
+                if ($this->validateBaseUrl($baseUrl)) {
+                    Database::setConfig("ai_provider_{$key}_base_url", $baseUrl);
+                } elseif ($baseUrl === '') {
+                    // Vazio = usar default
+                    Database::setConfig("ai_provider_{$key}_base_url", $def['default_base_url']);
+                }
+            }
+        }
+
+        // ── Config compartilhada ────────────────────────────────────────
 
         // Linhas por análise
         $validLines = [200, 400, 600, 800, 1000];
@@ -595,9 +644,8 @@ class AIController
         $whitelist = substr(strip_tags($whitelist), 0, 5000);
         Database::setConfig('ai_whitelist_ips', $whitelist);
 
-        // Prompt customizável
-        // [SEC-11] Limitar a 8000 caracteres para evitar prompts gigantescos
-        // que esgotem créditos da API Anthropic a cada análise automática.
+        // Prompt customizável (compartilhado entre provedores)
+        // [SEC-11] Limitar a 8000 caracteres
         $prompt = substr(trim($post['ai_prompt'] ?? ''), 0, 8000);
         if ($prompt !== '') {
             Database::setConfig('ai_prompt', $prompt);
@@ -610,7 +658,7 @@ class AIController
             Database::setConfig('global_bantime', (string)$bt);
         }
 
-        // Thresholds por severidade (formato: "detections:minutes")
+        // Thresholds por severidade
         foreach (['critical', 'high', 'medium'] as $sev) {
             $det = (int)($post["threshold_{$sev}_detections"] ?? 0);
             $min = (int)($post["threshold_{$sev}_minutes"]    ?? 0);
@@ -619,23 +667,12 @@ class AIController
             }
         }
 
-        // Confirmação de modo automático (flag de segurança)
-        // [SEC-9] Sempre definir o valor (inclusive '0') para que o admin
-        // precise re-confirmar ao reativar o modo automático após desativá-lo.
+        // Confirmação de modo automático
+        // [SEC-9] Sempre definir o valor
         Database::setConfig('ai_confirmed_auto', !empty($post['confirm_auto']) ? '1' : '0');
 
         // Toggle análise automática via cron
         Database::setConfig('ai_auto_enabled', !empty($post['ai_auto_enabled']) ? '1' : '0');
-    }
-
-    /** Descriptografa a chave API armazenada. */
-    private function decryptApiKey(): string
-    {
-        $encrypted = Database::getConfig('ai_api_key', '');
-        if (empty($encrypted)) {
-            return '';
-        }
-        return Helper::decryptApiKey($encrypted);
     }
 
     /** Decodifica o campo evidence (JSON) de cada sugestão. */
@@ -654,11 +691,6 @@ class AIController
     // Helpers
     // -----------------------------------------------------------------------
 
-    /**
-     * Encontra o melhor filter disponível em filter.d/ para um jail pelo nome.
-     * Estratégia: maior sobreposição de tokens (separados por - ou _),
-     * fallback para apache-auth, fallback para primeiro alfabético.
-     */
     private function findBestFilter(string $jailName, string $filterDir = '/etc/fail2ban/filter.d/'): string
     {
         $available = [];
@@ -682,11 +714,53 @@ class AIController
             }
         }
 
-        // Sem sobreposição: preferir apache-auth (relevante para WHMCS) ou primeiro da lista
         if ($bestScore === 0) {
             $bestFilter = in_array('apache-auth', $available, true) ? 'apache-auth' : $available[0];
         }
 
         return $bestFilter;
+    }
+
+    private function detectLogPath(string $failregex, string $evidenceJson): string
+    {
+        $evidenceLines = [];
+        if (!empty($evidenceJson) && is_string($evidenceJson)) {
+            $decoded = json_decode($evidenceJson, true);
+            $evidenceLines = is_array($decoded) ? $decoded : [$evidenceJson];
+        }
+
+        $allText = strtolower($failregex . ' ' . implode(' ', $evidenceLines));
+
+        if (strpos($allText, 'whmcs') !== false || strpos($allText, 'login failed') !== false) {
+            if (file_exists('/var/log/whmcs_auth.log')) {
+                return '/var/log/whmcs_auth.log';
+            }
+        }
+
+        if (strpos($allText, 'ah0') !== false || strpos($allText, 'authz') !== false || strpos($allText, 'client denied') !== false) {
+            if (file_exists('/var/log/apache2/error.log')) {
+                return '/var/log/apache2/error.log';
+            }
+        }
+
+        if (strpos($allText, 'sshd') !== false || strpos($allText, 'invalid user') !== false || strpos($allText, 'failed password') !== false) {
+            if (file_exists('/var/log/auth.log')) {
+                return '/var/log/auth.log';
+            }
+        }
+
+        $fallbacks = [
+            '/var/log/whmcs_auth.log',
+            '/var/log/apache2/error.log',
+            '/var/log/apache2/access.log',
+            '/var/log/auth.log',
+        ];
+        foreach ($fallbacks as $path) {
+            if (file_exists($path)) {
+                return $path;
+            }
+        }
+
+        return '/var/log/apache2/error.log';
     }
 }

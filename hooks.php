@@ -47,12 +47,6 @@ add_hook('AfterCronJob', 1, function (): void {
         return; // Tabelas ainda não existem
     }
 
-    // Não executa se não há chave API configurada
-    $apiKeyEnc = \AMS\Fail2Ban\Database::getConfig('ai_api_key', '');
-    if (empty($apiKeyEnc)) {
-        return;
-    }
-
     // Não executa se modo automático estiver desativado
     if (\AMS\Fail2Ban\Database::getConfig('ai_auto_enabled', '1') !== '1') {
         return;
@@ -66,10 +60,18 @@ add_hook('AfterCronJob', 1, function (): void {
     }
 
     try {
-        $apiKey  = \AMS\Fail2Ban\Helper::decryptApiKey($apiKeyEnc);
-        if (empty($apiKey)) {
+        // Usar provedor ativo (multi-provider)
+        $config = \AMS\Fail2Ban\AIAnalyzer::getActiveConfig();
+        if (empty($config['api_key'])) {
             return;
         }
+
+        $analyzer = new \AMS\Fail2Ban\AIAnalyzer(
+            $config['provider'],
+            $config['api_key'],
+            $config['model'],
+            $config['base_url']
+        );
 
         $row = Capsule::table('tbladdonmodules')
             ->where('module', 'amssoft_fail2ban')
@@ -80,15 +82,13 @@ add_hook('AfterCronJob', 1, function (): void {
         $sudoPath  = $row->get('sudo_path')->value   ?? '/usr/bin/sudo';
         $clientBin = $row->get('fail2ban_client')->value ?? '/usr/bin/fail2ban-client';
 
-        $model    = \AMS\Fail2Ban\Database::getConfig('ai_model', 'claude-haiku-4-5-20251001');
-        $analyzer = new \AMS\Fail2Ban\AIAnalyzer($apiKey, $model);
-        $client   = new \AMS\Fail2Ban\Fail2BanClient($sudoPath, $clientBin);
-        $engine   = new \AMS\Fail2Ban\AutoBanEngine($analyzer, $client);
+        $client = new \AMS\Fail2Ban\Fail2BanClient($sudoPath, $clientBin);
+        $engine = new \AMS\Fail2Ban\AutoBanEngine($analyzer, $client);
 
         $engine->runAnalysis();
 
         \AMS\Fail2Ban\Database::setConfig('ai_last_run', (string)time());
-        \AMS\Fail2Ban\Database::setConfig('ai_last_ping_ok', '1');
+        \AMS\Fail2Ban\Database::setConfig("ai_provider_{$config['provider']}_last_ping", '1');
     } catch (\Throwable $e) {
         // Falha silenciosa — não interrompe o cron do WHMCS
     }
