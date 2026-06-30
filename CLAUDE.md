@@ -279,10 +279,24 @@ Todas as requisições AJAX são:
 ### IA (action=ai)
 - `do=approve` — aprova sugestão (bane IP via provedor ativo)
 - `do=reject` — rejeita sugestão
-- `do=run_now` — executa análise manual via provedor ativo (rate limit: 60s)
+- `do=run_now` — executa análise manual via provedor ativo (legado, usado em ai_settings)
+- `do=list_logs` — lista logs disponíveis para análise (rate limit: 60s, inicia sessão de análise)
+- `do=analyze_log` — analisa um único log (requer sessão ativa, usa watermark, retorna sugestões salvas)
 - `do=ping_api` — testa conexão com API (aceita `provider` e `protocol` no POST)
 - `do=save_settings` — salva configurações (multi-provider: provedor ativo, protocolo, chave, modelo)
 - `do=create_filter` — cria filtro fail2ban a partir de sugestão (usa provedor ativo)
+
+**Fluxo "Analisar agora" (sequencial com progresso):**
+1. JS chama `do=list_logs` → retorna todos os logs disponíveis (rate limit 60s, marca sessão)
+2. Para cada log: JS chama `do=analyze_log` com path → analisa, salva sugestões, retorna
+3. Linhas são adicionadas dinamicamente na tabela com 5 botões de ação
+4. Watermark (`ai_log_offset.{md5}`) pula logs sem conteúdo novo
+5. Sessão expira em 300s (previne chamada direta via script)
+
+**Rate limiting (SEC-10):**
+- `do=list_logs`: 60s entre sessões (protege contra abuso)
+- `do=analyze_log`: sem rate limit individual (progresso sequencial rápido), mas requer sessão ativa
+- `do=run_now`: 60s (legado, mantido para ai_settings)
 
 ### Log Viewer (action=logviewer)
 - `do=fetch_lines` — lê linhas do log
@@ -306,7 +320,7 @@ Procurar por `[SEC-N]` nos comentários para encontrar cada medida de segurança
 - **[SEC-7]** Rotação de CSRF token após cada uso
 - **[SEC-8]** Restrição de paths do LogViewer a `/var/log/`, `/var/www/html/`, `/tmp/`
 - **[SEC-9]** Flag de confirmação para modo automático da IA
-- **[SEC-10]** Rate limiting de análise manual (60s)
+- **[SEC-10]** Rate limiting: 60s em `list_logs` (início de sessão), sessão de análise expira em 300s, `analyze_log` requer sessão ativa
 - **[SEC-11]** Limite de 8000 chars no prompt customizado
 - **[SEC-12]** CSRF validado incondicionalmente em todas as requisições AJAX POST
 - **[SEC-14]** Evitar `Capsule::raw()` com variável interpolada
