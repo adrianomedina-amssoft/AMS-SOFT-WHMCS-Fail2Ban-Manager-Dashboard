@@ -165,7 +165,7 @@ class LogViewerController
             return json_encode(['success' => false, 'error' => 'Nenhuma linha encontrada no log.']);
         }
 
-        $analyzer    = new AIAnalyzer($aiConfig['provider'], $aiConfig['api_key'], $aiConfig['model'], $aiConfig['base_url']);
+        $analyzer    = new AIAnalyzer($aiConfig['provider'], $aiConfig['api_key'], $aiConfig['model'], $aiConfig['base_url'], $aiConfig['protocol'] ?? '');
         $client      = $this->router->makeClient();
         $engine      = new AutoBanEngine($analyzer, $client);
         $suggestions = $analyzer->analyze($rawLines);

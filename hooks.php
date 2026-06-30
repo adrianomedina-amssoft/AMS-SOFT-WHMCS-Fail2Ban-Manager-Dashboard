@@ -70,7 +70,8 @@ add_hook('AfterCronJob', 1, function (): void {
             $config['provider'],
             $config['api_key'],
             $config['model'],
-            $config['base_url']
+            $config['base_url'],
+            $config['protocol'] ?? ''
         );
 
         $row = Capsule::table('tbladdonmodules')
