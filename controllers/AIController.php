@@ -544,6 +544,17 @@ class AIController
         if (Database::getConfig('ai_active_provider', '') === '') {
             Database::setConfig('ai_active_provider', 'anthropic');
         }
+
+        // Limpar base URL salva para provedores que não precisam de URL editável
+        // (corrige URLs erradas salvas antes de needs_base_url=false)
+        foreach (AIAnalyzer::getProviders() as $key => $def) {
+            if (!$def['needs_base_url']) {
+                $saved = Database::getConfig("ai_provider_{$key}_base_url", '');
+                if ($saved !== '') {
+                    Database::setConfig("ai_provider_{$key}_base_url", '');
+                }
+            }
+        }
     }
 
     /** [SEC-17] Valida base URL: deve ser https:// e não apontar para IPs privados. */

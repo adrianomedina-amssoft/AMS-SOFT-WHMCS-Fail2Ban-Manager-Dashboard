@@ -55,7 +55,7 @@ class AIAnalyzer
                 'mimo-v2.5-pro' => 'MiMo v2.5 Pro',
                 'mimo-v2.5'     => 'MiMo v2.5',
             ],
-            'needs_base_url'   => true,
+            'needs_base_url'   => false, // fixo — só funciona com protocolo Anthropic
         ],
     ];
 
