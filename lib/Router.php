@@ -103,9 +103,16 @@ class Router
 
         // [SEC-7] Inject the (possibly rotated) CSRF token into every JSON response so
         // the JS helper (window.AMSFB.csrfToken) stays in sync after token rotation.
+        // Exception: fetch_lines is read-only and runs every 5s (auto-refresh).
+        // Skipping rotation for it avoids a race condition with concurrent AJAX calls
+        // (e.g. user clicking "Analyze" while a fetch_lines request is in-flight).
         $decoded = json_decode($result, true);
         if (is_array($decoded)) {
-            $decoded['csrf_token'] = Helper::csrfToken();
+            if ($do !== 'fetch_lines') {
+                $decoded['csrf_token'] = Helper::csrfToken();
+            } else {
+                $decoded['csrf_token'] = $_SESSION['amssoft_fail2ban_csrf'] ?? '';
+            }
             return json_encode($decoded);
         }
         return $result;

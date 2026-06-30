@@ -108,7 +108,7 @@ Key-value store genérico. Usado para:
 - Chave de criptografia (`_enc_key`)
 
 ### mod_amssoft_fail2ban_ai_suggestions
-Sugestões da IA com status (pending/approved/rejected/auto_executed). Inclui campos v3: `filter_name`, `failregex`, `filter_created_at`. **Agrupamento por país:** `getPendingGroupedByCountry()` faz JOIN com `geo_cache` para agrupar pendentes por `country_code`. `getPendingIdsByCountry($cc)` retorna IDs pendentes de um país específico (vazio = sem geo data). Usado para ações em massa (bulk approve/reject) na UI. **Seleção cross-page:** cards de país com botão "Selecionar" que busca todos os IDs via AJAX, armazena em sessionStorage, e permite ação em massa com checkboxes + barra fixa.
+Sugestões da IA com status (pending/approved/rejected/auto_executed). Inclui campos v3: `filter_name`, `failregex`, `filter_created_at`. **Agrupamento por país:** `getPendingGroupedByCountry()` faz JOIN com `geo_cache` para agrupar pendentes por `country_code`. `getPendingIdsByCountry($cc)` retorna IDs pendentes de um país específico (vazio = sem geo data). Usado para ações em massa (bulk approve/reject) na UI. **Seleção cross-page:** cards de país com botão "Selecionar" que busca todos os IDs via AJAX, armazena em sessionStorage, e permite ação em massa com checkboxes + barra fixa. **Comportamento de IPs rejeitados:** `rejected` é intencionalmente excluído da dedup (`getKnownIPs` e `saveSuggestion` verificam apenas `pending/approved/auto_executed`). Se o admin rejeitar um IP e ele continuar atacando, a IA pode detectá-lo novamente e criar nova sugestão. Decisão de design: rejeitar não é permanente — o IP pode voltar se houver nova evidência.
 
 ### mod_amssoft_fail2ban_geo_cache
 Cache de dados geográficos de IPs (via ip-api.com). PRIMARY KEY em `ip`, com `updated_at` para TTL (30 dias). Campos: `country` (nome por extenso), `country_code` (ISO 3166-1 alpha-2, ex: "BR"), `region`, `isp`, `asn` (apenas o número, ex: "AS28573" — extraído do campo `as` da API). Chaves na tabela config: `geoip_requests_this_minute`, `geoip_minute_window_start`, `geoip_cooldown_until` (rate limiting global).
@@ -239,7 +239,7 @@ O método `buildEndpointUrl()` monta a URL final a partir da base + path do prot
 - Modo de operação, intervalo, confiança mínima, whitelist, thresholds
 
 - Logs truncados em N linhas (configurável: 200/400/600/800/1000)
-- Prompt customizável pelo admin (max 8000 chars)
+- Prompt customizável pelo admin (max 8000 chars). **DEFAULT_PROMPT** (`AIAnalyzer::getDefaultPrompt()`) inclui contexto WHMCS: webhooks de pagamento (Mercado Pago), crawlers legítimos (facebookexternalhit, ChatGPT-User, LinkPreviewBot), comportamento normal de clientes. Se o admin nunca salvou prompt customizado, o default é usado.
 - **Mitigação de prompt injection:** instruções no system prompt, logs em `<log_data>` com aviso explícito
 
 ### AutoBanEngine — 3 modos
@@ -338,7 +338,7 @@ Lookup de dados geográficos de IPs via API pública ip-api.com. Sem chave, sem 
 
 Todas as requisições AJAX são:
 - Detectadas via `HTTP_X_REQUESTED_WITH: XMLHttpRequest`
-- Validadas com CSRF token (rotacionado após cada uso)
+- Validadas com CSRF token (rotacionado após cada uso, exceto `fetch_lines` — ver SEC-7)
 - Respondem com JSON
 
 ### Jails (action=jails)
@@ -382,7 +382,7 @@ Todas as requisições AJAX são:
 - Ao desmarcar checkbox individual, ID é removido do `selectionByCountry`
 - "Selecionar todos desta página" (`#amsfb-select-all`) marca/desmarca apenas visíveis; ao desmarcar, remove do `selectionByCountry` apenas IDs visíveis (preserva cross-page)
 - Barra de ação fixa (`position: fixed; bottom: 0`) mostra contagem total + breakdown visíveis/outras páginas
-- "Aprovar/Rejeitar Selecionados" envia `getSelectionIds()` (merge de cross-page + checkboxes visíveis)
+- "Banir/Rejeitar Selecionados" envia `getSelectionIds()` (merge de cross-page + checkboxes visíveis)
 - Após ação, IDs processados são removidos do `selectionByCountry` e do `sessionStorage`
 - Toggle: clicar "Selecionar" novamente desmarca todos os IPs daquele país
 
@@ -391,9 +391,9 @@ Todas as requisições AJAX são:
 - `do=clear_geoip_cache` — trunca tabela geo_cache
 
 ### Log Viewer (action=logviewer)
-- `do=fetch_lines` — lê linhas do log (retorna `geo_data` com lookup dos IPs mais frequentes, máx 20)
+- `do=fetch_lines` — lê linhas do log (retorna `geo_data` com lookup dos IPs mais frequentes, máx 20). **Não rotaciona CSRF token** (read-only, auto-refresh a cada 5s).
 - `do=ban_ip` — bane IP inline
-- `do=analyze` — analisa log com IA
+- `do=analyze` — analisa log com IA. **Retry automático** em falha CSRF (edge case: token rotacionado por outro AJAX concorrente).
 
 ### Log Paths (action=logpaths)
 - `do=validate` — valida path do log
@@ -409,7 +409,7 @@ Procurar por `[SEC-N]` nos comentários para encontrar cada medida de segurança
 - **[SEC-4]** Sanitização de jail e IP no Fail2BanClient
 - **[SEC-5]** Escape de SQL LIKE wildcards
 - **[SEC-6]** `JSON_HEX_TAG` em dados dentro de `<script>`
-- **[SEC-7]** Rotação de CSRF token após cada uso
+- **[SEC-7]** Rotação de CSRF token após cada uso (exceção: `fetch_lines` não rotaciona — read-only, auto-refresh a cada 5s, evita race condition com AJAX concorrentes)
 - **[SEC-8]** Restrição de paths do LogViewer a `/var/log/`, `/var/www/html/`, `/tmp/`
 - **[SEC-9]** Flag de confirmação para modo automático da IA
 - **[SEC-10]** Rate limiting: 60s em `list_logs` (início de sessão), sessão de análise expira em 300s, `analyze_log` requer sessão ativa

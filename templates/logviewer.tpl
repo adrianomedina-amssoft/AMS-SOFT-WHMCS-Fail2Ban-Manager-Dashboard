@@ -234,6 +234,23 @@
     // -------------------------------------------------------------------------
     // Analisar com IA
     // -------------------------------------------------------------------------
+    function handleAnalyzeResult(data) {
+        analyzeBtn.disabled = false;
+        analyzeBtn.innerHTML = '&#129302; Analisar com IA';
+
+        if (!RESULT) return;
+        RESULT.style.display = 'block';
+
+        if (data.success) {
+            RESULT.className = 'alert alert-success';
+            RESULT.innerHTML = '&#10003; ' + (data.message || 'Análise concluída.') +
+                ' <a href="<?= $e($modulelink . '&action=ai') ?>">Ver sugestões &rarr;</a>';
+        } else {
+            RESULT.className = 'alert alert-danger';
+            RESULT.innerHTML = '&#10007; ' + (data.error || 'Erro desconhecido.');
+        }
+    }
+
     var analyzeBtn = document.getElementById('amsfb-btn-analyze');
     if (analyzeBtn) {
         analyzeBtn.addEventListener('click', function () {
@@ -249,20 +266,15 @@
             }
 
             window.AMSFB.post('logviewer', 'analyze', { path: path, lines: lines }, function (data) {
-                analyzeBtn.disabled = false;
-                analyzeBtn.innerHTML = '&#129302; Analisar com IA';
-
-                if (!RESULT) return;
-                RESULT.style.display = 'block';
-
-                if (data.success) {
-                    RESULT.className = 'alert alert-success';
-                    RESULT.innerHTML = '&#10003; ' + (data.message || 'Análise concluída.') +
-                        ' <a href="<?= $e($modulelink . '&action=ai') ?>">Ver sugestões &rarr;</a>';
-                } else {
-                    RESULT.className = 'alert alert-danger';
-                    RESULT.innerHTML = '&#10007; ' + (data.error || 'Erro desconhecido.');
+                // Retry once on CSRF failure (token may have been rotated by concurrent fetch_lines)
+                if (!data.success && data.error && data.error.indexOf('CSRF') !== -1 && !data._retried) {
+                    data._retried = true;
+                    window.AMSFB.post('logviewer', 'analyze', { path: path, lines: lines }, function (data2) {
+                        handleAnalyzeResult(data2);
+                    });
+                    return;
                 }
+                handleAnalyzeResult(data);
             });
         });
     }
