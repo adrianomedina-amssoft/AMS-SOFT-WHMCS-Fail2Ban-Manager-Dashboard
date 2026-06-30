@@ -50,19 +50,11 @@ $statusLabels = [
                     <span class="amsfb-country-count"><?= (int)$cg['ip_count'] ?></span>
                 </div>
                 <div class="amsfb-country-actions">
-                    <button class="btn btn-xs btn-success amsfb-bulk-approve-country"
+                    <button class="btn btn-xs btn-default amsfb-select-country"
                             data-country-code="<?= $e($cc) ?>"
                             data-country-name="<?= $label ?>"
-                            data-count="<?= (int)$cg['ip_count'] ?>"
-                            title="Banir todos os IPs deste país">
-                        &#128683; Banir Todos
-                    </button>
-                    <button class="btn btn-xs btn-danger amsfb-bulk-reject-country"
-                            data-country-code="<?= $e($cc) ?>"
-                            data-country-name="<?= $label ?>"
-                            data-count="<?= (int)$cg['ip_count'] ?>"
-                            title="Rejeitar todas as sugestões deste país">
-                        &#10007; Rejeitar
+                            title="Selecionar todos os IPs deste país na tabela abaixo">
+                        &#9745; Selecionar
                     </button>
                 </div>
             </div>
@@ -75,7 +67,7 @@ $statusLabels = [
 <!-- =========================================================
      Seção 1: Fila Pendente
      ========================================================= -->
-<div class="panel panel-default">
+<div class="panel panel-default amsfb-pending-panel">
     <div class="panel-heading">
         <strong>&#9203; Aguardando Aprovação</strong>
         <?php if ($pending_total > 0): ?>
@@ -90,6 +82,7 @@ $statusLabels = [
         <table class="table table-striped table-hover amsfb-table amsfb-table-sm">
             <thead>
                 <tr>
+                    <th style="width:30px"><input type="checkbox" id="amsfb-select-all" title="Selecionar todos desta página"></th>
                     <th>IP</th>
                     <th>Ameaça</th>
                     <th>Severidade</th>
@@ -105,6 +98,7 @@ $statusLabels = [
             <?php foreach ($pending as $s): ?>
                 <tr id="amsfb-row-<?= (int)$s['id'] ?>"
                     data-country-code="<?= $e($geo_data[$s['ip']]['country_code'] ?? '') ?>">
+                    <td><input type="checkbox" class="amsfb-row-cb" data-id="<?= (int)$s['id'] ?>"></td>
                     <td>
                         <strong><?= $e($s['ip']) ?></strong>
                         <?php if (!empty($geo_data[$s['ip']])): ?>
@@ -178,6 +172,14 @@ $statusLabels = [
             <?php endforeach; ?>
             </tbody>
         </table>
+    </div>
+
+    <!-- Barra de ação em massa (aparece quando checkboxes são marcados) -->
+    <div id="amsfb-bulk-bar" class="amsfb-bulk-bar" style="display:none">
+        <span id="amsfb-bulk-count">0 selecionado(s)</span>
+        <button id="amsfb-bulk-approve-btn" class="btn btn-sm btn-success">&#128683; Banir Selecionados</button>
+        <button id="amsfb-bulk-reject-btn" class="btn btn-sm btn-danger">&#10007; Rejeitar Selecionados</button>
+        <button id="amsfb-bulk-clear-btn" class="btn btn-sm btn-default">Limpar</button>
     </div>
 
     <!-- Paginação da fila pendente -->
@@ -438,16 +440,6 @@ $statusLabels = [
                 break;
             }
         }
-    }
-
-    function getIPsByCountry(countryCode) {
-        var ips = [];
-        var rows = document.querySelectorAll('#amsfb-pending-tbody tr[data-country-code="' + countryCode + '"]');
-        rows.forEach(function (row) {
-            var ipCell = row.querySelector('td:first-child strong');
-            if (ipCell) ips.push(ipCell.textContent.trim());
-        });
-        return ips;
     }
 
     function escapeHtml(str) {
@@ -712,7 +704,8 @@ $statusLabels = [
                                 }
 
                                 tr.innerHTML =
-                                    '<td><strong>' + escapeHtml(s.ip || '') + '</strong></td>'
+                                    '<td><input type="checkbox" class="amsfb-row-cb" data-id="' + s.id + '"></td>'
+                                    + '<td><strong>' + escapeHtml(s.ip || '') + '</strong></td>'
                                     + '<td>' + escapeHtml(s.threat || '') + '</td>'
                                     + '<td><span class="amsfb-sev-' + escapeHtml(s.severity || 'medium') + '">'
                                     + escapeHtml(s.severity || 'medium') + '</span></td>'
@@ -874,130 +867,390 @@ $statusLabels = [
     }
 
     // -------------------------------------------------------------------------
-    // Bulk: Banir Todos por País
+    // Selection Manager: gerencia seleção cross-page por país
     // -------------------------------------------------------------------------
-    document.querySelectorAll('.amsfb-bulk-approve-country').forEach(function (btn) {
-        btn.addEventListener('click', function () {
-            var cc    = this.getAttribute('data-country-code');
-            var name  = this.getAttribute('data-country-name');
-            var count = parseInt(this.getAttribute('data-count'), 10) || 0;
-            var ips   = getIPsByCountry(cc);
+    // FONTE DE VERDADE: selectionByCountry (persistido em sessionStorage).
+    // Checkboxes visíveis na página são apenas um reflexo parcial desse estado.
+    // Quando o admin navega para outra página (reload), os checkboxes são
+    // perdidos, mas o sessionStorage preserva a seleção. Ao carregar a página,
+    // re-marcamos os checkboxes cujos IDs estão no sessionStorage.
+    //
+    // Estrutura: { 'CN': [1,2,3], '': [4,5], ... }
+    // Chave '' = grupo "Desconhecido" (sem country_code).
+    var STORAGE_KEY = 'amsfb_bulk_selection';
+    var selectAllCb = document.getElementById('amsfb-select-all');
 
-            var msg = 'Banir todos os ' + count + ' IP(s) de ' + name + '?\n\n';
+    function loadSelection() {
+        // Carregar seleção do sessionStorage (sobrevive reload da paginação)
+        try {
+            var raw = sessionStorage.getItem(STORAGE_KEY);
+            if (raw) {
+                var parsed = JSON.parse(raw);
+                // Converter arrays de volta para objetos com IDs como chaves
+                var result = {};
+                Object.keys(parsed).forEach(function (cc) {
+                    result[cc] = {};
+                    parsed[cc].forEach(function (id) { result[cc][id] = true; });
+                });
+                return result;
+            }
+        } catch (e) {}
+        return {};
+    }
+
+    function saveSelection() {
+        // Salvar seleção no sessionStorage
+        try {
+            var serializable = {};
+            Object.keys(selectionByCountry).forEach(function (cc) {
+                serializable[cc] = Object.keys(selectionByCountry[cc]).map(Number);
+            });
+            sessionStorage.setItem(STORAGE_KEY, JSON.stringify(serializable));
+        } catch (e) {}
+    }
+
+    // Inicializar: carregar seleção salva + marcar checkboxes visíveis
+    var selectionByCountry = loadSelection();
+
+    function syncCheckboxesFromSelection() {
+        // Marcar checkboxes visíveis cujos IDs estão no selectionByCountry
+        document.querySelectorAll('.amsfb-row-cb').forEach(function (cb) {
+            var id = parseInt(cb.getAttribute('data-id'), 10);
+            if (id > 0) {
+                var isSelected = Object.keys(selectionByCountry).some(function (cc) {
+                    return selectionByCountry[cc][id] === true;
+                });
+                if (isSelected) cb.checked = true;
+            }
+        });
+    }
+
+    // Sync na carga da página (após reload da paginação)
+    syncCheckboxesFromSelection();
+    updateBulkBar();
+
+    function getSelectionIds() {
+        // Retorna todos os IDs do selectionByCountry (fonte de verdade)
+        var ids = {};
+        Object.keys(selectionByCountry).forEach(function (cc) {
+            Object.keys(selectionByCountry[cc]).forEach(function (id) {
+                ids[id] = true;
+            });
+        });
+        return Object.keys(ids).map(Number);
+    }
+
+    function updateBulkBar() {
+        var ids = getSelectionIds();
+        var bar = document.getElementById('amsfb-bulk-bar');
+        var countEl = document.getElementById('amsfb-bulk-count');
+        var panel = document.querySelector('.amsfb-pending-panel');
+        if (!bar || !countEl) return;
+        if (ids.length > 0) {
+            // Contar quantos IDs estão em páginas não visíveis
+            var visibleIds = {};
+            document.querySelectorAll('.amsfb-row-cb').forEach(function (cb) {
+                visibleIds[parseInt(cb.getAttribute('data-id'), 10)] = true;
+            });
+            var visibleCount = ids.filter(function (id) { return visibleIds[id]; }).length;
+            var otherPages = ids.length - visibleCount;
+
+            countEl.textContent = ids.length + ' selecionado(s)';
+            if (otherPages > 0) {
+                countEl.textContent += ' (' + visibleCount + ' nesta página, ' + otherPages + ' em outras)';
+            }
+            bar.style.display = 'flex';
+            if (panel) panel.classList.add('has-bulk-bar');
+        } else {
+            bar.style.display = 'none';
+            if (panel) panel.classList.remove('has-bulk-bar');
+        }
+        // Atualizar estado do select-all (checked / indeterminate / unchecked)
+        if (selectAllCb) {
+            var allCbs = document.querySelectorAll('.amsfb-row-cb');
+            var checkedCbs = document.querySelectorAll('.amsfb-row-cb:checked');
+            if (allCbs.length === 0) {
+                selectAllCb.checked = false;
+                selectAllCb.indeterminate = false;
+            } else if (checkedCbs.length === 0) {
+                selectAllCb.checked = false;
+                selectAllCb.indeterminate = false;
+            } else if (checkedCbs.length === allCbs.length) {
+                selectAllCb.checked = true;
+                selectAllCb.indeterminate = false;
+            } else {
+                selectAllCb.checked = false;
+                selectAllCb.indeterminate = true;
+            }
+        }
+    }
+
+    function removeRowsByIds(ids) {
+        ids.forEach(function (id) {
+            var row = document.getElementById('amsfb-row-' + id);
+            if (row) row.remove();
+        });
+    }
+
+    function updateCountryCountFromTable() {
+        var cards = document.querySelectorAll('.amsfb-country-card');
+        cards.forEach(function (card) {
+            var cc = card.getAttribute('data-country-code');
+            var rows = document.querySelectorAll('#amsfb-pending-tbody tr[data-country-code="' + cc + '"]');
+            var countEl = card.querySelector('.amsfb-country-count');
+            if (countEl) countEl.textContent = rows.length;
+            if (rows.length === 0) card.remove();
+        });
+        var remaining = document.querySelectorAll('.amsfb-country-card');
+        if (remaining.length === 0) {
+            var panel = document.querySelector('.amsfb-country-panel');
+            if (panel) panel.style.display = 'none';
+        }
+    }
+
+    function updateGlobalBadge() {
+        var badge = document.querySelector('.amsfb-pending-panel .badge');
+        var pendingTbody = document.getElementById('amsfb-pending-tbody');
+        if (badge && pendingTbody) {
+            badge.textContent = pendingTbody.querySelectorAll('tr').length;
+        }
+    }
+
+    function clearAllSelection() {
+        selectionByCountry = {};
+        try { sessionStorage.removeItem(STORAGE_KEY); } catch (e) {}
+        document.querySelectorAll('.amsfb-row-cb').forEach(function (cb) {
+            cb.checked = false;
+        });
+        if (selectAllCb) {
+            selectAllCb.checked = false;
+            selectAllCb.indeterminate = false;
+        }
+        updateBulkBar();
+    }
+
+    function addIdToSelection(cc, id) {
+        if (!selectionByCountry[cc]) selectionByCountry[cc] = {};
+        selectionByCountry[cc][id] = true;
+        saveSelection();
+    }
+
+    function removeIdFromSelection(id) {
+        Object.keys(selectionByCountry).forEach(function (cc) {
+            delete selectionByCountry[cc][id];
+        });
+        saveSelection();
+    }
+
+    function removeIdsFromSelection(ids) {
+        ids.forEach(function (id) { removeIdFromSelection(id); });
+    }
+
+    // -------------------------------------------------------------------------
+    // Selecionar por País (cross-page via AJAX)
+    // -------------------------------------------------------------------------
+    document.querySelectorAll('.amsfb-select-country').forEach(function (btn) {
+        btn.addEventListener('click', function () {
+            var cc = this.getAttribute('data-country-code');
+            var name = this.getAttribute('data-country-name');
+
+            // Toggle: se este país já está selecionado, desmarcar
+            if (selectionByCountry[cc] && Object.keys(selectionByCountry[cc]).length > 0) {
+                // Desmarcar checkboxes visíveis deste país
+                var rows = document.querySelectorAll('#amsfb-pending-tbody tr[data-country-code="' + cc + '"]');
+                rows.forEach(function (row) {
+                    var cb = row.querySelector('.amsfb-row-cb');
+                    if (cb) cb.checked = false;
+                });
+                delete selectionByCountry[cc];
+                saveSelection();
+                updateBulkBar();
+                return;
+            }
+
+            // Buscar TODOS os IDs pendentes deste país via AJAX
+            btn.disabled = true;
+            btn.innerHTML = '&#8987; Buscando...';
+
+            window.AMSFB.post('ai', 'get_ids_by_country', { country_code: cc }, function (data) {
+                btn.disabled = false;
+                btn.innerHTML = '&#9745; Selecionar';
+
+                if (!data.success || !data.ids || data.ids.length === 0) {
+                    alert(data.error || 'Nenhuma sugestão pendente para ' + (name || 'este país') + '.');
+                    return;
+                }
+
+                // Armazenar IDs no selection manager
+                selectionByCountry[cc] = {};
+                data.ids.forEach(function (id) { selectionByCountry[cc][id] = true; });
+                saveSelection();
+
+                // Marcar checkboxes visíveis na página atual
+                var visRows = document.querySelectorAll('#amsfb-pending-tbody tr[data-country-code="' + cc + '"]');
+                visRows.forEach(function (row) {
+                    var cb = row.querySelector('.amsfb-row-cb');
+                    if (cb) cb.checked = true;
+                });
+
+                updateBulkBar();
+
+                // Scroll para a tabela
+                var table = document.querySelector('.amsfb-pending-panel .table-responsive');
+                if (table) table.scrollIntoView({ behavior: 'smooth', block: 'start' });
+            });
+        });
+    });
+
+    // -------------------------------------------------------------------------
+    // Checkbox: select-all header (página atual)
+    // -------------------------------------------------------------------------
+    if (selectAllCb) {
+        selectAllCb.addEventListener('change', function () {
+            var checked = this.checked;
+            document.querySelectorAll('.amsfb-row-cb').forEach(function (cb) {
+                var id = parseInt(cb.getAttribute('data-id'), 10);
+                cb.checked = checked;
+                // Ao desmarcar: remover apenas IDs VISÍVEIS do selection manager
+                // (não limpar IDs de outras páginas)
+                if (!checked && id > 0) {
+                    removeIdFromSelection(id);
+                }
+                // Ao marcar: adicionar IDs visíveis ao selection manager
+                if (checked && id > 0) {
+                    // Determinar country_code do checkbox
+                    var row = cb.closest('tr');
+                    var rowCc = row ? (row.getAttribute('data-country-code') || '') : '';
+                    addIdToSelection(rowCc, id);
+                }
+            });
+            updateBulkBar();
+        });
+    }
+
+    // -------------------------------------------------------------------------
+    // Checkbox: individual row change
+    // -------------------------------------------------------------------------
+    document.addEventListener('change', function (e) {
+        if (e.target && e.target.classList.contains('amsfb-row-cb')) {
+            var id = parseInt(e.target.getAttribute('data-id'), 10);
+            if (id > 0) {
+                if (e.target.checked) {
+                    // Marcar: adicionar ao selection manager
+                    var row = e.target.closest('tr');
+                    var cc = row ? (row.getAttribute('data-country-code') || '') : '';
+                    addIdToSelection(cc, id);
+                } else {
+                    // Desmarcar: remover do selection manager
+                    removeIdFromSelection(id);
+                }
+            }
+            updateBulkBar();
+        }
+    });
+
+    // -------------------------------------------------------------------------
+    // Bulk: Aprovar Selecionados
+    // -------------------------------------------------------------------------
+    var bulkApproveBtn = document.getElementById('amsfb-bulk-approve-btn');
+    if (bulkApproveBtn) {
+        bulkApproveBtn.addEventListener('click', function () {
+            var ids = getSelectionIds();
+            if (ids.length === 0) return;
+
+            // Coletar IPs visíveis para amostra
+            var ips = [];
+            document.querySelectorAll('.amsfb-row-cb:checked').forEach(function (cb) {
+                var row = cb.closest('tr');
+                if (row) {
+                    var ipEl = row.querySelector('td:nth-child(2) strong');
+                    if (ipEl) ips.push(ipEl.textContent.trim());
+                }
+            });
+            var msg = 'Banir ' + ids.length + ' IP(s) selecionado(s)? O fail2ban bloqueará o acesso imediatamente.\n\n';
             if (ips.length > 0) {
-                msg += 'IPs: ' + ips.slice(0, 5).join(', ');
+                msg += 'IPs visíveis: ' + ips.slice(0, 5).join(', ');
                 if (ips.length > 5) msg += '\n...e mais ' + (ips.length - 5);
                 msg += '\n';
             }
-            msg += '\nOs IPs serão banidos pelo fail2ban imediatamente.';
+            if (ids.length > ips.length) {
+                msg += '(+' + (ids.length - ips.length) + ' em outras páginas)\n';
+            }
             if (!confirm(msg)) return;
 
-            btn.disabled = true;
-            btn.innerHTML = '&#8987; Banindo...';
-            var card = btn.closest('.amsfb-country-card');
+            bulkApproveBtn.disabled = true;
+            bulkApproveBtn.innerHTML = '&#8987; Banindo...';
 
-            window.AMSFB.post('ai', 'bulk_approve_country', { country_code: cc }, function (data) {
+            window.AMSFB.post('ai', 'bulk_approve_ids', { ids: JSON.stringify(ids) }, function (data) {
                 if (data.success) {
-                    // Remover linhas da tabela (aprovadas + falhadas permanecem)
-                    if (Array.isArray(data.approved_ids)) {
-                        data.approved_ids.forEach(function (aid) {
-                            var row = document.getElementById('amsfb-row-' + aid);
-                            if (row) row.remove();
-                        });
-                    }
-                    // Remover duplicatas dispensadas
-                    if (Array.isArray(data.dismissed_ids)) {
-                        data.dismissed_ids.forEach(function (did) {
-                            var dup = document.getElementById('amsfb-row-' + did);
-                            if (dup) dup.remove();
-                        });
-                    }
-                    // Atualizar ou remover card
-                    if (card) {
-                        if (Array.isArray(data.failed_ids) && data.failed_ids.length > 0) {
-                            // Alguns falharam — atualizar contagem
-                            var countEl = card.querySelector('.amsfb-country-count');
-                            if (countEl) countEl.textContent = data.failed_ids.length;
-                            btn.disabled = false;
-                            btn.innerHTML = '&#128683; Banir Todos';
-                        } else {
-                            card.remove();
-                            // Esconder painel se não restam cards
-                            var remaining = document.querySelectorAll('.amsfb-country-card');
-                            if (remaining.length === 0) {
-                                var panel = document.querySelector('.amsfb-country-panel');
-                                if (panel) panel.style.display = 'none';
+                    removeRowsByIds(data.approved_ids || []);
+                    removeRowsByIds(data.dismissed_ids || []);
+                    // Desmarcar checkboxes de failed_ids (permanecem na tabela)
+                    if (Array.isArray(data.failed_ids)) {
+                        data.failed_ids.forEach(function (fid) {
+                            var row = document.getElementById('amsfb-row-' + fid);
+                            if (row) {
+                                var cb = row.querySelector('.amsfb-row-cb');
+                                if (cb) cb.checked = false;
                             }
-                        }
+                        });
                     }
-                    // Atualizar badge geral
-                    var badge = document.querySelector('.panel-heading .badge');
-                    var pendingTbody = document.getElementById('amsfb-pending-tbody');
-                    if (badge && pendingTbody) {
-                        badge.textContent = pendingTbody.querySelectorAll('tr').length;
-                    }
+                    // Remover IDs processados do selection manager
+                    removeIdsFromSelection(data.approved_ids || []);
+                    removeIdsFromSelection(data.dismissed_ids || []);
+                    removeIdsFromSelection(data.failed_ids || []);
+                    updateCountryCountFromTable();
+                    updateGlobalBadge();
+                    updateBulkBar();
                     alert('✓ ' + (data.message || 'Ação concluída.'));
                 } else {
-                    btn.disabled = false;
-                    btn.innerHTML = '&#128683; Banir Todos';
                     alert('✗ ' + (data.error || 'Erro ao banir IPs.'));
                 }
+                bulkApproveBtn.disabled = false;
+                bulkApproveBtn.innerHTML = '&#128683; Banir Selecionados';
             });
         });
-    });
+    }
 
     // -------------------------------------------------------------------------
-    // Bulk: Rejeitar Todos por País
+    // Bulk: Rejeitar Selecionados
     // -------------------------------------------------------------------------
-    document.querySelectorAll('.amsfb-bulk-reject-country').forEach(function (btn) {
-        btn.addEventListener('click', function () {
-            var cc    = this.getAttribute('data-country-code');
-            var name  = this.getAttribute('data-country-name');
-            var count = parseInt(this.getAttribute('data-count'), 10) || 0;
-            var ips   = getIPsByCountry(cc);
+    var bulkRejectBtn = document.getElementById('amsfb-bulk-reject-btn');
+    if (bulkRejectBtn) {
+        bulkRejectBtn.addEventListener('click', function () {
+            var ids = getSelectionIds();
+            if (ids.length === 0) return;
+            if (!confirm('Rejeitar ' + ids.length + ' sugestão(ões)?')) return;
 
-            var msg = 'Rejeitar todas as ' + count + ' sugestão(ões) de ' + name + '?\n\n';
-            if (ips.length > 0) {
-                msg += 'IPs: ' + ips.slice(0, 5).join(', ');
-                if (ips.length > 5) msg += '\n...e mais ' + (ips.length - 5);
-                msg += '\n';
-            }
-            if (!confirm(msg)) return;
+            bulkRejectBtn.disabled = true;
+            bulkRejectBtn.innerHTML = '&#8987; Rejeitando...';
 
-            btn.disabled = true;
-            btn.innerHTML = '&#8987; Rejeitando...';
-            var card = btn.closest('.amsfb-country-card');
-
-            window.AMSFB.post('ai', 'bulk_reject_country', { country_code: cc }, function (data) {
+            window.AMSFB.post('ai', 'bulk_reject_ids', { ids: JSON.stringify(ids) }, function (data) {
                 if (data.success) {
-                    // Remover todas as linhas do país
-                    var rows = document.querySelectorAll('#amsfb-pending-tbody tr[data-country-code="' + cc + '"]');
-                    rows.forEach(function (row) { row.remove(); });
-                    // Remover card
-                    if (card) {
-                        card.remove();
-                        // Esconder painel se não restam cards
-                        var remaining = document.querySelectorAll('.amsfb-country-card');
-                        if (remaining.length === 0) {
-                            var panel = document.querySelector('.amsfb-country-panel');
-                            if (panel) panel.style.display = 'none';
-                        }
-                    }
-                    // Atualizar badge geral
-                    var badge = document.querySelector('.panel-heading .badge');
-                    var pendingTbody = document.getElementById('amsfb-pending-tbody');
-                    if (badge && pendingTbody) {
-                        badge.textContent = pendingTbody.querySelectorAll('tr').length;
-                    }
+                    removeRowsByIds(data.rejected_ids || []);
+                    removeIdsFromSelection(data.rejected_ids || []);
+                    updateCountryCountFromTable();
+                    updateGlobalBadge();
+                    updateBulkBar();
                     alert('✓ ' + (data.message || 'Ação concluída.'));
                 } else {
-                    btn.disabled = false;
-                    btn.innerHTML = '&#10007; Rejeitar';
                     alert('✗ ' + (data.error || 'Erro ao rejeitar.'));
                 }
+                bulkRejectBtn.disabled = false;
+                bulkRejectBtn.innerHTML = '&#10007; Rejeitar Selecionados';
             });
         });
-    });
+    }
+
+    // -------------------------------------------------------------------------
+    // Bulk: Limpar seleção
+    // -------------------------------------------------------------------------
+    var bulkClearBtn = document.getElementById('amsfb-bulk-clear-btn');
+    if (bulkClearBtn) {
+        bulkClearBtn.addEventListener('click', function () {
+            clearAllSelection();
+        });
+    }
 
 })();
 </script>

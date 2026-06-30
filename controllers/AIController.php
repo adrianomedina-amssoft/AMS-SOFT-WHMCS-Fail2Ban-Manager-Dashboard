@@ -208,11 +208,14 @@ class AIController
             case 'clear_geoip_cache':
                 return $this->ajaxClearGeoipCache();
 
-            case 'bulk_approve_country':
-                return $this->ajaxBulkApproveCountry($post);
+            case 'bulk_approve_ids':
+                return $this->ajaxBulkApproveIds($post);
 
-            case 'bulk_reject_country':
-                return $this->ajaxBulkRejectCountry($post);
+            case 'bulk_reject_ids':
+                return $this->ajaxBulkRejectIds($post);
+
+            case 'get_ids_by_country':
+                return $this->ajaxGetIdsByCountry($post);
 
             default:
                 return json_encode(['success' => false, 'error' => 'Ação desconhecida.']);
@@ -933,20 +936,33 @@ class AIController
     }
 
     // -----------------------------------------------------------------------
-    // AJAX: aprovar todas as sugestões pendentes de um país (bulk)
+    // AJAX: aprovar sugestões por lista de IDs (bulk por seleção)
     // -----------------------------------------------------------------------
 
-    private function ajaxBulkApproveCountry(array $post): string
+    private function ajaxBulkApproveIds(array $post): string
     {
-        // [SEC-20] Validar country_code: 2 letras maiúsculas ou vazio (Desconhecido)
-        $countryCode = strtoupper(trim($post['country_code'] ?? ''));
-        if ($countryCode !== '' && !preg_match('/^[A-Z]{2}$/', $countryCode)) {
-            return json_encode(['success' => false, 'error' => 'Código de país inválido.']);
+        // Validar IDs: JSON array de ints positivos, max 200
+        $ids = json_decode($post['ids'] ?? '[]', true);
+        if (!is_array($ids) || count($ids) > 200) {
+            return json_encode(['success' => false, 'error' => 'Seleção limitada a 200 itens.']);
+        }
+        $ids = array_values(array_filter(array_map('intval', $ids), fn ($id) => $id > 0));
+        if (empty($ids)) {
+            return json_encode(['success' => false, 'error' => 'Nenhum ID válido informado.']);
         }
 
-        $ids = Database::getPendingIdsByCountry($countryCode);
-        if (empty($ids)) {
-            return json_encode(['success' => false, 'error' => 'Nenhuma sugestão pendente para este país.']);
+        // Buscar APENAS sugestões pending — IDs com status != pending são
+        // ignorados silenciosamente (não entram em approved_ids nem failed_ids)
+        $suggestions = \WHMCS\Database\Capsule::table('mod_amssoft_fail2ban_ai_suggestions')
+            ->whereIn('id', $ids)
+            ->where('status', 'pending')
+            ->get()
+            ->map(fn ($r) => (array)$r)
+            ->keyBy('id')
+            ->all();
+
+        if (empty($suggestions)) {
+            return json_encode(['success' => false, 'error' => 'Nenhuma sugestão pendente para estes IDs.']);
         }
 
         $client   = $this->router->makeClient();
@@ -991,14 +1007,8 @@ class AIController
         $failedIds    = [];
         $dismissedAll = [];
 
-        foreach ($ids as $id) {
-            // Buscar IP antes de aprovar (precisamos para autoDismissDuplicates)
-            $suggestion = Database::getSuggestion($id);
-            if (!$suggestion || $suggestion['status'] !== 'pending') {
-                $failedIds[] = $id;
-                continue;
-            }
-
+        foreach ($suggestions as $suggestion) {
+            $id = (int) $suggestion['id'];
             $ok = $engine->approveSuggestion($id, $adminId);
             if ($ok) {
                 $approvedIds[] = $id;
@@ -1009,8 +1019,7 @@ class AIController
             }
         }
 
-        $countryLabel = $countryCode !== '' ? $countryCode : 'Desconhecido';
-        $msg = count($approvedIds) . ' IP(s) do país ' . $countryLabel . ' banido(s).';
+        $msg = count($approvedIds) . ' IP(s) banido(s).';
         if (count($failedIds) > 0) {
             $msg .= ' ' . count($failedIds) . ' falhou.';
         }
@@ -1027,10 +1036,57 @@ class AIController
     }
 
     // -----------------------------------------------------------------------
-    // AJAX: rejeitar todas as sugestões pendentes de um país (bulk)
+    // AJAX: rejeitar sugestões por lista de IDs (bulk por seleção)
     // -----------------------------------------------------------------------
 
-    private function ajaxBulkRejectCountry(array $post): string
+    private function ajaxBulkRejectIds(array $post): string
+    {
+        // Validar IDs: JSON array de ints positivos, max 200
+        $ids = json_decode($post['ids'] ?? '[]', true);
+        if (!is_array($ids) || count($ids) > 200) {
+            return json_encode(['success' => false, 'error' => 'Seleção limitada a 200 itens.']);
+        }
+        $ids = array_values(array_filter(array_map('intval', $ids), fn ($id) => $id > 0));
+        if (empty($ids)) {
+            return json_encode(['success' => false, 'error' => 'Nenhum ID válido informado.']);
+        }
+
+        $adminId = Helper::adminId();
+
+        // Buscar IDs que realmente estão pending (para retornar ao frontend)
+        $pendingIds = \WHMCS\Database\Capsule::table('mod_amssoft_fail2ban_ai_suggestions')
+            ->whereIn('id', $ids)
+            ->where('status', 'pending')
+            ->pluck('id')
+            ->map(fn ($id) => (int) $id)
+            ->toArray();
+
+        if (empty($pendingIds)) {
+            return json_encode(['success' => false, 'error' => 'Nenhuma sugestão pendente para estes IDs.']);
+        }
+
+        // UPDATE batch — [SEC-15] status validado contra ENUM
+        $affected = \WHMCS\Database\Capsule::table('mod_amssoft_fail2ban_ai_suggestions')
+            ->whereIn('id', $pendingIds)
+            ->update([
+                'status'      => 'rejected',
+                'resolved_at' => \WHMCS\Database\Capsule::raw('NOW()'),
+                'resolved_by' => $adminId,
+            ]);
+
+        return json_encode([
+            'success'      => true,
+            'rejected'     => (int) $affected,
+            'rejected_ids' => $pendingIds,
+            'message'      => $affected . ' sugestão(ões) rejeitada(s).',
+        ]);
+    }
+
+    // -----------------------------------------------------------------------
+    // AJAX: buscar IDs pendentes de um país (para seleção cross-page)
+    // -----------------------------------------------------------------------
+
+    private function ajaxGetIdsByCountry(array $post): string
     {
         // [SEC-20] Validar country_code
         $countryCode = strtoupper(trim($post['country_code'] ?? ''));
@@ -1039,27 +1095,10 @@ class AIController
         }
 
         $ids = Database::getPendingIdsByCountry($countryCode);
-        if (empty($ids)) {
-            return json_encode(['success' => false, 'error' => 'Nenhuma sugestão pendente para este país.']);
-        }
-
-        $adminId = Helper::adminId();
-
-        // UPDATE batch — [SEC-15] status validado contra ENUM
-        $affected = \WHMCS\Database\Capsule::table('mod_amssoft_fail2ban_ai_suggestions')
-            ->whereIn('id', $ids)
-            ->where('status', 'pending')
-            ->update([
-                'status'      => 'rejected',
-                'resolved_at' => \WHMCS\Database\Capsule::raw('NOW()'),
-                'resolved_by' => $adminId,
-            ]);
-
-        $countryLabel = $countryCode !== '' ? $countryCode : 'Desconhecido';
         return json_encode([
-            'success'  => true,
-            'rejected' => (int) $affected,
-            'message'  => $affected . ' sugestão(ões) do país ' . $countryLabel . ' rejeitada(s).',
+            'success' => true,
+            'ids'     => $ids,
+            'count'   => count($ids),
         ]);
     }
 

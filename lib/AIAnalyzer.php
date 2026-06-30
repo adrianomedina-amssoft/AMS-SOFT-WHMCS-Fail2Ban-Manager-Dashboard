@@ -90,6 +90,29 @@ Regras para filter_name e failregex:
 - O regex deve capturar o PADRAO do ataque, nao apenas o IP especifico
 - Evite .* excessivo para minimizar falsos positivos
 
+CONTEXTO DO SERVIDOR — WHMCS (sistema de hospedagem/faturamento):
+- Clientes acessam faturas, pagam via Mercado Pago/Pix, resetam senha — isso é NORMAL
+- O Mercado Pago envia webhooks (POST para /callback/mercadopagopix.php com topic=payment)
+  de IPs do Google Cloud (35.x.x.x) — NÃO é ataque, é notificação de pagamento
+- Bots de redes sociais (facebookexternalhit, Facebot, Twitterbot, LinkPreviewBot)
+  acessam páginas para gerar previews — NÃO é ataque
+- O ChatGPT-User é um crawler legítimo da OpenAI — NÃO é ataque
+- Acesso repetido a /viewemail.php, /clientarea.php com session autenticada
+  por IP brasileiro provavelmente é cliente navegando — NÃO é ataque
+
+NÃO classifique como ameaça:
+- Webhooks de pagamento (POST para callback/* com topic=payment)
+- Crawlers de redes sociais (facebookexternalhit, Twitterbot, LinkPreviewBot)
+- Clientes acessando próprias faturas ou resetando senha
+- Bots legítimos (Googlebot, ChatGPT-User, Bingbot)
+
+CLASSIFIQUE como ameaça APENAS quando houver evidência clara de:
+- Brute force de login (múltiplas tentativas de senha)
+- Enumeração de IDs/email em massa (dezenas de requests sequenciais)
+- User-agent de ferramenta de ataque (sqlmap, nikto, nmap, etc.)
+- Acesso a paths de exploração conhecidos (/wp-admin, /phpmyadmin, /etc/passwd)
+- Scraping agressivo (100+ requests em poucos minutos com padrão de enumeração)
+
 Não inclua texto fora do JSON.
 
 LOGS:

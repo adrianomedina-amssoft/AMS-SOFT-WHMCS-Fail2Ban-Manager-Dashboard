@@ -51,7 +51,7 @@ amssoft_fail2ban/
 │   ├── logpaths.tpl            # Gerenciamento de log paths
 │   ├── logviewer.tpl           # Visualizador de logs com highlight
 │   ├── reports.tpl             # Relatórios com filtros
-│   ├── ai_suggestions.tpl      # Fila de sugestões + histórico da IA
+│   ├── ai_suggestions.tpl      # Fila de sugestões + histórico + seleção cross-page por país
 │   └── ai_settings.tpl         # Configurações da IA
 ├── assets/
 │   ├── css/amssoft_fail2ban.css
@@ -108,7 +108,7 @@ Key-value store genérico. Usado para:
 - Chave de criptografia (`_enc_key`)
 
 ### mod_amssoft_fail2ban_ai_suggestions
-Sugestões da IA com status (pending/approved/rejected/auto_executed). Inclui campos v3: `filter_name`, `failregex`, `filter_created_at`. **Agrupamento por país:** `getPendingGroupedByCountry()` faz JOIN com `geo_cache` para agrupar pendentes por `country_code`. `getPendingIdsByCountry($cc)` retorna IDs pendentes de um país específico (vazio = sem geo data). Usado para ações em massa (bulk approve/reject) na UI.
+Sugestões da IA com status (pending/approved/rejected/auto_executed). Inclui campos v3: `filter_name`, `failregex`, `filter_created_at`. **Agrupamento por país:** `getPendingGroupedByCountry()` faz JOIN com `geo_cache` para agrupar pendentes por `country_code`. `getPendingIdsByCountry($cc)` retorna IDs pendentes de um país específico (vazio = sem geo data). Usado para ações em massa (bulk approve/reject) na UI. **Seleção cross-page:** cards de país com botão "Selecionar" que busca todos os IDs via AJAX, armazena em sessionStorage, e permite ação em massa com checkboxes + barra fixa.
 
 ### mod_amssoft_fail2ban_geo_cache
 Cache de dados geográficos de IPs (via ip-api.com). PRIMARY KEY em `ip`, com `updated_at` para TTL (30 dias). Campos: `country` (nome por extenso), `country_code` (ISO 3166-1 alpha-2, ex: "BR"), `region`, `isp`, `asn` (apenas o número, ex: "AS28573" — extraído do campo `as` da API). Chaves na tabela config: `geoip_requests_this_minute`, `geoip_minute_window_start`, `geoip_cooldown_until` (rate limiting global).
@@ -356,8 +356,9 @@ Todas as requisições AJAX são:
 - `do=ping_api` — testa conexão com API (aceita `provider` e `protocol` no POST)
 - `do=save_settings` — salva configurações (multi-provider: provedor ativo, protocolo, chave, modelo)
 - `do=create_filter` — cria filtro fail2ban a partir de sugestão (usa provedor ativo)
-- `do=bulk_approve_country` — aprova todas as sugestões pendentes de um país (best-effort, retorna `approved_ids`, `failed_ids`, `dismissed_ids`)
-- `do=bulk_reject_country` — rejeita todas as sugestões pendentes de um país (batch UPDATE)
+- `do=bulk_approve_ids` — aprova sugestões por lista de IDs. POST: `ids` (JSON array de ints positivos, max 200). Best-effort: IDs com `status != 'pending'` são ignorados silenciosamente. Retorna `approved_ids`, `failed_ids`, `dismissed_ids`.
+- `do=bulk_reject_ids` — rejeita sugestões por lista de IDs. POST: `ids` (JSON array de ints positivos, max 200). Batch UPDATE com `WHERE status = 'pending'`. Retorna `rejected` (count), `rejected_ids` (array).
+- `do=get_ids_by_country` — retorna todos os IDs pendentes de um país. POST: `country_code` (ISO 3166-1 alpha-2 ou vazio para "Desconhecido"). Usado pela seleção cross-page (ver seção "Seleção cross-page" abaixo).
 
 **Fluxo "Analisar agora" (sequencial com progresso):**
 1. JS chama `do=list_logs` → retorna todos os logs disponíveis (rate limit 60s, marca sessão)
@@ -371,6 +372,19 @@ Todas as requisições AJAX são:
 - `do=list_logs`: 60s entre sessões (protege contra abuso)
 - `do=analyze_log`: sem rate limit individual (progresso sequencial rápido), mas requer sessão ativa
 - `do=run_now`: 60s (legado, mantido para ai_settings)
+
+**Seleção cross-page ("Ações por País"):**
+- Cards de país acima da tabela pendente mostram bandeira, nome e contagem de IPs
+- Botão "Selecionar" busca TODOS os IDs pendentes do país via `do=get_ids_by_country` (AJAX)
+- IDs armazenados em objeto `selectionByCountry` no JS (persistido em `sessionStorage`)
+- Checkboxes visíveis na página são marcados como reflexo parcial do estado real
+- IDs de outras páginas ficam "virtualmente" selecionados (sobrevivem reload da paginação)
+- Ao desmarcar checkbox individual, ID é removido do `selectionByCountry`
+- "Selecionar todos desta página" (`#amsfb-select-all`) marca/desmarca apenas visíveis; ao desmarcar, remove do `selectionByCountry` apenas IDs visíveis (preserva cross-page)
+- Barra de ação fixa (`position: fixed; bottom: 0`) mostra contagem total + breakdown visíveis/outras páginas
+- "Aprovar/Rejeitar Selecionados" envia `getSelectionIds()` (merge de cross-page + checkboxes visíveis)
+- Após ação, IDs processados são removidos do `selectionByCountry` e do `sessionStorage`
+- Toggle: clicar "Selecionar" novamente desmarca todos os IPs daquele país
 
 ### GeoIP (action=ai)
 - `do=ping_geoip` — testa conectividade com ip-api.com (usa IP fixo 8.8.8.8)
@@ -407,7 +421,7 @@ Procurar por `[SEC-N]` nos comentários para encontrar cada medida de segurança
 - **[SEC-17]** Base URL editável: validação https:// + bloqueio de IPs privados/localhost/link-local 169.254.x.x (SSRF defense)
 - **[SEC-18]** `ai_active_provider` validado contra registry antes de persistir
 - **[SEC-19]** Erros de API: mensagem genérica no frontend, detalhes nunca expostos
-- **[SEC-20]** Validação de `country_code` em bulk actions: regex `/^[A-Z]{0,2}$/` (2 letras maiúsculas ou vazio)
+- **[SEC-20]** Validação de IDs em bulk actions: JSON array de ints positivos, max 200, verificação de `status = 'pending'` antes de processar. Validação de `country_code` em `get_ids_by_country`: regex `/^[A-Z]{2}$/` ou vazio.
 
 ## Problemas Conhecidos
 

@@ -507,3 +507,33 @@
 }
 .amsfb-country-actions { margin-top: 8px; }
 .amsfb-country-actions .btn { margin-right: 4px; }
+
+/* ── Bulk action bar (fixed) ──────────────────────────────────────────────── */
+.amsfb-bulk-bar {
+    position: fixed;
+    bottom: 0;
+    left: 0;
+    right: 0;
+    background: #2c3e50;
+    color: #fff;
+    padding: 10px 16px;
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    z-index: 1050; /* acima dos modais Bootstrap (1040) */
+    box-shadow: 0 -2px 8px rgba(0,0,0,.15);
+}
+.amsfb-bulk-bar .btn { margin: 0; }
+.amsfb-bulk-count { font-weight: 600; margin-right: auto; }
+
+/* Padding-bottom na tabela quando a barra está visível — evita que a barra
+   fixed sobreponha as últimas linhas sem o admin perceber */
+.amsfb-pending-panel.has-bulk-bar .table-responsive {
+    padding-bottom: 52px;
+}
+
+/* Checkbox centralizado na coluna */
+.amsfb-pending-panel .amsfb-row-cb {
+    display: block;
+    margin: 0 auto;
+}
