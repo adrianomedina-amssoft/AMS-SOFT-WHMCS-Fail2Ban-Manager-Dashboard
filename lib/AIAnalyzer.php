@@ -49,7 +49,7 @@ class AIAnalyzer
         'mimo' => [
             'label'            => 'MiMo (Xiaomi)',
             'protocol'         => 'anthropic',
-            'default_base_url' => 'https://token-plan-sgp.xiaomimimo.com/anthropic/v1/messages',
+            'default_base_url' => 'https://token-plan-sgp.xiaomimimo.com/anthropic',
             'default_model'    => 'mimo-v2.5-pro',
             'models'           => [
                 'mimo-v2.5-pro' => 'MiMo v2.5 Pro',
@@ -341,8 +341,34 @@ LOGS:
     }
 
     /**
+     * Monta a URL final do endpoint a partir da base URL e o protocolo.
+     * O usuário pode entrar apenas a base (ex: https://api.mimo.com/anthropic)
+     * e o código completa o path correto (ex: /v1/messages).
+     */
+    private function buildEndpointUrl(string $protocol): string
+    {
+        $base = rtrim($this->baseUrl, '/');
+
+        if ($protocol === 'anthropic') {
+            // Se já termina com /v1/messages, usar direto
+            if (str_ends_with($base, '/v1/messages')) {
+                return $base;
+            }
+            // Se termina com /anthropic ou outra base, adicionar /v1/messages
+            return $base . '/v1/messages';
+        }
+
+        // openai-compatible
+        if (str_ends_with($base, '/chat/completions')) {
+            return $base;
+        }
+        return $base . '/chat/completions';
+    }
+
+    /**
      * Executa o POST HTTP usando cURL.
      * Headers variam conforme protocolo.
+     * Monta a URL final a partir da base URL + path do protocolo.
      */
     private function httpPost(string $body, string $protocol): string|false
     {
@@ -350,7 +376,9 @@ LOGS:
             return false;
         }
 
-        $ch = curl_init($this->baseUrl);
+        $url = $this->buildEndpointUrl($protocol);
+
+        $ch = curl_init($url);
         curl_setopt_array($ch, [
             CURLOPT_RETURNTRANSFER => true,
             CURLOPT_POST           => true,
