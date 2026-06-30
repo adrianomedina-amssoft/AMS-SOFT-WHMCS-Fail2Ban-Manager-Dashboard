@@ -143,6 +143,50 @@ class LogViewer
     }
 
     /**
+     * Lê linhas novas de um arquivo a partir de um offset em bytes.
+     * Usado pelo watermark para não reenviar logs já analisados.
+     *
+     * Seguro contra log rotation: se o arquivo foi truncado/rotacionado
+     * (tamanho < offset), o caller deve resetar offset para 0 antes de chamar.
+     *
+     * @param string $path     Path do arquivo (validado internamente)
+     * @param int    $offset   Byte offset para iniciar a leitura
+     * @param int    $maxLines Máximo de linhas a retornar
+     * @return array           Linhas lidas (sem newline)
+     */
+    public function readFromOffset(string $path, int $offset, int $maxLines = 200): array
+    {
+        if (!$this->isValidPath($path) || !is_readable($path)) {
+            return [];
+        }
+
+        $maxLines = max(10, min(500, $maxLines));
+
+        $fp = @fopen($path, 'r');
+        if (!$fp) {
+            return [];
+        }
+
+        if ($offset > 0) {
+            fseek($fp, $offset);
+        }
+
+        $content = stream_get_contents($fp);
+        fclose($fp);
+
+        if ($content === false || trim($content) === '') {
+            return [];
+        }
+
+        $lines = array_values(array_filter(
+            array_map('rtrim', explode("\n", $content)),
+            fn ($l) => $l !== ''
+        ));
+
+        return array_slice($lines, -$maxLines);
+    }
+
+    /**
      * Extrai IPs (IPv4 e IPv6) de um array de linhas de log.
      * Retorna array associativo: ['ip' => 'linha_index', ...]
      * Na prática: [['ip' => '1.2.3.4', 'line_index' => 0], ...]

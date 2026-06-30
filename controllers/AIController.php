@@ -515,9 +515,32 @@ class AIController
             return json_encode(['success' => false, 'error' => 'Chave API não configurada para o provedor ativo.']);
         }
 
-        // Ler últimas N linhas
+        // Watermark: só analisar conteúdo novo
         $logLineLimit = (int) Database::getConfig('ai_log_lines', 200);
-        $lines = $viewer->readLines($path, $logLineLimit);
+        $offsetKey    = 'ai_log_offset.' . md5($path);
+        $storedOffset = (int) Database::getConfig($offsetKey, 0);
+        $currentSize  = @filesize($path) ?: 0;
+
+        if ($currentSize === $storedOffset) {
+            return json_encode([
+                'success'    => true,
+                'log'        => $path,
+                'suggestions'=> [],
+                'saved'      => 0,
+                'skipped'    => 0,
+                'message'    => 'Sem conteúdo novo.',
+            ]);
+        }
+
+        if ($currentSize < $storedOffset) {
+            // Arquivo rotacionado/truncado — ler do início
+            $storedOffset = 0;
+        }
+
+        $lines = $viewer->readFromOffset($path, $storedOffset, $logLineLimit);
+
+        // Atualizar watermark
+        Database::setConfig($offsetKey, (string) $currentSize);
 
         if (empty($lines)) {
             return json_encode([
@@ -531,7 +554,7 @@ class AIController
         }
 
         // Chamar IA
-        $suggestions = $analyzer->analyze($lines);
+        $rawSuggestions = $analyzer->analyze($lines);
 
         // Dedup: IPs já banidos ou com sugestão pendente
         $skipIPs = [];
@@ -549,43 +572,12 @@ class AIController
         $pendingIPs = Database::getPendingIPs();
         $skipIPs = array_unique(array_merge($skipIPs, $pendingIPs));
 
-        // Whitelist
-        $whitelistRaw = Database::getConfig('ai_whitelist_ips', '');
-        $whitelist = [];
-        if (!empty($whitelistRaw)) {
-            foreach (preg_split('/[\r\n,]+/', $whitelistRaw) as $line) {
-                $ip = trim($line);
-                if (filter_var($ip, FILTER_VALIDATE_IP)) {
-                    $whitelist[] = $ip;
-                }
-            }
-        }
-
-        $minConf   = (int) Database::getConfig('ai_min_confidence', 75);
-        $saved     = 0;
-        $skipped   = 0;
+        // Filtrar sugestões (método compartilhado)
+        $filtered  = \AMS\Fail2Ban\AutoBanEngine::filterSuggestions($rawSuggestions, $skipIPs);
         $savedList = [];
 
-        foreach ($suggestions as $suggestion) {
-            $ip = $suggestion['ip'] ?? '';
-
-            if (in_array($ip, $whitelist, true)) {
-                continue;
-            }
-            if (in_array($ip, $skipIPs, true)) {
-                $skipped++;
-                continue;
-            }
-            if ($suggestion['confidence'] < $minConf) {
-                continue;
-            }
-            if (($suggestion['action'] ?? 'ban') !== 'ban') {
-                continue;
-            }
-
+        foreach ($filtered['valid'] as $suggestion) {
             $id = Database::saveSuggestion($suggestion);
-            $skipIPs[] = $ip;
-            $saved++;
             $suggestion['id'] = $id;
             $savedList[] = $suggestion;
         }
@@ -594,8 +586,8 @@ class AIController
             'success'     => true,
             'log'         => $path,
             'suggestions' => $savedList,
-            'saved'       => $saved,
-            'skipped'     => $skipped,
+            'saved'       => count($savedList),
+            'skipped'     => $filtered['skipped'],
         ]);
     }
 

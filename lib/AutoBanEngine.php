@@ -35,10 +35,8 @@ class AutoBanEngine
      */
     public function runAnalysis(bool $forceReread = false): array
     {
-        $mode          = Database::getConfig('ai_mode', 'suggestion');
-        $minConfidence = (int)Database::getConfig('ai_min_confidence', 75);
-        $whitelist     = $this->getWhitelist();
-        $logLineLimit  = (int)Database::getConfig('ai_log_lines', 200);
+        $mode         = Database::getConfig('ai_mode', 'suggestion');
+        $logLineLimit = (int)Database::getConfig('ai_log_lines', 200);
 
         // Modo automático exige confirmação explícita do admin (segurança dupla)
         if (in_array($mode, ['auto', 'threshold'], true)) {
@@ -144,36 +142,14 @@ class AutoBanEngine
             }
 
             // ── Chamada à IA ─────────────────────────────────────────────────
-            $suggestions = $this->analyzer->analyze($lines);
+            $rawSuggestions = $this->analyzer->analyze($lines);
 
-            foreach ($suggestions as $suggestion) {
+            // ── Filtros pré-salvamento (método compartilhado) ───────────────
+            $filtered = self::filterSuggestions($rawSuggestions, $skipIPs);
+            $skipIPs  = array_merge($skipIPs, array_column($filtered['valid'], 'ip'));
+
+            foreach ($filtered['valid'] as $suggestion) {
                 $ip = $suggestion['ip'] ?? '';
-
-                // ── Filtros pré-salvamento ────────────────────────────────────
-
-                // 1. Whitelist (filtrado ANTES da API — zero tokens gastos)
-                if (in_array($ip, $whitelist, true)) {
-                    continue;
-                }
-
-                // 2. IP atualmente banido no fail2ban ou com sugestão pendente
-                if (in_array($ip, $skipIPs, true)) {
-                    continue;
-                }
-
-                // 3. Confiança mínima
-                if ($suggestion['confidence'] < $minConfidence) {
-                    continue;
-                }
-
-                // 4. Apenas sugestões de ban
-                if (($suggestion['action'] ?? 'ban') !== 'ban') {
-                    continue;
-                }
-
-                // Dedup em memória: evita processar o mesmo IP duas vezes
-                // no mesmo ciclo (múltiplos logs com o mesmo IP)
-                $skipIPs[] = $ip;
 
                 switch ($mode) {
                     case 'auto':
@@ -346,6 +322,80 @@ class AutoBanEngine
 
     /** Retorna a whitelist de IPs como array. */
     private function getWhitelist(): array
+    {
+        $raw = Database::getConfig('ai_whitelist_ips', '');
+        if (empty($raw)) {
+            return [];
+        }
+        $lines = preg_split('/[\r\n,]+/', $raw);
+        $valid = [];
+        foreach ($lines as $line) {
+            $ip = trim($line);
+            if (filter_var($ip, FILTER_VALIDATE_IP)) {
+                $valid[] = $ip;
+            }
+        }
+        return $valid;
+    }
+
+    /**
+     * Filtra sugestões cruas da IA aplicando dedup e validação.
+     * Método estático compartilhado entre runAnalysis() e ajaxAnalyzeLog().
+     *
+     * Filtros aplicados:
+     * 1. Whitelist de IPs
+     * 2. IPs já banidos no fail2ban ou com sugestão pendente
+     * 3. Confiança mínima
+     * 4. Apenas ações de 'ban'
+     * 5. Dedup em memória (mesmo IP no mesmo batch)
+     *
+     * @param array $rawSuggestions  Sugestões cruas da IA
+     * @param array $skipIPs         IPs já banidos/pendentes (pré-carregados)
+     * @return array                 ['valid' => [...], 'skipped' => int]
+     */
+    public static function filterSuggestions(array $rawSuggestions, array $skipIPs): array
+    {
+        $whitelist = self::loadWhitelist();
+        $minConf   = (int) Database::getConfig('ai_min_confidence', 75);
+        $valid     = [];
+        $skipped   = 0;
+        $seen      = [];
+
+        foreach ($rawSuggestions as $suggestion) {
+            $ip = $suggestion['ip'] ?? '';
+
+            if (in_array($ip, $whitelist, true)) {
+                continue;
+            }
+            if (in_array($ip, $skipIPs, true)) {
+                $skipped++;
+                continue;
+            }
+            if (($suggestion['confidence'] ?? 0) < $minConf) {
+                continue;
+            }
+            if (($suggestion['action'] ?? 'ban') !== 'ban') {
+                continue;
+            }
+
+            // Dedup em memória
+            if (isset($seen[$ip])) {
+                continue;
+            }
+            $seen[$ip] = true;
+            $skipIPs[] = $ip;
+
+            $valid[] = $suggestion;
+        }
+
+        return ['valid' => $valid, 'skipped' => $skipped];
+    }
+
+    /**
+     * Carrega whitelist de IPs do banco.
+     * @return string[]
+     */
+    public static function loadWhitelist(): array
     {
         $raw = Database::getConfig('ai_whitelist_ips', '');
         if (empty($raw)) {
