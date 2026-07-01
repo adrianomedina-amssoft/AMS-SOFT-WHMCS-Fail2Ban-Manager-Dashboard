@@ -127,7 +127,7 @@ class AIController
                 'model'       => Database::getConfig("ai_provider_{$key}_model", $def['default_model']),
                 'base_url'    => Database::getConfig("ai_provider_{$key}_base_url", $def['default_base_url']),
                 'last_ping'   => Database::getConfig("ai_provider_{$key}_last_ping", '0'),
-                'protocol'    => Database::getConfig("ai_provider_{$key}_protocol", $def['protocol']),
+                'protocol'    => $def['protocol'],
             ];
             // Verificar se chave corrompida pode ser descriptografada
             if ($providerConfigs[$key]['api_key_set']) {
@@ -523,7 +523,23 @@ class AIController
         $viewer = new LogViewer();
         $logs   = $viewer->getAvailableLogs($extra);
 
-        return json_encode(['success' => true, 'logs' => $logs]);
+        // Enriquecer com metadata de watermark para skip client-side.
+        // Limitação conhecida: has_new é calculado no momento do list_logs.
+        // Se o log crescer entre list_logs e analyze_log daquele arquivo,
+        // o JS vai pular mesmo havendo conteúdo novo — capturado no próximo ciclo.
+        $result = [];
+        foreach ($logs as $log) {
+            $path      = $log['path'];
+            $size      = @filesize($path) ?: 0;
+            $offsetKey = 'ai_log_offset.' . md5($path);
+            $watermark = (int) Database::getConfig($offsetKey, 0);
+            $log['filesize']  = $size;
+            $log['watermark'] = $watermark;
+            $log['has_new']   = $size > $watermark;
+            $result[] = $log;
+        }
+
+        return json_encode(['success' => true, 'logs' => $result]);
     }
 
     // -----------------------------------------------------------------------
@@ -569,6 +585,19 @@ class AIController
         $storedOffset = (int) Database::getConfig($offsetKey, 0);
         $currentSize  = @filesize($path) ?: 0;
 
+        // Verificar se o arquivo é legível antes de processar.
+        // Evita reset de watermark quando www-data não tem permissão de leitura
+        // (ex: log é root:adm 640 e www-data não está no grupo adm).
+        // Sem este check, @filesize() retorna false → 0 < storedOffset → watermark resetado.
+        if (!is_readable($path)) {
+            return json_encode([
+                'success'    => false,
+                'log'        => $path,
+                'error'      => 'not_readable',
+                'error_msg'  => 'Arquivo não legível pelo servidor web. Verifique as permissões do arquivo.',
+            ]);
+        }
+
         if (!$force && $currentSize === $storedOffset) {
             return json_encode([
                 'success'    => true,
@@ -589,9 +618,14 @@ class AIController
         }
 
         // force: relê as últimas N linhas do arquivo (ignora offset)
-        $lines = $force
-            ? $viewer->readLines($path, $logLineLimit)
-            : $viewer->readNewLinesFromOffset($path, $storedOffset, $logLineLimit);
+        $readOffset = $storedOffset;
+        if ($force) {
+            $lines = $viewer->readLines($path, $logLineLimit);
+        } else {
+            $result     = $viewer->readNewLinesFromOffset($path, $storedOffset, $logLineLimit);
+            $lines      = $result['lines'];
+            $readOffset = $result['offset'];
+        }
 
         if (empty($lines)) {
             return json_encode([
@@ -604,11 +638,86 @@ class AIController
             ]);
         }
 
+        // ── Montar skipIPs (uma única vez, antes da IA) ──────────────────
+        // Usado pelo pre-filter E pelo filterSuggestions (pós-IA).
+        // Composição: banidos + known + pending + whitelist.
+        $skipIPs = [];
+        try {
+            $client = $this->router->makeClient();
+            if ($client->ping()) {
+                $skipIPs = array_column($client->getBannedIPs(), 'ip');
+            }
+        } catch (\Throwable $e) {}
+        if (empty($skipIPs)) {
+            $bantimeDays = (int) ceil((int) Database::getConfig('global_bantime', 604800) / 86400);
+            $skipIPs = Database::getKnownIPs($bantimeDays);
+        }
+        $skipIPs = array_merge($skipIPs, Database::getPendingIPs());
+        $skipIPs = array_merge($skipIPs, AutoBanEngine::loadWhitelist());
+        $skipIPs = array_unique($skipIPs);
+
+        // ── Whitelist pre-filter ──────────────────────────────────────────
+        // Remove linhas cujos IPs são todos skip antes de enviar à IA.
+        // Economiza tokens. filterSuggestions() continua como safety net.
+        $lines = LogViewer::filterLinesByIPs($lines, $skipIPs);
+
+        if (empty($lines)) {
+            // Watermark deve avançar mesmo sem linhas relevantes — evita
+            // reprocessar o mesmo trecho infinitamente na próxima análise.
+            if (!$force) {
+                Database::setConfig($offsetKey, (string) $readOffset);
+            }
+            return json_encode([
+                'success'    => true,
+                'log'        => $path,
+                'suggestions'=> [],
+                'saved'      => 0,
+                'skipped'    => 0,
+                'message'    => 'Sem conteúdo novo após filtro de IPs.',
+                'filtered'   => true,
+            ]);
+        }
+
         // Chamar IA — protegido por try-catch para garantir que o watermark
         // não avance em caso de erro inesperado na API.
+        $parseFailed  = false;
+        $truncated    = false;
+
         try {
             $rawSuggestions = $analyzer->analyze($lines);
+        } catch (\AMS\Fail2Ban\TruncatedResponseException $e) {
+            // Resposta truncada por max_tokens — parcialmente útil, mas sinalizar.
+            $rawSuggestions = [];
+            $parseFailed    = true;
+            $truncated      = true;
+            // Log interno: qual log truncou e quando
+            Database::setConfig('ai_last_parse_error', json_encode([
+                'log'       => $path,
+                'type'      => 'truncated',
+                'message'   => $e->getMessage(),
+                'timestamp' => date('Y-m-d H:i:s'),
+            ]));
+        } catch (\AMS\Fail2Ban\InvalidResponseException $e) {
+            // Resposta da IA não é JSON válido — não avançar watermark.
+            $rawSuggestions = [];
+            $parseFailed    = true;
+            // Log interno: qual log falhou e o trecho da resposta
+            Database::setConfig('ai_last_parse_error', json_encode([
+                'log'       => $path,
+                'type'      => 'invalid_json',
+                'message'   => $e->getMessage(),
+                'timestamp' => date('Y-m-d H:i:s'),
+            ]));
         } catch (\Throwable $e) {
+            // Detectar 429 do provedor
+            if ($analyzer->getLastHttpCode() === 429) {
+                return json_encode([
+                    'success'     => false,
+                    'log'         => $path,
+                    'error'       => 'rate_limited',
+                    'retry_after' => 60,
+                ]);
+            }
             return json_encode([
                 'success' => false,
                 'log'     => $path,
@@ -616,23 +725,8 @@ class AIController
             ]);
         }
 
-        // Dedup: IPs já banidos ou com sugestão pendente
-        $skipIPs = [];
-        try {
-            $client = $this->router->makeClient();
-            if ($client->ping()) {
-                $bannedData = $client->getBannedIPs();
-                $skipIPs = array_column($bannedData, 'ip');
-            }
-        } catch (\Throwable $e) {}
-        if (empty($skipIPs)) {
-            $bantimeDays = (int) ceil((int) Database::getConfig('global_bantime', 604800) / 86400);
-            $skipIPs = Database::getKnownIPs($bantimeDays);
-        }
-        $pendingIPs = Database::getPendingIPs();
-        $skipIPs = array_unique(array_merge($skipIPs, $pendingIPs));
-
         // Filtrar sugestões (método compartilhado)
+        // $skipIPs já montado antes da chamada à IA (pre-filter)
         $filtered  = \AMS\Fail2Ban\AutoBanEngine::filterSuggestions($rawSuggestions, $skipIPs);
         $savedList = [];
 
@@ -643,19 +737,32 @@ class AIController
         }
 
         // Atualizar watermark SOMENTE após sucesso (IA + save).
-        // Se a chamada à IA falhar (exception), o watermark não avança
-        // e o trecho será reanalisado na próxima tentativa.
+        // Usa $readOffset (offset real onde a leitura parou, via ftell())
+        // em vez de $currentSize (filesize) — evita pular linhas não lidas
+        // quando o log tem mais linhas que o limite configurado.
         // force: não atualiza watermark para não perder bytes novos que cheguem depois.
-        if (!$force) {
-            Database::setConfig($offsetKey, (string) $currentSize);
+        // parse_failed: não atualiza watermark — resposta truncada ou JSON inválido
+        // deve ser reanalisada (com prompt/modelo diferente ou mais max_tokens).
+        if (!$force && !$parseFailed) {
+            Database::setConfig($offsetKey, (string) $readOffset);
+        }
+
+        // Rolling TTL: renova a sessão de análise apenas após processamento
+        // bem-sucedido do log (sem parse failure). Se a chamada à IA falhar
+        // ou o parse quebrar, o TTL NÃO é renovado — a sessão expira
+        // naturalmente se ficar 5min sem progresso real.
+        if (!$parseFailed) {
+            Database::setConfig('ai_analysis_session_start', (string) time());
         }
 
         return json_encode([
-            'success'     => true,
-            'log'         => $path,
-            'suggestions' => $savedList,
-            'saved'       => count($savedList),
-            'skipped'     => $filtered['skipped'],
+            'success'      => true,
+            'log'          => $path,
+            'suggestions'  => $savedList,
+            'saved'        => count($savedList),
+            'skipped'      => $filtered['skipped'],
+            'parse_failed' => $parseFailed,
+            'truncated'    => $truncated,
         ]);
     }
 
@@ -682,24 +789,13 @@ class AIController
 
         $model    = $post['model'] ?? Database::getConfig("ai_provider_{$provider}_model", '');
         $def      = AIAnalyzer::getProviderDef($provider);
-        $protocol = '';
+        $protocol = $def ? $def['protocol'] : 'anthropic';
+        $baseUrl  = $post['base_url'] ?? Database::getConfig("ai_provider_{$provider}_base_url", $def['default_base_url'] ?? '');
 
-        // Protocolo: usar do POST se o provider tem seletor
-        if ($def && !empty($def['has_protocol_selector'])) {
-            $protocol = $post['protocol'] ?? Database::getConfig("ai_provider_{$provider}_protocol", $def['protocol']);
-            $validProtocols = array_keys($def['protocol_options'] ?? []);
-            if (!in_array($protocol, $validProtocols, true)) {
-                $protocol = $def['protocol'];
-            }
-            // Base URL vem do protocolo selecionado
-            $baseUrl = $def['protocol_options'][$protocol]['base_url'] ?? $def['default_base_url'];
-        } else {
-            $baseUrl = $post['base_url'] ?? Database::getConfig("ai_provider_{$provider}_base_url", '');
-            // [SEC-17] Validar base URL se editável
-            if ($def && $def['needs_base_url'] && $baseUrl !== '') {
-                if (!$this->validateBaseUrl($baseUrl)) {
-                    return json_encode(['success' => false, 'error' => 'Base URL inválida. Deve ser HTTPS e não apontar para IPs privados.']);
-                }
+        // [SEC-17] Validar base URL se editável
+        if ($def && $def['needs_base_url'] && $baseUrl !== '') {
+            if (!$this->validateBaseUrl($baseUrl)) {
+                return json_encode(['success' => false, 'error' => 'Base URL inválida. Deve ser HTTPS e não apontar para IPs privados.']);
             }
         }
 
@@ -807,15 +903,6 @@ class AIController
             $model = $post["ai_provider_{$key}_model"] ?? $def['default_model'];
             if (isset($def['models'][$model])) {
                 Database::setConfig("ai_provider_{$key}_model", $model);
-            }
-
-            // Protocolo — só para provedores com seletor (ex: MiMo)
-            if (!empty($def['has_protocol_selector'])) {
-                $protocol = $post["ai_provider_{$key}_protocol"] ?? $def['protocol'];
-                $validProtocols = array_keys($def['protocol_options'] ?? []);
-                if (in_array($protocol, $validProtocols, true)) {
-                    Database::setConfig("ai_provider_{$key}_protocol", $protocol);
-                }
             }
 
             // Base URL — só para provedores que precisam

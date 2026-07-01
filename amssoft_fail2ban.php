@@ -25,7 +25,7 @@ function amssoft_fail2ban_config(): array
         'author'      => 'AMS SOFT',
         'authorurl' => 'https://www.amssoft.com.br',
         'language'    => 'portuguese-br',
-        'version'     => '2.0.0',
+        'version'     => '2.0.1',
         'fields'      => [
             'sudo_path'       => [
                 'FriendlyName' => 'Caminho sudo',
@@ -253,6 +253,19 @@ function amssoft_fail2ban_migrate_v5(): void
     });
 }
 
+/**
+ * Migração automática v6: limpa chave de protocolo do MiMo.
+ * O protocolo foi fixado em 'openai' no registry — a chave no banco é lixo.
+ * Idempotente: só limpa se a chave existir.
+ */
+function amssoft_fail2ban_migrate_v6(): void
+{
+    $protocol = \AMS\Fail2Ban\Database::getConfig('ai_provider_mimo_protocol', '');
+    if ($protocol !== '') {
+        \AMS\Fail2Ban\Database::setConfig('ai_provider_mimo_protocol', '');
+    }
+}
+
 function amssoft_fail2ban_output(array $vars): void
 {
     // Migração automática: garante que tabelas do v2 existam mesmo em instalações antigas
@@ -279,6 +292,13 @@ function amssoft_fail2ban_output(array $vars): void
     // Migração automática v5: tabela de cache GeoIP
     try {
         amssoft_fail2ban_migrate_v5();
+    } catch (\Exception $e) {
+        // Silencioso
+    }
+
+    // Migração automática v6: limpar chave de protocolo do MiMo
+    try {
+        amssoft_fail2ban_migrate_v6();
     } catch (\Exception $e) {
         // Silencioso
     }

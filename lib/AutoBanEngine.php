@@ -103,12 +103,25 @@ class AutoBanEngine
             ? array_unique($activeBannedIPs)
             : array_unique(array_merge($activeBannedIPs, $pendingIPs));
 
+        // Whitelist pre-filter: incluir IPs whitelisted no skip para que
+        // filterLinesByIPs() remova linhas cujos IPs são todos skip antes
+        // de enviar à IA. Economiza tokens.
+        $skipIPs = array_unique(array_merge($skipIPs, self::loadWhitelist()));
+
         $results = [];
 
         foreach ($availableLogs as $logInfo) {
             $path = $logInfo['path'];
 
             if (!is_readable($path)) {
+                // Log interno: arquivo ilegível no contexto do cron.
+                // Watermark NÃO é tocado — evita reset progressivo.
+                Database::setConfig('ai_last_parse_error', json_encode([
+                    'log'       => $path,
+                    'type'      => 'not_readable',
+                    'message'   => 'Arquivo não legível pelo processo cron.',
+                    'timestamp' => date('Y-m-d H:i:s'),
+                ]));
                 continue;
             }
 
@@ -139,11 +152,24 @@ class AutoBanEngine
                     $storedOffset = 0;
                 }
 
-                $lines = $this->readNewLines($path, $storedOffset, $logLineLimit);
+                $result     = $this->readNewLinesWithOffset($path, $storedOffset, $logLineLimit);
+                $lines      = $result['lines'];
+                $readOffset = $result['offset'];
 
-                // Atualiza o watermark independentemente de haver sugestões
-                Database::setConfig($offsetKey, (string)$currentSize);
+                // Atualiza o watermark para o offset real lido (via ftell()),
+                // não para o tamanho total do arquivo. Evita pular linhas quando
+                // o log tem mais conteúdo que o limite configurado.
+                Database::setConfig($offsetKey, (string)$readOffset);
             }
+
+            if (empty($lines)) {
+                continue;
+            }
+
+            // ── Whitelist pre-filter ───────────────────────────────────────────
+            // Remove linhas cujos IPs são todos whitelisted/banidos/pendentes.
+            // Economiza tokens — filterSuggestions() continua como safety net.
+            $lines = LogViewer::filterLinesByIPs($lines, $skipIPs);
 
             if (empty($lines)) {
                 continue;
@@ -296,9 +322,9 @@ class AutoBanEngine
      * @param string $path     Path do arquivo
      * @param int    $offset   Byte offset para iniciar a leitura
      * @param int    $maxLines Máximo de linhas a retornar
-     * @return array           Linhas lidas (sem newline)
+     * @return array           ['lines' => array, 'offset' => int]
      */
-    private function readNewLines(string $path, int $offset, int $maxLines = 200): array
+    private function readNewLinesWithOffset(string $path, int $offset, int $maxLines = 200): array
     {
         $viewer = new LogViewer();
         return $viewer->readNewLinesFromOffset($path, $offset, $maxLines);

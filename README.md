@@ -70,7 +70,7 @@ Este módulo ainda está sendo desenvolvido e pode conter falhas ou precisar de 
 
 ## Requisitos
 
-- WHMCS 9+
+- WHMCS 8+
 - PHP 8.1+
 - Debian/Ubuntu (testado; outros distros podem precisar de ajuste de paths)
 - fail2ban instalado

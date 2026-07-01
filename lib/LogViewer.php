@@ -120,7 +120,7 @@ class LogViewer
             return [];
         }
 
-        $lines = max(10, min(500, $lines));
+        $lines = max(10, min(1000, $lines));
 
         // Leitura eficiente usando SplFileObject para arquivos grandes
         $file = new \SplFileObject($path, 'r');
@@ -152,15 +152,17 @@ class LogViewer
      * @param string $path     Path do arquivo (validado internamente)
      * @param int    $offset   Byte offset para iniciar a leitura
      * @param int    $maxLines Máximo de linhas a retornar
-     * @return array           Linhas lidas (sem newline)
+     * @return array           ['lines' => array, 'offset' => int] — linhas lidas e offset real onde parou
      */
     public function readNewLinesFromOffset(string $path, int $offset, int $maxLines = 200): array
     {
+        $empty = ['lines' => [], 'offset' => $offset];
+
         if (!$this->isValidPath($path) || !is_readable($path)) {
-            return [];
+            return $empty;
         }
 
-        $maxLines = max(10, min(500, $maxLines));
+        $maxLines = max(10, min(1000, $maxLines));
 
         // Proteção contra offset inválido (ex: caller não verificou filesize)
         if ($offset > 0) {
@@ -172,26 +174,40 @@ class LogViewer
 
         $fp = @fopen($path, 'r');
         if (!$fp) {
-            return [];
+            return $empty;
         }
 
         if ($offset > 0) {
             fseek($fp, $offset);
         }
 
-        $content = stream_get_contents($fp);
-        fclose($fp);
+        // Ler linha por linha, capturando offset real com ftell().
+        // ftell() é preciso com \r\n e multi-byte UTF-8 (não cálculo manual).
+        $lines = [];
+        $realOffset = $offset;
 
-        if ($content === false || trim($content) === '') {
-            return [];
+        while (!feof($fp) && count($lines) < $maxLines) {
+            $line = fgets($fp);
+            if ($line === false) {
+                break;
+            }
+            $line = rtrim($line, "\r\n");
+            if ($line !== '') {
+                $lines[] = $line;
+            }
+            $realOffset = ftell($fp);
         }
 
-        $lines = array_values(array_filter(
-            array_map('rtrim', explode("\n", $content)),
-            fn ($l) => $l !== ''
-        ));
+        fclose($fp);
 
-        return array_slice($lines, -$maxLines);
+        // Se leu até o final do arquivo (menos linhas que o max),
+        // usar filesize como offset para evitar re-leitura no próximo ciclo.
+        $fileSize = @filesize($path);
+        if ($fileSize !== false && $realOffset >= $fileSize) {
+            $realOffset = $fileSize;
+        }
+
+        return ['lines' => $lines, 'offset' => $realOffset];
     }
 
     /**
@@ -265,6 +281,56 @@ class LogViewer
             ];
         }
         return $result;
+    }
+
+    /**
+     * Remove linhas cujos IPs estão todos na lista de skip.
+     * Mantém linhas sem IP (podem ter padrões de ataque) e linhas
+     * com pelo menos 1 IP fora da lista de skip.
+     *
+     * Whitelist pre-filter: evita enviar à IA linhas cujos IPs são todos
+     * whitelisted/banidos/pendentes, economizando tokens.
+     *
+     * @param array $lines    Linhas de log
+     * @param array $skipIPs  IPs a filtrar (whitelist + banidos + pendentes)
+     * @return array           Linhas filtradas (re-indexadas)
+     */
+    public static function filterLinesByIPs(array $lines, array $skipIPs): array
+    {
+        if (empty($skipIPs) || empty($lines)) {
+            return $lines;
+        }
+
+        $skipSet = array_flip($skipIPs); // O(1) lookup
+
+        $ipv4 = '\b(?:\d{1,3}\.){3}\d{1,3}\b';
+        $ipv6 = '\b(?:[0-9a-fA-F]{1,4}:){2,7}[0-9a-fA-F]{1,4}\b';
+        $pattern = '/(' . $ipv4 . '|' . $ipv6 . ')/';
+
+        $filtered = [];
+
+        foreach ($lines as $line) {
+            if (!preg_match_all($pattern, $line, $matches)) {
+                // Sem IP — manter (pode ter padrão de ataque)
+                $filtered[] = $line;
+                continue;
+            }
+
+            $hasRelevantIP = false;
+            foreach ($matches[1] as $ip) {
+                if (filter_var($ip, FILTER_VALIDATE_IP) && !isset($skipSet[$ip])) {
+                    $hasRelevantIP = true;
+                    break;
+                }
+            }
+
+            if ($hasRelevantIP) {
+                $filtered[] = $line;
+            }
+            // else: todos os IPs da linha são whitelisted/banidos → remover
+        }
+
+        return $filtered;
     }
 
     /**

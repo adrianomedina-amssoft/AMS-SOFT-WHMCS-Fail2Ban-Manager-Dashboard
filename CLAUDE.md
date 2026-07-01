@@ -1,4 +1,8 @@
-# CLAUDE.md — AMS SOFT Fail2Ban Manager
+# CLAUDE.md
+
+This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
+
+**Idioma:** Pense, raciocine e converse sempre em português brasileiro. Todo o raciocínio interno, explicações e comunicação com o usuário devem ser em PT-BR. Código, commits e variáveis permanecem em inglês.
 
 ## Visão Geral
 
@@ -16,6 +20,96 @@ Addon WHMCS que gerencia fail2ban via painel admin visual. Elimina a necessidade
 - **Autoloader:** PSR-4 customizado em `lib/Router.php` (não usa Composer)
 - **Templates:** PHP puro (sem Smarty), `extract()` + `ob_start()`
 
+## Working in This Repo
+
+This is a WHMCS addon module — there is no build step, no Composer, no npm. Files are loaded directly by the WHMCS framework.
+
+### Common Tasks
+
+**Test a PHP syntax error:**
+```bash
+php -l lib/AIAnalyzer.php
+```
+
+**Test the module loads without fatal errors** (requires WHMCS + DB):
+```bash
+php -r "require '/var/www/html/whmcs/vendor/autoload.php'; require 'amssoft_fail2ban.php'; echo 'OK\n';"
+```
+
+**Check fail2ban and sudo are working:**
+```bash
+sudo fail2ban-client ping          # expect: pong
+sudo fail2ban-client status whmcs  # expect: jail info
+```
+
+**View the auth log (what the module writes):**
+```bash
+tail -f /var/log/whmcs_auth.log
+```
+
+**Validate sudoers syntax after editing:**
+```bash
+visudo -c
+```
+
+**Apply sudoers from setup/ to the system:**
+```bash
+cp setup/sudoers/amssoft_fail2ban /etc/sudoers.d/amssoft_fail2ban
+chmod 0440 /etc/sudoers.d/amssoft_fail2ban
+visudo -c
+```
+
+**Check WHMCS cron is running the AI hook:**
+```bash
+# The AfterCronJob hook fires after each WHMCS cron run (every 4 min per crontab)
+# Check ai_last_run in the config table to see last execution
+mysql -u whmcs -p whmcs -e "SELECT * FROM mod_amssoft_fail2ban_config WHERE key='ai_last_run';"
+```
+
+### No Tests
+
+There is no test suite. Validation is manual: load the addon in WHMCS admin, exercise each page, check fail2ban commands work via sudo.
+
+### Debugging (queries úteis)
+
+```bash
+# Ver sugestões pendentes da IA
+mysql -u whmcs -p whmcs -e "SELECT id, ip, severity, confidence, status, threat FROM mod_amssoft_fail2ban_ai_suggestions WHERE status='pending' ORDER BY created_at DESC LIMIT 20;"
+
+# Ver configurações da IA (provedor ativo, modelo, intervalo)
+mysql -u whmcs -p whmcs -e "SELECT key, LEFT(value,80) as value FROM mod_amssoft_fail2ban_config WHERE key LIKE 'ai_%' ORDER BY key;"
+
+# Verificar watermark de um log específico
+mysql -u whmcs -p whmcs -e "SELECT key, value FROM mod_amssoft_fail2ban_config WHERE key LIKE 'ai_log_offset%';"
+
+# Verificar rate limit GeoIP
+mysql -u whmcs -p whmcs -e "SELECT key, value FROM mod_amssoft_fail2ban_config WHERE key LIKE 'geoip_%';"
+
+# Últimos eventos de ban registrados
+mysql -u whmcs -p whmcs -e "SELECT ip, jail, action, timestamp FROM mod_amssoft_fail2ban_logs ORDER BY timestamp DESC LIMIT 20;"
+
+# Verificar se a chave de criptografia existe
+mysql -u whmcs -p whmcs -e "SELECT key, LENGTH(value) as len FROM mod_amssoft_fail2ban_config WHERE key='_enc_key';"
+
+# Verificar status do cache GeoIP (contagem e idade)
+mysql -u whmcs -p whmcs -e "SELECT COUNT(*) as total, MIN(updated_at) as oldest, MAX(updated_at) as newest FROM mod_amssoft_fail2ban_geo_cache;"
+```
+
+### File Edit Workflow
+
+1. Edit the PHP file directly (no compilation needed)
+2. Run `php -l` on the file to catch syntax errors
+3. Refresh the WHMCS admin page to see changes
+4. For hooks.php changes: changes take effect on the next WHMCS cron run or next login failure event
+
+### Key Constraints
+
+- **No Composer** — the custom autoloader in `lib/Router.php` handles class loading. Never run `composer install` or add a `composer.json`.
+- **No external CDNs** — Chart.js is bundled in `assets/js/chart.min.js`. CSS is in `assets/css/amssoft_fail2ban.css`.
+- **No Smarty/Twig/Blade** — templates are raw PHP with `extract()` + `ob_start()`.
+- **Ioncube-encoded WHMCS** — never modify files under `vendor/whmcs/whmcs-foundation/`.
+- **Database** — uses WHMCS's Eloquent via `WHMCS\Database\Capsule`. No separate DB connection.
+
 ## Estrutura
 
 ```
@@ -29,11 +123,13 @@ amssoft_fail2ban/
 │   ├── Database.php            # Queries Eloquent (logs, config KV, sugestões IA, deduplicação)
 │   ├── Helper.php              # CSRF, session, flash, sanitização, criptografia AES-256-CBC
 │   ├── LogParser.php           # Parser de /var/log/fail2ban.log (ban/unban events)
-│   ├── LogViewer.php           # Leitura de logs com highlight (suspicious/error patterns) + readNewLinesFromOffset()
+│   ├── LogViewer.php           # Leitura de logs com highlight + readNewLinesFromOffset() + filterLinesByIPs() pre-filter
 │   ├── AIAnalyzer.php          # Integração multi-provider IA (Anthropic, MiMo) — análise + geração de failregex
 │   ├── FilterManager.php       # Cria filtros (.conf) e jails para filtros gerados pela IA
 │   ├── AutoBanEngine.php       # Motor de ban automático (3 modos: suggestion/auto/threshold)
-│   └── GeoIP.php               # Lookup geográfico via ip-api.com (cache + rate limiting)
+│   ├── GeoIP.php               # Lookup geográfico via ip-api.com (cache + rate limiting)
+│   ├── TruncatedResponseException.php # Exceção para resposta truncada por max_tokens
+│   └── InvalidResponseException.php  # Exceção para resposta que não é JSON válido
 ├── controllers/
 │   ├── DashboardController.php # KPIs, gráficos Chart.js, status fail2ban
 │   ├── IpsController.php       # Lista IPs banidos, ban/unban manual
@@ -93,9 +189,9 @@ Key-value store genérico. Usado para:
   - `ai_active_provider` — provedor ativo (`anthropic` | `mimo`)
   - `ai_provider_{name}_api_key` — chave API criptografada por provedor
   - `ai_provider_{name}_model` — modelo selecionado por provedor
-  - `ai_provider_{name}_protocol` — protocolo escolhido (provedores com seletor)
   - `ai_provider_{name}_base_url` — endpoint (provedores editáveis)
   - `ai_provider_{name}_last_ping` — último ping OK por provedor
+  - `ai_provider_mimo_protocol` — legado, limpo pela migração v6 (protocolo fixo OpenAI)
 - **Config compartilhada IA:** `ai_mode`, `ai_prompt`, `ai_interval_minutes`, `ai_min_confidence`, `ai_whitelist_ips`, `ai_auto_enabled`, `ai_log_lines`, `ai_threshold_*`
 - **Bantime global:** `global_bantime` (segundos, default 604800 = 7 dias)
 - **Confirmação auto:** `ai_confirmed_auto` (flag, necessário para modos auto/threshold)
@@ -106,6 +202,7 @@ Key-value store genérico. Usado para:
 - Rate limiting GeoIP: `geoip_requests_this_minute` (contador), `geoip_minute_window_start` (timestamp da janela), `geoip_cooldown_until` (timestamp do cooldown 429)
 - Logs customizados (`custom_log.<key>`)
 - Chave de criptografia (`_enc_key`)
+- Último erro de parse da IA (`ai_last_parse_error` — JSON com `log`, `type`, `message`, `timestamp`)
 
 ### mod_amssoft_fail2ban_ai_suggestions
 Sugestões da IA com status (pending/approved/rejected/auto_executed). Inclui campos v3: `filter_name`, `failregex`, `filter_created_at`. **Agrupamento por país:** `getPendingGroupedByCountry()` faz JOIN com `geo_cache` para agrupar pendentes por `country_code`. `getPendingIdsByCountry($cc)` retorna IDs pendentes de um país específico (vazio = sem geo data). Usado para ações em massa (bulk approve/reject) na UI. **Seleção cross-page:** cards de país com botão "Selecionar" que busca todos os IDs via AJAX, armazena em sessionStorage, e permite ação em massa com checkboxes + barra fixa. **Comportamento de IPs rejeitados:** `rejected` é intencionalmente excluído da dedup (`getKnownIPs` e `saveSuggestion` verificam apenas `pending/approved/auto_executed`). Se o admin rejeitar um IP e ele continuar atacando, a IA pode detectá-lo novamente e criar nova sugestão. Decisão de design: rejeitar não é permanente — o IP pode voltar se houver nova evidência.
@@ -118,6 +215,7 @@ Cache de dados geográficos de IPs (via ip-api.com). PRIMARY KEY em `ip`, com `u
 - **v3** (`amssoft_fail2ban_migrate_v3`): adiciona colunas filter_name, failregex, filter_created_at
 - **v4** (`amssoft_fail2ban_migrate_v4`): multi-provider IA — migra chaves antigas para formato por provedor, garante `ai_active_provider`
 - **v5** (`amssoft_fail2ban_migrate_v5`): cria tabela geo_cache para dados geográficos de IPs
+- **v6** (`amssoft_fail2ban_migrate_v6`): limpa chave legada `ai_provider_mimo_protocol` (protocolo fixo OpenAI)
 
 Todas são idempotentes e executadas automaticamente em cada carregamento do módulo (`amssoft_fail2ban_output`).
 
@@ -148,6 +246,8 @@ Parser customizado de INI para `/etc/fail2ban/jail.local`:
 - Strip de control characters nos valores (previne INI injection)
 - Permissões esperadas: `chown root:www-data`, `chmod 0664`
 
+**Jail `ai-bans`:** criada automaticamente durante `activate()` se não existir. Usa filtro `apache-auth` como placeholder (maxretry=5, findtime=600, bantime=3600). É o jail padrão para bans feitos pela IA quando a sugestão não especifica um jail.
+
 ### FilterManager
 Cria filtros fail2ban em `/etc/fail2ban/filter.d/`:
 - Nome: prefixo `amsfb-`, sanitizado para `[a-z0-9-]`, max 50 chars
@@ -166,11 +266,12 @@ Arquivo `setup/sudoers/amssoft_fail2ban` concede NOPASSWD para:
 Leitura e análise de arquivos de log. Validação de path via `isValidPath()` (SEC-8: restringe a `/var/log/`, `/var/www/html/`, `/tmp/`).
 
 **Métodos de leitura:**
-- **`readLines($path, $lines)`** — lê as últimas N linhas do arquivo (usado pelo Log Viewer e pelo `force=1`)
-- **`readNewLinesFromOffset($path, $offset, $maxLines)`** — lê bytes novos a partir de um offset (usado pelo watermark). Usa `fseek()` + `stream_get_contents()` (não carrega arquivo inteiro). Proteção contra offset inválido (fallback para 0 se offset > filesize).
+- **`readLines($path, $lines)`** — lê as últimas N linhas do arquivo (usado pelo Log Viewer e pelo `force=1`). Cap: 1000 linhas.
+- **`readNewLinesFromOffset($path, $offset, $maxLines)`** — lê linhas novas a partir de um offset. Retorna `['lines' => array, 'offset' => int]` onde `offset` é o byte real onde a leitura parou (via `ftell()`). Cap: 1000 linhas. O watermark é atualizado para `offset` (não para `filesize`) — evita pular linhas quando o log tem mais conteúdo que o limite.
 
 **Descoberta e análise:**
 - **`getAvailableLogs($extra)`** — varre logs bem conhecidos (`WELL_KNOWN_LOGS`), custom logs do DB (`custom_log.*`), logpaths de jails (`logpath.*`), e `fail2ban.log`
+- **`filterLinesByIPs($lines, $skipIPs)`** — estático, remove linhas cujos IPs estão todos na lista de skip. Mantém linhas sem IP e linhas com pelo menos 1 IP relevante. Usado como pre-filter antes de enviar à IA (economiza tokens).
 - **`extractIPs($lines)`** — extrai IPv4/IPv6 de linhas de log
 - **`highlightSuspicious($lines)`** — marca linhas com classes CSS (normal/suspicious/error)
 - **`isValidPath($path)`** — validação de path (SEC-8)
@@ -184,18 +285,16 @@ Arquitetura multi-provider com dispatch por **protocolo** (não por nome). Cada 
 ```php
 AIAnalyzer::PROVIDERS = [
     'anthropic' => [
-        'protocol' => 'anthropic',        // protocolo próprio
-        'models'   => ['claude-haiku-4-5-20251001', 'claude-sonnet-4-6', 'claude-opus-4-6'],
+        'protocol'   => 'anthropic',
+        'models'     => ['claude-haiku-4-5-20251001', 'claude-sonnet-4-6', 'claude-opus-4-6'],
+        'max_tokens' => 8192,  // Claude suporta até 8192 tokens de output
         ...
     ],
     'mimo' => [
-        'protocol' => 'anthropic',        // default, mas editável via seletor na UI
-        'has_protocol_selector' => true,   // mostra seletor Anthropic/OpenAI
-        'protocol_options' => [
-            'anthropic' => ['base_url' => 'https://token-plan-sgp.xiaomimimo.com/anthropic'],
-            'openai'    => ['base_url' => 'https://token-plan-sgp.xiaomimimo.com/v1'],
-        ],
-        'models' => ['mimo-v2.5-pro', 'mimo-v2.5'],
+        'protocol'         => 'openai',      // fixo — Anthropic removido (deep thinking consumia todos os tokens)
+        'disable_thinking' => true,          // desativar deep thinking do MiMo
+        'models'           => ['mimo-v2.5-pro', 'mimo-v2.5'],
+        'max_tokens'       => 4096,          // MiMo: manter 4096 até confirmar suporte a 8192
         ...
     ],
 ];
@@ -205,21 +304,18 @@ Adicionar provedor futuro = 1 entrada no array `PROVIDERS`.
 
 **Provedores suportados:**
 - **Anthropic (Claude)** — protocolo próprio, endpoint `https://api.anthropic.com/v1/messages`
-- **MiMo (Xiaomi)** — suporta protocolo Anthropic e OpenAI, cliente escolhe via seletor na UI
+- **MiMo (Xiaomi)** — protocolo fixo OpenAI, endpoint `https://token-plan-sgp.xiaomimimo.com/v1/chat/completions`
+  - Deep thinking desativado via `"thinking": {"type": "disabled"}` no body (evita consumo excessivo de tokens)
+  - Protocolo Anthropic removido: o deep thinking do MiMo consome todos os tokens de `max_completion_tokens` sem gerar resposta útil, causando timeout
 
-**Seletor de protocolo (MiMo):**
-Provedores com `has_protocol_selector => true` mostram radio buttons na UI para o cliente escolher entre protocolos disponíveis. O endpoint é aplicado automaticamente:
-- **Anthropic:** `https://token-plan-sgp.xiaomimimo.com/anthropic` → código adiciona `/v1/messages`
-- **OpenAI:** `https://token-plan-sgp.xiaomimimo.com/v1` → código adiciona `/chat/completions`
-
-O método `buildEndpointUrl()` monta a URL final a partir da base + path do protocolo.
+**Migração v6:** limpa chave legada `ai_provider_mimo_protocol` do banco (protocolo agora é fixo no registry).
 
 **Configuração no banco (chaves dinâmicas por provedor):**
 - `ai_active_provider` — provedor ativo (`anthropic` | `mimo`)
 - `ai_provider_{name}_api_key` — chave API criptografada (AES-256-CBC)
 - `ai_provider_{name}_model` — modelo selecionado
-- `ai_provider_{name}_protocol` — protocolo escolhido (apenas para provedores com seletor)
 - `ai_provider_{name}_base_url` — endpoint (apenas para provedores com `needs_base_url`)
+- `ai_provider_{name}_last_ping` — último ping OK
 
 **Migração v4 (multi-provider):**
 - Chaves antigas `ai_api_key` e `ai_model` são migradas automaticamente para `ai_provider_anthropic_*`
@@ -240,6 +336,9 @@ O método `buildEndpointUrl()` monta a URL final a partir da base + path do prot
 
 - Logs truncados em N linhas (configurável: 200/400/600/800/1000)
 - Prompt customizável pelo admin (max 8000 chars). **DEFAULT_PROMPT** (`AIAnalyzer::getDefaultPrompt()`) inclui contexto WHMCS: webhooks de pagamento (Mercado Pago), crawlers legítimos (facebookexternalhit, ChatGPT-User, LinkPreviewBot), comportamento normal de clientes. Se o admin nunca salvou prompt customizado, o default é usado.
+- **Cap de ameaças:** `buildPrompt()` injeta "Retorne no máximo 10 ameaças, priorizando as de maior severidade e confiança" no system prompt — aplica-se a TODOS os prompts (default e customizado do admin). Garante que a resposta cabe dentro do budget de `max_tokens` mesmo com logs densos.
+- **Detecção de truncamento:** `callApi()` verifica `stop_reason`/`finish_reason` da resposta. Se for `"max_tokens"` ou `"length"`, lança `TruncatedResponseException` — o controller captura e sinaliza ao frontend via flag `truncated`. Watermark NÃO avança (log será reanalisado).
+- **Detecção de JSON inválido:** `parseResponse()` lança `InvalidResponseException` se a resposta não for JSON array válido. Controller captura, sinaliza via `parse_failed`, e registra em `ai_last_parse_error` no banco. Watermark NÃO avança.
 - **Mitigação de prompt injection:** instruções no system prompt, logs em `<log_data>` com aviso explícito
 
 ### AutoBanEngine — 3 modos
@@ -256,15 +355,48 @@ O método `buildEndpointUrl()` monta a URL final a partir da base + path do prot
 - `filterSuggestions($raw, $skipIPs)` — estático, filtra sugestões cruas da IA (whitelist, dedup, confiança mínima, ação=ban)
 - `loadWhitelist()` — estático, carrega whitelist de IPs do banco
 
-### Deduplicação (2 camadas)
-1. **Watermark por arquivo:** lê apenas bytes novos desde última análise (offset no banco)
-2. **IP dedup:** ignora IPs já banidos no fail2ban + IPs com sugestão pendente
+### Deduplicação (3 camadas)
+1. **Whitelist pre-filter:** remove linhas cujos IPs são todos whitelisted/banidos/pendentes **antes** de enviar à IA. Economiza tokens — linhas com IPs irrelevantes nunca chegam à API. Implementado em `LogViewer::filterLinesByIPs()`, chamado por `AIController::ajaxAnalyzeLog()` e `AutoBanEngine::runAnalysis()`. Mantém linhas sem IP (podem ter padrões de ataque) e linhas com IPs mistos (whitelisted + não-whitelisted).
+2. **Watermark por arquivo:** lê apenas bytes novos desde última análise (offset no banco)
+3. **IP dedup (pós-IA):** `filterSuggestions()` remove sugestões para IPs já banidos/pendentes/whitelisted — safety net após a resposta da IA
 
 **Comportamento do watermark:**
 - Chave `ai_log_offset.{md5(path)}` é compartilhada entre AutoBanEngine (cron) e ajaxAnalyzeLog (manual). Ambos competem pelo mesmo ponteiro — decisão de design, não bug.
-- Watermark só avança após sucesso: atualização ocorre DEPOIS da chamada à IA e salvamento das sugestões. Se a API falhar, o trecho será reanalisado na próxima tentativa.
+- Watermark usa **offset real lido** (via `ftell()`) em vez de `filesize()`. Quando o log tem mais linhas que o limite configurado (`ai_log_lines`), o watermark avança apenas até onde a leitura parou — as linhas restantes são lidas no próximo ciclo. Evita perda silenciosa de conteúdo.
+- Watermark só avança após sucesso: atualização ocorre DEPOIS da chamada à IA e salvamento das sugestões. Se a API falhar, ou se o parse da resposta falhar (JSON inválido ou truncado), o watermark NÃO avança e o trecho será reanalisado na próxima tentativa.
 - Parâmetro `force=1` no POST de `analyze_log` ignora o watermark e relê as últimas N linhas. Útil após trocar prompt ou modelo de IA. Quando force está ativo, o watermark NÃO é atualizado (para não perder bytes novos).
+- **Rolling TTL da sessão:** `ai_analysis_session_start` é renovado a cada `analyze_log` bem-sucedido (após save + watermark). Se a chamada à IA falhar, o TTL NÃO é renovado — a sessão expira naturalmente se ficar 5min sem progresso. Isso permite que análises com 33+ logs durem indefinidamente enquanto houver progresso.
+- **Skip client-side:** `list_logs` retorna `has_new` por log (comparação `filesize > watermark`). JS pula logs sem conteúdo novo sem request ao servidor. Limitação: `has_new` é calculado no momento do `list_logs` — se o log crescer entre `list_logs` e `analyze_log`, o skip é um falso positivo aceitável (capturado no próximo ciclo).
+- **Check `is_readable()`:** tanto `ajaxAnalyzeLog()` quanto `AutoBanEngine` verificam `is_readable()` antes de processar. Se o arquivo não for legível (ex: www-data sem permissão), o controller retorna erro claro e o watermark NÃO é resetado. Evita bug progressivo onde `@filesize()` retorna `false` → `0 < storedOffset` → watermark resetado para 0.
 - **Concorrência:** não há lock no read-write do watermark. Duas requisições simultâneas (duplo clique, cron + manual) podem ler o mesmo offset e processar o mesmo trecho. Pior caso: 1 chamada API duplicada. Sem perda de dados — `saveSuggestion()` faz upsert por IP e o watermark converge para o valor correto. Risco aceito como tolerável; optimistic lock não justifica a complexidade.
+- **Pre-filter e watermark:** quando o whitelist pre-filter remove todas as linhas de um log, o watermark AVANÇA mesmo assim (evita reprocessar infinitamente o mesmo trecho). No `ajaxAnalyzeLog`, o watermark é atualizado antes do return quando `filtered=true`. No `AutoBanEngine`, o watermark já é atualizado antes do pre-filter (linha 162). Comportamento diferente entre os dois é intencional: o cron atualiza watermark logo após ler; o controller atualiza após sucesso da IA, mas com exceção para pre-filter vazio.
+
+### Permissões de arquivos de log
+
+O módulo lê logs de vários diretórios. O processo web (www-data) precisa ter permissão de **leitura** nos arquivos de log. Permissões aplicadas no servidor:
+
+```
+root:www-data 640 /var/log/apache2/access_whmcs.log
+root:www-data 640 /var/log/fail2ban.log
+root:www-data 640 /var/log/apache2/access.log
+root:www-data 640 /var/log/apache2/error.log
+```
+
+Logs que já eram legíveis por www-data:
+```
+www-data:www-data 640 /var/log/whmcs_auth.log
+root:www-data 640 /var/log/auth.log
+root:www-data 640 /var/log/apache2/error_whmcs.log
+```
+
+**Se novos logs forem adicionados** e o "Analisar agora" não conseguir lê-los, o módulo retornará "Arquivo não legível pelo servidor web" — não resetará o watermark.
+
+### TruncatedResponseException / InvalidResponseException
+Exceções em `lib/TruncatedResponseException.php` e `lib/InvalidResponseException.php`:
+- **TruncatedResponseException** — lançada por `AIAnalyzer::callApi()` quando `stop_reason: "max_tokens"` (Anthropic) ou `finish_reason: "length"` (OpenAI). Resposta cortada por atingir limite de tokens.
+- **InvalidResponseException** — lançada por `AIAnalyzer::parseResponse()` quando a resposta da IA não contém JSON válido (texto livre, erro interno, etc.).
+
+O controller captura ambas e: (1) NÃO avança watermark (log será reanalisado), (2) NÃO renova TTL da sessão, (3) sinaliza ao frontend via flags `parse_failed`/`truncated`, (4) registra detalhes em `ai_last_parse_error` no banco (config KV).
 
 ### Criação de filtros pela IA
 - **Cenário A:** sugestão já tem failregex → cria filtro diretamente
@@ -351,27 +483,30 @@ Todas as requisições AJAX são:
 - `do=approve` — aprova sugestão (bane IP via provedor ativo)
 - `do=reject` — rejeita sugestão
 - `do=run_now` — executa análise manual via provedor ativo (legado, usado em ai_settings)
-- `do=list_logs` — lista logs disponíveis para análise (rate limit: 60s, inicia sessão de análise)
-- `do=analyze_log` — analisa um único log (requer sessão ativa, usa watermark, retorna sugestões salvas). Aceita `force=1` no POST para ignorar watermark e reanalisar (útil após trocar prompt/modelo)
-- `do=ping_api` — testa conexão com API (aceita `provider` e `protocol` no POST)
-- `do=save_settings` — salva configurações (multi-provider: provedor ativo, protocolo, chave, modelo)
+- `do=list_logs` — lista logs disponíveis para análise (rate limit: 60s, inicia sessão de análise). Retorna metadata enriquecida por log: `filesize`, `watermark`, `has_new` (boolean). JS usa `has_new` para pular logs sem conteúdo novo sem request ao servidor.
+- `do=analyze_log` — analisa um único log (requer sessão ativa, usa watermark, retorna sugestões salvas). Aceita `force=1` no POST para ignorar watermark e reanalisar (útil após trocar prompt/modelo). Campos extras no JSON de resposta: `parse_failed` (boolean), `truncated` (boolean — resposta cortada por max_tokens). Em caso de 429 do provedor, retorna `{success: false, error: 'rate_limited', retry_after: 60}`.
+- `do=ping_api` — testa conexão com API (aceita `provider` no POST)
+- `do=save_settings` — salva configurações (multi-provider: provedor ativo, chave, modelo)
 - `do=create_filter` — cria filtro fail2ban a partir de sugestão (usa provedor ativo)
 - `do=bulk_approve_ids` — aprova sugestões por lista de IDs. POST: `ids` (JSON array de ints positivos, max 200). Best-effort: IDs com `status != 'pending'` são ignorados silenciosamente. Retorna `approved_ids`, `failed_ids`, `dismissed_ids`.
 - `do=bulk_reject_ids` — rejeita sugestões por lista de IDs. POST: `ids` (JSON array de ints positivos, max 200). Batch UPDATE com `WHERE status = 'pending'`. Retorna `rejected` (count), `rejected_ids` (array).
 - `do=get_ids_by_country` — retorna todos os IDs pendentes de um país. POST: `country_code` (ISO 3166-1 alpha-2 ou vazio para "Desconhecido"). Usado pela seleção cross-page (ver seção "Seleção cross-page" abaixo).
 
 **Fluxo "Analisar agora" (sequencial com progresso):**
-1. JS chama `do=list_logs` → retorna todos os logs disponíveis (rate limit 60s, marca sessão)
-2. Para cada log: JS chama `do=analyze_log` com path → analisa, salva sugestões, retorna
-3. Linhas são adicionadas dinamicamente na tabela com 5 botões de ação
-4. Watermark (`ai_log_offset.{md5}`) pula logs sem conteúdo novo (resposta com `message` = pulado)
-5. Sessão expira em 300s (previne chamada direta via script)
-6. Mensagem final mostra breakdown: N analisado(s), M pulado(s), X sugestão(ões)
+1. JS chama `do=list_logs` → retorna todos os logs disponíveis com metadata (`filesize`, `watermark`, `has_new`)
+2. Para cada log: JS verifica `has_new` client-side — se false, pula sem request ao servidor
+3. JS chama `do=analyze_log` com path → analisa, salva sugestões, retorna
+4. Linhas são adicionadas dinamicamente na tabela com 5 botões de ação
+5. Delay adaptativo entre requests: 500ms base, backoff automático em 429 do provedor
+6. Rolling TTL: sessão renova a cada `analyze_log` bem-sucedido (não expira enquanto houver progresso)
+7. Resumo final discrimina: analisados, pulados, falhados (com paths), truncados + mensagem de retry explícita
 
 **Rate limiting (SEC-10):**
 - `do=list_logs`: 60s entre sessões (protege contra abuso)
 - `do=analyze_log`: sem rate limit individual (progresso sequencial rápido), mas requer sessão ativa
 - `do=run_now`: 60s (legado, mantido para ai_settings)
+- **Delay adaptativo (JS):** 500ms entre requests. Em 429, respeita `retry_after` do servidor (não limitado por MAX_DELAY) + countdown visual no botão ("Rate limit — aguardando 58s...")
+- **Detecção de 429:** `AIAnalyzer::getLastHttpCode()` retorna o HTTP code da última chamada. Controller detecta 429 e retorna `{error: 'rate_limited', retry_after: 60}` ao JS
 
 **Seleção cross-page ("Ações por País"):**
 - Cards de país acima da tabela pendente mostram bandeira, nome e contagem de IPs
@@ -415,6 +550,7 @@ Procurar por `[SEC-N]` nos comentários para encontrar cada medida de segurança
 - **[SEC-10]** Rate limiting: 60s em `list_logs` (início de sessão), sessão de análise expira em 300s, `analyze_log` requer sessão ativa
 - **[SEC-11]** Limite de 8000 chars no prompt customizado
 - **[SEC-12]** CSRF validado incondicionalmente em todas as requisições AJAX POST
+- **[SEC-13]** *(reservado — não implementado)*
 - **[SEC-14]** Evitar `Capsule::raw()` com variável interpolada
 - **[SEC-15]** Validação de status contra ENUM antes de UPDATE
 - **[SEC-16]** Mitigação de prompt injection (system prompt + tags `<log_data>`)
@@ -427,6 +563,7 @@ Procurar por `[SEC-N]` nos comentários para encontrar cada medida de segurança
 
 | Problema | Solução |
 |---|---|
+| `deactivate()` não remove tabela `geo_cache` | Bug conhecido: `amssoft_fail2ban_deactivate()` dropa logs/config/ai_suggestions mas não geo_cache. Corrigir adicionando `Capsule::schema()->dropIfExists('mod_amssoft_fail2ban_geo_cache');` |
 | sudo não instalado | `apt-get install -y sudo` |
 | fail2ban não instalado | `apt-get install -y fail2ban` |
 | fail2ban não inicia (sshd sem log) | `[sshd] enabled = false` no jail.local |
@@ -434,6 +571,7 @@ Procurar por `[SEC-N]` nos comentários para encontrar cada medida de segurança
 | "Erro ao criar jail" | `chown root:www-data jail.local && chmod 0664 jail.local` |
 | "Falha ao criar arquivo de filtro" | Re-aplicar sudoers (v3 adicionou regras de cp/chmod) |
 | Aviso "sudoers desatualizado" | Re-aplicar sudoers do setup/ |
+| "Arquivo não legível pelo servidor web" (not_readable) | Logs `root:adm 640` não são legíveis por www-data. Corrigir: `chown root:www-data /var/log/apache2/access_whmcs.log /var/log/fail2ban.log` (e outros logs necessários). Ver seção "Permissões de arquivos de log". |
 
 ### Limitações Conhecidas (edge cases aceitos)
 
@@ -443,8 +581,33 @@ Procurar por `[SEC-N]` nos comentários para encontrar cada medida de segurança
 | **Concorrência no watermark** — duas requisições simultâneas (duplo clique, cron + manual) podem ler o mesmo offset e processar o mesmo trecho. | Baixo: 1 chamada API duplicada. Watermark converge; sugestões não duplicam (upsert por IP). | Nenhuma — risco aceito. Ver seção "Comportamento do watermark". |
 | **Race condition no rate limit GeoIP** — o estado (`requests_this_minute`, `minute_window_start`, `cooldown_until`) é lido e escrito sem lock. Dois admins simultâneos podem ler o mesmo valor, incrementar, e escrever. | Baixo: pior caso 2-3 requests extras perto do limite de 45. Não causa falha nem perda de dados. | Margem de segurança: safety limit = 40 (não 45). Cooldown de 429 cobre o caso extremo. |
 | **Cache geo com ASN antigo** — registros cacheados antes da correção do parsing (que extrai apenas o número ASN) podem ter `asn` com string completa (ex: "AS396982 Google LLC" em vez de "AS396982"). | Baixo: campo `asn` exibido como tooltip/coluna secundária, não afeta funcionalidade. | TTL de 30 dias: registros antigos são substituídos automaticamente. `cleanExpiredGeoCache()` acelera a limpeza se necessário. |
+| **`has_new` stale no skip client-side** — `list_logs` calcula `has_new` no momento da requisição. Se o log crescer entre `list_logs` e o `analyze_log` daquele arquivo (possível em logs ativos como Apache), o JS pula mesmo havendo conteúdo novo. | Baixo: conteúdo novo é capturado no próximo ciclo de análise (próximo clique ou cron). | Nenhuma — edge case tolerável. O watermark do servidor é a fonte de verdade; o skip client-side é otimização, não gate. |
 
 **Observação em produção (2026-06-30):** `whmcs_auth.log` estava com watermark=3884818 mas arquivo=0 bytes — instância real do edge case de rotação. O próximo `analyze_log` vai resetar o offset para 0 e reanalisar do início (comportamento correto).
+
+### Bugs críticos corrigidos (2026-07-01)
+
+Três bugs causavam perda silenciosa de dados de log. Todos corrigidos no mesmo commit:
+
+| Bug | Problema | Correção |
+|---|---|---|
+| **LogViewer cap 500** | `readLines()` e `readNewLinesFromOffset()` limitavam a 500 linhas (hard-coded), ignorando `ai_log_lines` configurado pelo admin | `min(500)` → `min(1000)` em ambos os métodos |
+| **Watermark reset por permissão** | `www-data` não lia logs `root:adm 640` → `@filesize()` retornava `false` → `0 < storedOffset` → watermark resetado para 0 | `is_readable()` check antes de processar + permissões corrigidas (`root:www-data 640`) |
+| **Watermark avançava para filesize** | Watermark era atualizado para `filesize()` em vez do offset real lido → linhas entre o offset de leitura e o final do arquivo eram permanentemente perdidas | `readNewLinesFromOffset()` retorna `['lines' => [], 'offset' => int]` com `ftell()`; watermark usa offset real |
+
+**Verificação de cobertura (busca global):**
+- `min(500` — zero ocorrências em LogViewer.php
+- `$currentSize` para watermark — zero ocorrências em AIController.php e AutoBanEngine.php
+- `readNewLinesFromOffset` — todas as chamadas atualizadas para novo retorno
+- `Database::setConfig($offsetKey` — ambas usam `$readOffset` (ftell), não `$currentSize` (filesize)
+
+**Testes manuais executados:**
+- `readLines(path, 1000)` retorna 1000 linhas (antes: 500) ✓
+- `readNewLinesFromOffset(path, 0, 1000)` com log de 10.000 linhas: offset=97.450 < filesize=984.535 ✓
+- Progressivo: 10 ciclos × 1000 linhas → offset avança 97K → 196K → ... → 984K = filesize ✓
+- Arquivo pequeno (300 linhas < 1000): offset=filesize ✓
+- `is_readable()` como www-data: arquivo ilegível → watermark preservado ✓
+- Cron progressivo: 3 execuções → offset 0 → 97K → 196K → 294K ✓
 
 ## Instalação (resumo)
 

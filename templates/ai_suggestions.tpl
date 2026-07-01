@@ -643,8 +643,16 @@ $statusLabels = [
                 var current = 0;
                 var totalSaved = 0;
                 var totalSkipped = 0;
+                var totalFiltered = 0;
+                var failedLogs = [];
+                var truncatedLogs = [];
                 var pendingTbody = document.getElementById('amsfb-pending-tbody');
                 var badge = document.querySelector('.panel-heading .badge');
+
+                // Delay adaptativo entre requests: começa em 500ms, aumenta em caso de 429
+                var baseDelay = 500;
+                var currentDelay = baseDelay;
+                var MAX_DELAY = 30000; // max 30s (backoff máximo)
 
                 // 2. Analisar cada log sequencialmente
                 function analyzeNext() {
@@ -652,14 +660,30 @@ $statusLabels = [
                         // Finalizado
                         runNowBtn.disabled = false;
                         runNowBtn.innerHTML = '&#9654; Analisar agora';
-                        var analyzed = total - totalSkipped;
+                        var analyzed = total - totalSkipped - totalFiltered - failedLogs.length;
                         var msg = '✓ Análise concluída — ' + analyzed + ' log(s) analisado(s)';
                         if (totalSkipped > 0) {
                             msg += ', ' + totalSkipped + ' pulado(s) (sem dados novos)';
                         }
+                        if (totalFiltered > 0) {
+                            msg += ', ' + totalFiltered + ' filtrado(s) (apenas IPs whitelisted/banidos)';
+                        }
+                        if (failedLogs.length > 0) {
+                            msg += ', ' + failedLogs.length + ' FALHARAM';
+                            msg += '\n\nLogs que falharam:\n';
+                            failedLogs.forEach(function (f) { msg += '• ' + (f.label || f.path) + ' (' + f.reason + ')\n'; });
+                            msg += '\nClique em "Analisar agora" novamente para tentar novamente';
+                            msg += '\n(estes logs serão reprocessados pois o watermark não foi atualizado).';
+                        }
+                        if (truncatedLogs.length > 0) {
+                            msg += '\n\n⚠ ' + truncatedLogs.length + ' log(s) tiveram resposta truncada pela IA.';
+                            msg += '\nAlgumas sugestões podem ter sido perdidas.';
+                        }
                         if (totalSaved > 0) {
-                            msg += '. ' + totalSaved + ' sugestão(ões) encontrada(s).';
-                        } else {
+                            msg += '\n\n' + totalSaved + ' sugestão(ões) encontrada(s).';
+                        } else if (analyzed === 0 && failedLogs.length === 0) {
+                            msg += '\n\nNenhum log com conteúdo novo — todos os logs já foram analisados.';
+                        } else if (failedLogs.length === 0) {
                             msg += '. Nenhuma ameaça encontrada.';
                         }
                         alert(msg);
@@ -668,13 +692,65 @@ $statusLabels = [
 
                     var log = logs[current];
                     current++;
+
+                    // Skip client-side: log sem conteúdo novo (watermark em dia).
+                    // has_new é calculado no list_logs — pode ficar stale se o log
+                    // crescer entre list_logs e este analyze_log, mas é aceitável:
+                    // capturado no próximo ciclo.
+                    if (log.has_new === false) {
+                        totalSkipped++;
+                        runNowBtn.innerHTML = '&#9203; Pulando: ' + (log.label || log.path) + ' (' + current + '/' + total + ')...';
+                        // Delay mínimo para o navegador renderizar o progresso visual
+                        setTimeout(analyzeNext, 20);
+                        return;
+                    }
+
                     runNowBtn.innerHTML = '&#9203; Analisando: ' + (log.label || log.path) + ' (' + current + '/' + total + ')...';
 
                     window.AMSFB.post('ai', 'analyze_log', { path: log.path }, function (result) {
-                        // Diferenciar "sem conteúdo novo" (pulado) de "analisado sem ameaças"
-                        if (result.success && result.message) {
-                            // Log pulado — sem conteúdo novo (watermark)
+                        // Erros que impediram o processamento
+                        if (!result.success) {
+                            var reason = result.error_msg || result.error || 'Erro desconhecido';
+                            var delayMs = currentDelay;
+                            if (result.error === 'rate_limited') {
+                                reason = 'Rate limit do provedor';
+                                // 429: respeitar retry_after do servidor (não limitar por MAX_DELAY)
+                                delayMs = (result.retry_after || 60) * 1000;
+                            }
+                            failedLogs.push({ path: log.path, label: log.label || log.path, reason: reason });
+
+                            // Countdown visual durante pausa de 429
+                            if (result.error === 'rate_limited') {
+                                var remaining = Math.ceil(delayMs / 1000);
+                                runNowBtn.innerHTML = '&#9208; Rate limit — aguardando ' + remaining + 's...';
+                                var countdown = setInterval(function () {
+                                    remaining--;
+                                    if (remaining <= 0) {
+                                        clearInterval(countdown);
+                                        runNowBtn.innerHTML = '&#9203; Retomando análise...';
+                                    } else {
+                                        runNowBtn.innerHTML = '&#9208; Rate limit — aguardando ' + remaining + 's...';
+                                    }
+                                }, 1000);
+                            }
+
+                            setTimeout(analyzeNext, delayMs);
+                            return;
+                        }
+
+                        // Sucesso: resetar delay para base
+                        currentDelay = baseDelay;
+
+                        // Log filtrado (pre-filter removeu todas as linhas) ou pulado (sem conteúdo novo)
+                        if (result.filtered) {
+                            totalFiltered++;
+                        } else if (result.message) {
                             totalSkipped++;
+                        }
+
+                        // Parse failure / truncamento
+                        if (result.truncated) {
+                            truncatedLogs.push(log.path);
                         }
 
                         if (result.success && result.suggestions && result.suggestions.length > 0) {
@@ -737,8 +813,8 @@ $statusLabels = [
                             }
                         }
 
-                        // Próximo log
-                        analyzeNext();
+                        // Próximo log (com delay adaptativo)
+                        setTimeout(analyzeNext, currentDelay);
                     });
                 }
 
