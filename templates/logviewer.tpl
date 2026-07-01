@@ -98,7 +98,7 @@
 <?php endif; ?>
 
 <script>
-(function () {
+document.addEventListener('DOMContentLoaded', function () {
     'use strict';
 
     var SELECT   = document.getElementById('amsfb-log-select');
@@ -326,5 +326,5 @@
     fetchLines();
     startRefresh();
 
-})();
+});
 </script>
