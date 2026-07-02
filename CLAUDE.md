@@ -609,6 +609,36 @@ Três bugs causavam perda silenciosa de dados de log. Todos corrigidos no mesmo 
 - `is_readable()` como www-data: arquivo ilegível → watermark preservado ✓
 - Cron progressivo: 3 execuções → offset 0 → 97K → 196K → 294K ✓
 
+### Bugs corrigidos (2026-07-01 — CSRF e carregamento)
+
+| Bug | Problema | Correção |
+|---|---|---|
+| **LogViewer: AMSFB undefined** | Script inline do logviewer.tpl chamava `fetchLines()` imediatamente, mas `window.AMSFB` era definido em `amssoft_fail2ban.js` carregado pelo layout **depois** do conteúdo | IIFE envolvida em `DOMContentLoaded` — garante que scripts do layout já carregaram |
+| **LogViewer: CSRF no fetch_lines** | Race condition: `fetch_lines` (a cada 5s) usava token antigo quando `analyze`/`ban_ip` rotacionavam o CSRF token | Retry automático (1x) quando erro contém "CSRF". Router injeta token atual na resposta mesmo em erro |
+| **IA: CSRF no list_logs/analyze_log** | Fluxo "Analisar agora" não tinha retry CSRF. Se token era rotacionado por sessão expirada ou concorrência, o fluxo falhava sem recuperação | `doListLogs()` e `doAnalyzeLog()` com retry automático (1x) em ambos os endpoints |
+
+**Padrão de retry CSRF (adotado em todos os endpoints AJAX):**
+```js
+function doAction(_csrfRetried) {
+    window.AMSFB.post('action', 'do', params, function (data) {
+        if (!data.success && data.error && data.error.indexOf('CSRF') !== -1 && !_csrfRetried) {
+            doAction(true); // retry com token atualizado
+            return;
+        }
+        // ... fluxo normal ...
+    });
+}
+doAction(false);
+```
+
+**Carregamento de scripts (ordem no layout.tpl):**
+1. `$content` (templates com scripts inline) — renderizado primeiro
+2. `chart.min.js` — Chart.js
+3. `amssoft_fail2ban.js` — define `window.AMSFB.post`
+4. Script inline — define `window.AMSFB.moduleLink`, `csrfToken`, etc.
+
+Templates que usam `window.AMSFB` na inicialização (não em handlers de evento) **devem** aguardar `DOMContentLoaded`.
+
 ## Instalação (resumo)
 
 1. `apt-get install -y fail2ban sudo`
