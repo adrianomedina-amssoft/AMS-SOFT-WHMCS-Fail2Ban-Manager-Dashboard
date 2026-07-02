@@ -8,7 +8,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 Addon WHMCS que gerencia fail2ban via painel admin visual. Elimina a necessidade de SSH/terminal para operações de ban/unban, gerenciamento de jails, visualização de logs e análise de ameaças por IA (multi-provider: Anthropic, MiMo/Xiaomi, e qualquer provedor OpenAI-compatible futuro).
 
-**Status:** Em desenvolvimento (v2.0.0, MIT License)
+**Status:** Em desenvolvimento (v2.0.1, MIT License)
 **Autor:** AMS SOFT — https://www.amssoft.com.br
 
 ## Ambiente
@@ -391,6 +391,34 @@ root:www-data 640 /var/log/apache2/error_whmcs.log
 
 **Se novos logs forem adicionados** e o "Analisar agora" não conseguir lê-los, o módulo retornará "Arquivo não legível pelo servidor web" — não resetará o watermark.
 
+### Logrotate e permissões (corrigido em 2026-07-02)
+
+**Problema:** O logrotate do Apache2 (`/etc/logrotate.d/apache2`) usa `create 640 root adm` — novos arquivos após rotação ficam com grupo `adm`. Como `www-data` não pertence ao grupo `adm`, perde acesso de leitura. Resultado: logs mostram "⚠ Sem permissão" no `action=logpaths` após rotação.
+
+**Correção aplicada:** Comando `chown root:www-data` + `chmod 640` no `postrotate` do logrotate:
+```
+postrotate
+    ...reload apache2...
+    # Garante que www-data pode ler logs usados pelo módulo Fail2Ban WHMCS
+    chown root:www-data /var/log/apache2/access_whmcs.log /var/log/apache2/error_whmcs.log /var/log/apache2/access.log /var/log/apache2/error.log 2>/dev/null
+    chmod 640 /var/log/apache2/access_whmcs.log /var/log/apache2/error_whmcs.log /var/log/apache2/access.log /var/log/apache2/error.log 2>/dev/null
+endscript
+```
+
+**Backup:** `/etc/logrotate.d/apache2.bakp.*`
+
+**Verificação:**
+```bash
+# Testar se logrotate mantém permissões após rotação forçada
+logrotate -f /etc/logrotate.d/apache2
+ls -la /var/log/apache2/*.log
+
+# Testar leitura como www-data
+sudo -u www-data test -r /var/log/apache2/access.log && echo OK || echo FAIL
+```
+
+**Nota:** O `create 640 root adm` no logrotate NÃO foi alterado (seria invasivo demais para todos os logs Apache). A correção é seletiva: apenas os 4 logs usados pelo módulo recebem `chown` no postrotate.
+
 ### TruncatedResponseException / InvalidResponseException
 Exceções em `lib/TruncatedResponseException.php` e `lib/InvalidResponseException.php`:
 - **TruncatedResponseException** — lançada por `AIAnalyzer::callApi()` quando `stop_reason: "max_tokens"` (Anthropic) ou `finish_reason: "length"` (OpenAI). Resposta cortada por atingir limite de tokens.
@@ -572,6 +600,7 @@ Procurar por `[SEC-N]` nos comentários para encontrar cada medida de segurança
 | "Falha ao criar arquivo de filtro" | Re-aplicar sudoers (v3 adicionou regras de cp/chmod) |
 | Aviso "sudoers desatualizado" | Re-aplicar sudoers do setup/ |
 | "Arquivo não legível pelo servidor web" (not_readable) | Logs `root:adm 640` não são legíveis por www-data. Corrigir: `chown root:www-data /var/log/apache2/access_whmcs.log /var/log/fail2ban.log` (e outros logs necessários). Ver seção "Permissões de arquivos de log". |
+| Logs perdem permissão após rotação (logrotate) | Logrotate do Apache usa `create 640 root adm` — novos arquivos ficam sem acesso para www-data. Corrigido: `chown root:www-data` no `postrotate` de `/etc/logrotate.d/apache2`. Ver seção "Logrotate e permissões". |
 
 ### Limitações Conhecidas (edge cases aceitos)
 
