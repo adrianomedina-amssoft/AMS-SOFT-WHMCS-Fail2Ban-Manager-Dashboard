@@ -628,15 +628,21 @@ $statusLabels = [
             if (!confirm('Rodar análise de IA agora em todos os logs configurados?')) return;
             runNowBtn.disabled = true;
 
-            // 1. Buscar lista de logs
+            // 1. Buscar lista de logs (com retry CSRF)
             runNowBtn.innerHTML = '&#9203; Buscando logs...';
-            window.AMSFB.post('ai', 'list_logs', {}, function (data) {
-                if (!data.success || !data.logs || data.logs.length === 0) {
-                    runNowBtn.disabled = false;
-                    runNowBtn.innerHTML = '&#9654; Analisar agora';
-                    alert(data.error || 'Nenhum log encontrado para análise.');
-                    return;
-                }
+            function doListLogs(_csrfRetried) {
+                window.AMSFB.post('ai', 'list_logs', {}, function (data) {
+                    // Retry once on CSRF failure (token may have been rotated)
+                    if (!data.success && data.error && data.error.indexOf('CSRF') !== -1 && !_csrfRetried) {
+                        doListLogs(true);
+                        return;
+                    }
+                    if (!data.success || !data.logs || data.logs.length === 0) {
+                        runNowBtn.disabled = false;
+                        runNowBtn.innerHTML = '&#9654; Analisar agora';
+                        alert(data.error || 'Nenhum log encontrado para análise.');
+                        return;
+                    }
 
                 var logs = data.logs;
                 var total = logs.length;
@@ -707,7 +713,13 @@ $statusLabels = [
 
                     runNowBtn.innerHTML = '&#9203; Analisando: ' + (log.label || log.path) + ' (' + current + '/' + total + ')...';
 
+                    function doAnalyzeLog(_csrfRetried) {
                     window.AMSFB.post('ai', 'analyze_log', { path: log.path }, function (result) {
+                        // Retry once on CSRF failure (token may have been rotated)
+                        if (!result.success && result.error && result.error.indexOf('CSRF') !== -1 && !_csrfRetried) {
+                            doAnalyzeLog(true);
+                            return;
+                        }
                         // Erros que impediram o processamento
                         if (!result.success) {
                             var reason = result.error_msg || result.error || 'Erro desconhecido';
@@ -816,6 +828,8 @@ $statusLabels = [
                         // Próximo log (com delay adaptativo)
                         setTimeout(analyzeNext, currentDelay);
                     });
+                    }
+                    doAnalyzeLog(false);
                 }
 
                 function escapeHtml(str) {
@@ -939,6 +953,8 @@ $statusLabels = [
                 // Iniciar análise
                 analyzeNext();
             });
+            }
+            doListLogs(false);
         });
     }
 
