@@ -126,6 +126,21 @@ document.addEventListener('DOMContentLoaded', function () {
         STATUS.textContent = 'Atualizando...';
 
         window.AMSFB.post('logviewer', 'fetch_lines', { path: path, lines: lines }, function (data) {
+            // Retry once on CSRF failure (token may have been rotated by concurrent AJAX)
+            if (!data.success && data.error && data.error.indexOf('CSRF') !== -1 && !data._csrfRetried) {
+                data._csrfRetried = true;
+                window.AMSFB.post('logviewer', 'fetch_lines', { path: path, lines: lines }, function (data2) {
+                    if (!data2.success) {
+                        STATUS.textContent = 'Erro: ' + (data2.error || 'desconhecido');
+                        return;
+                    }
+                    window.AMSFB.geoData = data2.geo_data || {};
+                    renderLines(data2.lines || []);
+                    COUNT.textContent = (data2.total || 0) + ' linhas';
+                    STATUS.textContent = 'Atualizado: ' + new Date().toLocaleTimeString();
+                });
+                return;
+            }
             if (!data.success) {
                 STATUS.textContent = 'Erro: ' + (data.error || 'desconhecido');
                 return;
