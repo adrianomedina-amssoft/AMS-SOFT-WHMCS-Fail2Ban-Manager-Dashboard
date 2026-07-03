@@ -280,6 +280,7 @@ $statusLabels = [
                     <th>Status</th>
                     <th>Criado em</th>
                     <th>Resolvido em</th>
+                    <th>Ações</th>
                 </tr>
             </thead>
             <tbody>
@@ -306,6 +307,14 @@ $statusLabels = [
                     </td>
                     <td><?= $e($s['created_at']  ?? '-') ?></td>
                     <td><?= $e($s['resolved_at'] ?? '-') ?></td>
+                    <td>
+                        <button class="btn btn-xs btn-info amsfb-evidence-btn"
+                                data-id="<?= (int)$s['id'] ?>"
+                                data-evidence="<?= $e(json_encode($s['evidence'] ?? [])) ?>"
+                                title="Ver evidências">
+                            &#128220; Evidências
+                        </button>
+                    </td>
                 </tr>
             <?php endforeach; ?>
             </tbody>

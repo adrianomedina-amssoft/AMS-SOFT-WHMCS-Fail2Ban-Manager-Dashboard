@@ -140,6 +140,7 @@ function amssoft_fail2ban_deactivate(): array
         Capsule::schema()->dropIfExists('mod_amssoft_fail2ban_logs');
         Capsule::schema()->dropIfExists('mod_amssoft_fail2ban_config');
         Capsule::schema()->dropIfExists('mod_amssoft_fail2ban_ai_suggestions');
+        Capsule::schema()->dropIfExists('mod_amssoft_fail2ban_geo_cache');
         return ['status' => 'success', 'description' => 'AMS Fail2Ban Manager removido.'];
     } catch (\Exception $e) {
         return ['status' => 'error', 'description' => $e->getMessage()];

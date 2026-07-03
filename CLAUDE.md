@@ -591,7 +591,6 @@ Procurar por `[SEC-N]` nos comentários para encontrar cada medida de segurança
 
 | Problema | Solução |
 |---|---|
-| `deactivate()` não remove tabela `geo_cache` | Bug conhecido: `amssoft_fail2ban_deactivate()` dropa logs/config/ai_suggestions mas não geo_cache. Corrigir adicionando `Capsule::schema()->dropIfExists('mod_amssoft_fail2ban_geo_cache');` |
 | sudo não instalado | `apt-get install -y sudo` |
 | fail2ban não instalado | `apt-get install -y fail2ban` |
 | fail2ban não inicia (sshd sem log) | `[sshd] enabled = false` no jail.local |
