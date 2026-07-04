@@ -156,6 +156,11 @@ class LogViewerController
 
     // -----------------------------------------------------------------------
     // AJAX: analisar log com IA
+    // NOTA: este endpoint é intencionalmente isolado — lê últimas N linhas
+    // via readLines() (ad-hoc, sem watermark) e NÃO usa LogLock nem sessão
+    // de batch. Não compete com AutoBanEngine/cron pelo mesmo offset.
+    // Dedup por IP em saveSuggestion() previne inflação do gate de ocorrências
+    // em cliques repetidos no mesmo trecho.
     // -----------------------------------------------------------------------
 
     private function ajaxAnalyze(array $post): string
@@ -187,7 +192,24 @@ class LogViewerController
         $analyzer    = new AIAnalyzer($aiConfig['provider'], $aiConfig['api_key'], $aiConfig['model'], $aiConfig['base_url'], $aiConfig['protocol'] ?? '');
         $client      = $this->router->makeClient();
         $engine      = new AutoBanEngine($analyzer, $client);
-        $suggestions = $analyzer->analyze($rawLines);
+
+        $truncated   = false;
+        $parseFailed = false;
+
+        try {
+            $suggestions = $analyzer->analyze($rawLines);
+        } catch (\AMS\Fail2Ban\TruncatedResponseException $e) {
+            $suggestions = [];
+            $truncated   = true;
+            $parseFailed = true;
+            Database::logEvent('', '', 'ai_parse_error',
+                "Truncated: {$path}: " . $e->getMessage(), null);
+        } catch (\AMS\Fail2Ban\InvalidResponseException $e) {
+            $suggestions = [];
+            $parseFailed = true;
+            Database::logEvent('', '', 'ai_parse_error',
+                "InvalidJSON: {$path}: " . $e->getMessage(), null);
+        }
 
         $saved    = 0;
         $skipped  = 0;
@@ -230,6 +252,7 @@ class LogViewerController
                 continue;
             }
 
+            $suggestion['source_log'] = $path; // propagar log de origem (Bug 1 fix)
             $engine->saveSuggestion($suggestion, 'pending');
             $skipIPs[] = $ip; // dedup em memória para múltiplas ocorrências no mesmo arquivo
             $saved++;
@@ -238,7 +261,10 @@ class LogViewerController
         // Atualizar status de ping
         Database::setConfig('ai_last_ping_ok', '1');
 
-        if ($saved > 0) {
+        if ($truncated) {
+            $msg = "⚠ Resposta truncada pela IA (limite de tokens).";
+            if ($saved > 0) $msg .= " {$saved} sugestão(ões) parcial(is) salva(s).";
+        } elseif ($saved > 0) {
             $msg = "{$saved} sugestão(ões) salva(s). Acesse a aba IA para revisar.";
         } elseif ($skipped > 0) {
             $msg = "Nenhuma sugestão nova — {$skipped} IP(s) já pendente(s) ou banido(s).";
@@ -247,11 +273,13 @@ class LogViewerController
         }
 
         return json_encode([
-            'success'     => true,
-            'total_found' => count($suggestions),
-            'saved'       => $saved,
-            'skipped'     => $skipped,
-            'message'     => $msg,
+            'success'      => true,
+            'total_found'  => count($suggestions),
+            'saved'        => $saved,
+            'skipped'      => $skipped,
+            'message'      => $msg,
+            'truncated'    => $truncated,
+            'parse_failed' => $parseFailed,
         ]);
     }
 
