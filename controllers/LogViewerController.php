@@ -209,6 +209,22 @@ class LogViewerController
             $parseFailed = true;
             Database::logEvent('', '', 'ai_parse_error',
                 "InvalidJSON: {$path}: " . $e->getMessage(), null);
+        } catch (\Throwable $e) {
+            // error_log() — rastreabilidade sem poluir tabela de eventos de negócio
+            error_log('[AMSFB LogViewer] analyze error: ' . $e->getMessage());
+
+            $errMsg = 'Erro ao chamar a API de análise.';
+            if (stripos($e->getMessage(), 'timed out') !== false
+                || stripos($e->getMessage(), 'timeout') !== false) {
+                $errMsg .= ' Timeout — tente novamente em alguns segundos.';
+            } else {
+                $errMsg .= ' Verifique a configuração do provedor em IA > Configurações.';
+            }
+
+            return json_encode([
+                'success' => false,
+                'error'   => $errMsg,
+            ]);
         }
 
         $saved    = 0;
