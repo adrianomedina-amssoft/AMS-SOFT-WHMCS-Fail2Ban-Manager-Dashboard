@@ -193,38 +193,60 @@ class LogViewerController
         $client      = $this->router->makeClient();
         $engine      = new AutoBanEngine($analyzer, $client);
 
-        $truncated   = false;
+        // Auto-retry em caso de truncamento: reduz linhas pela metade.
+        // Mitigação parcial — se todas as tentativas truncarem, retorna
+        // banner de truncamento sem sugestões (limitação: TruncatedResponseException
+        // não carrega resultado parcial).
+        $maxAttempts = 3; // tentativa original + 2 retries (100→50→25)
+        $attempt = 0;
+        $suggestions = [];
+        $truncated = false;
         $parseFailed = false;
 
-        try {
-            $suggestions = $analyzer->analyze($rawLines);
-        } catch (\AMS\Fail2Ban\TruncatedResponseException $e) {
-            $suggestions = [];
-            $truncated   = true;
-            $parseFailed = true;
-            Database::logEvent('', '', 'ai_parse_error',
-                "Truncated: {$path}: " . $e->getMessage(), null);
-        } catch (\AMS\Fail2Ban\InvalidResponseException $e) {
-            $suggestions = [];
-            $parseFailed = true;
-            Database::logEvent('', '', 'ai_parse_error',
-                "InvalidJSON: {$path}: " . $e->getMessage(), null);
-        } catch (\Throwable $e) {
-            // error_log() — rastreabilidade sem poluir tabela de eventos de negócio
-            error_log('[AMSFB LogViewer] analyze error: ' . $e->getMessage());
+        while ($attempt < $maxAttempts) {
+            $truncated = false;
+            $parseFailed = false;
 
-            $errMsg = 'Erro ao chamar a API de análise.';
-            if (stripos($e->getMessage(), 'timed out') !== false
-                || stripos($e->getMessage(), 'timeout') !== false) {
-                $errMsg .= ' Timeout — tente novamente em alguns segundos.';
-            } else {
-                $errMsg .= ' Verifique a configuração do provedor em IA > Configurações.';
+            try {
+                $suggestions = $analyzer->analyze($rawLines);
+                break; // sucesso — sair do loop
+            } catch (\AMS\Fail2Ban\TruncatedResponseException $e) {
+                $truncated = true;
+                $parseFailed = true;
+                Database::logEvent('', '', 'ai_parse_error',
+                    "Truncated: {$path} (attempt {$attempt}/{$maxAttempts}): "
+                    . $e->getMessage(), null);
+
+                $rawLines = array_slice($rawLines, 0, (int)(count($rawLines) / 2));
+                if (empty($rawLines)) {
+                    Database::logEvent('', '', 'ai_parse_error',
+                        "Retry esgotado: {$path} — conteúdo insuficiente após "
+                        . $attempt . " tentativas", null);
+                    break;
+                }
+                $attempt++;
+                continue;
+            } catch (\AMS\Fail2Ban\InvalidResponseException $e) {
+                $parseFailed = true;
+                Database::logEvent('', '', 'ai_parse_error',
+                    "InvalidJSON: {$path}: " . $e->getMessage(), null);
+                break;
+            } catch (\Throwable $e) {
+                error_log('[AMSFB LogViewer] analyze error: ' . $e->getMessage());
+
+                $errMsg = 'Erro ao chamar a API de análise.';
+                if (stripos($e->getMessage(), 'timed out') !== false
+                    || stripos($e->getMessage(), 'timeout') !== false) {
+                    $errMsg .= ' Timeout — tente novamente em alguns segundos.';
+                } else {
+                    $errMsg .= ' Verifique a configuração do provedor em IA > Configurações.';
+                }
+
+                return json_encode([
+                    'success' => false,
+                    'error'   => $errMsg,
+                ]);
             }
-
-            return json_encode([
-                'success' => false,
-                'error'   => $errMsg,
-            ]);
         }
 
         $saved    = 0;
