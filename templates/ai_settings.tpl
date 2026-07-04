@@ -172,6 +172,27 @@
     </div>
 </div>
 
+<div class="panel panel-default">
+    <div class="panel-heading"><strong>&#128260; Lotes por Sessão de Análise</strong></div>
+    <div class="panel-body">
+        <div class="form-group">
+            <label>Máximo de lotes por sessão</label>
+            <select name="ai_batch_max_per_session" class="form-control" style="max-width:200px;">
+                <?php foreach ([10, 20, 50, 100] as $n): ?>
+                <option value="<?= $n ?>" <?= ($ai_batch_max_per_session ?? 20) === $n ? 'selected' : '' ?>>
+                    <?= $n ?> lotes
+                </option>
+                <?php endforeach; ?>
+            </select>
+            <span class="help-block">
+                Quantidade máxima de chamadas à IA por log numa única sessão de análise.
+                1 lote = ai_log_lines linhas. Quando atingido, o restante é processado na próxima sessão (cron ou manual).
+                <br><strong>Default: 20</strong> — conservador para não monopolizar tokens em logs atípicos.
+            </span>
+        </div>
+    </div>
+</div>
+
 <!-- =========================================================
      Card 4: Modo de operação
      ========================================================= -->

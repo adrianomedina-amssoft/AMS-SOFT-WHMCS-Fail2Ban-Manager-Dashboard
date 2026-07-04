@@ -232,6 +232,87 @@ class Database
     }
 
     // -----------------------------------------------------------------------
+    // Batch session helpers (processar log até esgotar)
+    // -----------------------------------------------------------------------
+
+    /**
+     * Lê e decodifica o JSON da sessão de batch para um log.
+     * Retorna null se a sessão não existir ou for JSON inválido.
+     */
+    public static function getBatchSession(string $logPath): ?array
+    {
+        $key = 'ai_batch_session_' . md5($logPath);
+        $raw = self::getConfig($key, null);
+        if ($raw === null) {
+            return null;
+        }
+        $data = json_decode($raw, true);
+        return is_array($data) ? $data : null;
+    }
+
+    /**
+     * Cria ou reseta a sessão de batch para um log.
+     * Owner é informativo (debug/rastreabilidade), não participa do gate.
+     * BatchToken é o identificador de continuação (único por execução do loop).
+     */
+    public static function setBatchSession(string $logPath, string $owner, int $batches = 0, string $batchToken = ''): void
+    {
+        $key = 'ai_batch_session_' . md5($logPath);
+        $data = [
+            'owner'       => $owner,
+            'started'     => time(),
+            'heartbeat'   => time(),
+            'batches'     => $batches,
+            'batch_token' => $batchToken,
+        ];
+        self::setConfig($key, json_encode($data));
+    }
+
+    /**
+     * Remove a sessão de batch (cleanup após conclusão ou timeout).
+     */
+    public static function clearBatchSession(string $logPath): void
+    {
+        $key = 'ai_batch_session_' . md5($logPath);
+        Capsule::table('mod_amssoft_fail2ban_config')
+            ->where('key', $key)
+            ->delete();
+    }
+
+    /**
+     * Incrementa o contador de batches na sessão (ler → incrementar → escrever).
+     * Operação read-modify-write — segura porque roda dentro de uma sessão
+     * que já foi adquirida via LogLock (outro processo pulou este log).
+     * Retorna o novo valor de batches.
+     */
+    public static function incrementBatchSessionBatches(string $logPath): int
+    {
+        $session = self::getBatchSession($logPath);
+        if ($session === null) {
+            return 0;
+        }
+        $session['batches'] = ($session['batches'] ?? 0) + 1;
+        $session['heartbeat'] = time();
+        $key = 'ai_batch_session_' . md5($logPath);
+        self::setConfig($key, json_encode($session));
+        return $session['batches'];
+    }
+
+    /**
+     * Atualiza apenas o heartbeat da sessão (mantém owner/batches intactos).
+     */
+    public static function updateBatchSessionHeartbeat(string $logPath): void
+    {
+        $session = self::getBatchSession($logPath);
+        if ($session === null) {
+            return;
+        }
+        $session['heartbeat'] = time();
+        $key = 'ai_batch_session_' . md5($logPath);
+        self::setConfig($key, json_encode($session));
+    }
+
+    // -----------------------------------------------------------------------
     // Sugestões da IA
     // -----------------------------------------------------------------------
 

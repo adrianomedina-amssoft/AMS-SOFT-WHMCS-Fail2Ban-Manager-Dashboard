@@ -24,6 +24,9 @@ $statusLabels = [
     <button id="amsfb-run-now-btn" class="btn btn-sm btn-primary">
         &#9654; Analisar agora
     </button>
+    <button id="amsfb-stop-btn" class="btn btn-sm btn-danger" style="display:none;">
+        &#9726; Parar
+    </button>
     <a href="<?= $e($modulelink . '&action=ai_settings') ?>" class="btn btn-sm btn-default">&#9881; Configurações</a>
 </div>
 
@@ -697,6 +700,8 @@ $statusLabels = [
                 var totalFiltered = 0;
                 var failedLogs = [];
                 var truncatedLogs = [];
+                var cancelLoop = false; // botão "Parar"
+                var totalBatches = 0;  // contagem total de lotes processados
                 var pendingTbody = document.getElementById('amsfb-pending-tbody');
                 var badge = document.querySelector('.panel-heading .badge');
 
@@ -705,14 +710,41 @@ $statusLabels = [
                 var currentDelay = baseDelay;
                 var MAX_DELAY = 30000; // max 30s (backoff máximo)
 
-                // 2. Analisar cada log sequencialmente
+                // Botão Parar
+                var stopBtn = document.getElementById('amsfb-stop-btn');
+                if (stopBtn) {
+                    stopBtn.style.display = 'inline-block';
+                    stopBtn.addEventListener('click', function () {
+                        cancelLoop = true;
+                        stopBtn.disabled = true;
+                        stopBtn.innerHTML = '&#9208; Parando...';
+                    });
+                }
+
+                // 2. Analisar cada log sequencialmente (com loop de batch por log)
                 function analyzeNext() {
+                    // Verificar cancelamento
+                    if (cancelLoop) {
+                        runNowBtn.disabled = false;
+                        runNowBtn.innerHTML = '&#9654; Analisar agora';
+                        if (stopBtn) { stopBtn.style.display = 'none'; stopBtn.disabled = false; stopBtn.innerHTML = '&#9726; Parar'; }
+                        var msg = '⏹ Análise interrompida pelo usuário.';
+                        if (totalBatches > 0) msg += '\n' + totalBatches + ' lote(s) processado(s) antes de parar.';
+                        if (totalSaved > 0) msg += '\n' + totalSaved + ' sugestão(ões) encontrada(s).';
+                        alert(msg);
+                        return;
+                    }
+
                     if (current >= logs.length) {
                         // Finalizado
                         runNowBtn.disabled = false;
                         runNowBtn.innerHTML = '&#9654; Analisar agora';
+                        if (stopBtn) { stopBtn.style.display = 'none'; stopBtn.disabled = false; stopBtn.innerHTML = '&#9726; Parar'; }
                         var analyzed = total - totalSkipped - totalFiltered - failedLogs.length;
                         var msg = '✓ Análise concluída — ' + analyzed + ' log(s) analisado(s)';
+                        if (totalBatches > 1) {
+                            msg += ' (' + totalBatches + ' lotes processados)';
+                        }
                         if (totalSkipped > 0) {
                             msg += ', ' + totalSkipped + ' pulado(s) (sem dados novos)';
                         }
@@ -749,33 +781,61 @@ $statusLabels = [
                     current++;
 
                     // Skip client-side: log sem conteúdo novo (watermark em dia).
-                    // has_new é calculado no list_logs — pode ficar stale se o log
-                    // crescer entre list_logs e este analyze_log, mas é aceitável:
-                    // capturado no próximo ciclo.
                     if (log.has_new === false) {
                         totalSkipped++;
                         runNowBtn.innerHTML = '&#9203; Pulando: ' + (log.label || log.path) + ' (' + current + '/' + total + ')...';
-                        // Delay mínimo para o navegador renderizar o progresso visual
                         setTimeout(analyzeNext, 20);
                         return;
                     }
 
-                    runNowBtn.innerHTML = '&#9203; Analisando: ' + (log.label || log.path) + ' (' + current + '/' + total + ')...';
+                    // Iniciar loop de batch para este log (sem token na primeira chamada)
+                    analyzeLogLoop(log, 0, '');
+                }
+
+                // Loop de batch: analisa um log repetidamente enquanto has_more=true
+                // batchToken: token da sessão anterior (vazio na primeira chamada)
+                function analyzeLogLoop(log, batchNum, batchToken) {
+                    if (cancelLoop) {
+                        setTimeout(analyzeNext, 20);
+                        return;
+                    }
+
+                    batchNum = batchNum || 1;
+                    var batchLabel = batchNum > 1 ? ' (lote ' + batchNum + ')' : '';
+                    runNowBtn.innerHTML = '&#9203; Analisando: ' + (log.label || log.path) + batchLabel + ' (' + current + '/' + total + ')...';
+
+                    // Enviar batch_token para identificação de continuação
+                    var postData = { path: log.path };
+                    if (batchToken) postData.batch_token = batchToken;
 
                     function doAnalyzeLog(_csrfRetried) {
-                    window.AMSFB.post('ai', 'analyze_log', { path: log.path }, function (result) {
-                        // Retry once on CSRF failure (token may have been rotated)
+                    window.AMSFB.post('ai', 'analyze_log', postData, function (result) {
+                        // Retry once on CSRF failure
                         if (!result.success && result.error && result.error.indexOf('CSRF') !== -1 && !_csrfRetried) {
                             doAnalyzeLog(true);
                             return;
                         }
+
+                        // Session active (outro processo está analisando este log)
+                        if (!result.success && result.error === 'session_active') {
+                            // Mostrar banner amigável em vez de erro crua
+                            var banner = document.createElement('div');
+                            banner.className = 'alert alert-warning';
+                            banner.style.cssText = 'position:fixed;top:60px;left:50%;transform:translateX(-50%);z-index:9999;max-width:600px;box-shadow:0 2px 10px rgba(0,0,0,0.2);';
+                            banner.innerHTML = '<strong>&#9208; Análise já em andamento</strong><br>' + escapeHtml(result.error_msg || 'Outro processo está analisando este log.') + '<br><small>Aguarde a conclusão ou recarregue a página.</small>';
+                            document.body.appendChild(banner);
+                            setTimeout(function () { banner.remove(); }, 10000);
+                            // Pular para próximo log
+                            setTimeout(analyzeNext, currentDelay);
+                            return;
+                        }
+
                         // Erros que impediram o processamento
                         if (!result.success) {
                             var reason = result.error_msg || result.error || 'Erro desconhecido';
                             var delayMs = currentDelay;
                             if (result.error === 'rate_limited') {
                                 reason = 'Rate limit do provedor';
-                                // 429: respeitar retry_after do servidor (não limitar por MAX_DELAY)
                                 delayMs = (result.retry_after || 60) * 1000;
                             }
                             failedLogs.push({ path: log.path, label: log.label || log.path, reason: reason });
@@ -795,14 +855,16 @@ $statusLabels = [
                                 }, 1000);
                             }
 
+                            // Em caso de erro, pular para próximo log (não encadear no mesmo)
                             setTimeout(analyzeNext, delayMs);
                             return;
                         }
 
                         // Sucesso: resetar delay para base
                         currentDelay = baseDelay;
+                        totalBatches++;
 
-                        // Log filtrado (pre-filter removeu todas as linhas) ou pulado (sem conteúdo novo)
+                        // Log filtrado ou pulado
                         if (result.filtered) {
                             totalFiltered++;
                         } else if (result.message) {
@@ -814,20 +876,18 @@ $statusLabels = [
                             truncatedLogs.push(log.path);
                         }
 
+                        // Adicionar sugestões na tabela (mesmo código anterior)
                         if (result.success && result.suggestions && result.suggestions.length > 0) {
                             totalSaved += result.saved;
 
-                            // Adicionar linhas na tabela
                             result.suggestions.forEach(function (s) {
                                 if (!pendingTbody) return;
-                                // Verificar se já existe (dedup visual)
                                 if (document.getElementById('amsfb-row-' + s.id)) return;
 
                                 var tr = document.createElement('tr');
                                 tr.id = 'amsfb-row-' + s.id;
                                 tr.setAttribute('data-country-code', '');
 
-                                // Botões de ação (mesmos da carga inicial PHP)
                                 var actionHtml = '<button class="btn btn-xs btn-success amsfb-approve-btn" data-id="' + s.id + '" title="Banir este IP">&#128683; Banir IP</button> '
                                     + '<button class="btn btn-xs btn-danger amsfb-reject-btn" data-id="' + s.id + '" title="Rejeitar sugestão">&#10007; Rejeitar</button> '
                                     + '<button class="btn btn-xs btn-info amsfb-evidence-btn" data-id="' + s.id + '" data-evidence="' + escapeHtml(JSON.stringify(s.evidence || [])) + '" title="Ver evidências">&#128220; Evidências</button> ';
@@ -856,26 +916,39 @@ $statusLabels = [
                                     + '<td>' + escapeHtml(s.created_at || '-') + '</td>'
                                     + '<td class="amsfb-action-btns">' + actionHtml + '</td>';
 
-                                // Inserir no início da tabela
                                 if (pendingTbody.firstChild) {
                                     pendingTbody.insertBefore(tr, pendingTbody.firstChild);
                                 } else {
                                     pendingTbody.appendChild(tr);
                                 }
 
-                                // Bindar eventos (mesmos da carga inicial PHP)
                                 bindAllHandlers(tr);
                             });
 
-                            // Atualizar badge
                             if (badge) {
                                 var count = pendingTbody.querySelectorAll('tr').length;
                                 badge.textContent = count;
                             }
                         }
 
-                        // Próximo log (com delay adaptativo)
-                        setTimeout(analyzeNext, currentDelay);
+                        // Verificar se há mais conteúdo (has_more)
+                        if (result.has_more && !cancelLoop) {
+                            // Encadear no mesmo log — progresso visual
+                            var nextBatch = batchNum + 1;
+                            var batchesInfo = result.batches_done ? ' (lote ' + result.batches_done + '/' + result.batch_limit + ')' : '';
+                            runNowBtn.innerHTML = '&#9203; ' + (log.label || log.path) + batchesInfo + ' — mais conteúdo pendente...';
+                            setTimeout(function () { analyzeLogLoop(log, nextBatch, result.batch_token || ''); }, currentDelay);
+                        } else {
+                            // Log esgotou ou teto atingido — próximo log
+                            if (result.batch_limit_reached) {
+                                // Mostrar aviso de teto
+                                var tetoMsg = 'Teto de ' + result.batch_limit + ' lotes atingido para ' + (log.label || log.path) + '.';
+                                tetoMsg += ' Restante será processado na próxima análise.';
+                                // Usar console em vez de alert para não interromper o fluxo
+                                console.warn('[AMSFB] ' + tetoMsg);
+                            }
+                            setTimeout(analyzeNext, currentDelay);
+                        }
                     });
                     }
                     doAnalyzeLog(false);

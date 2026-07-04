@@ -36,6 +36,16 @@ class AutoBanEngine
     }
 
     /**
+     * Retorna identificador único deste processo para rastreabilidade.
+     * Usado como owner na sessão de batch — informativo, NÃO gate de exclusão.
+     * Gate é heartbeat fresh vs. expirado (ver plano, seção 5).
+     */
+    private static function getProcessOwner(): string
+    {
+        return 'cron_' . getmypid();
+    }
+
+    /**
      * Roda análise em todos os logs configurados no módulo.
      * Retorna array com resultados de cada log processado.
      *
@@ -136,12 +146,13 @@ class AutoBanEngine
                 continue;
             }
 
-            // ── Lock por log (previne cron + manual no mesmo arquivo) ────────
+            // ── Fase 1: aquisição atômica da sessão (TOCTOU fix) ──────────
+            // LogLock (flock) protege APENAS a decisão de sessão (curta duração).
+            // Lock é liberado logo após — não durante todo o loop.
             $lockResult = $this->acquireLogLock($path);
-            $logLock    = null; // null = sem lock (modo degradado)
+            $decisionLock = null;
 
             if ($lockResult['fp'] === null && $lockResult['reason'] === 'locked_by_other') {
-                // Outro processo realmente está analisando este log — pular.
                 Database::logEvent(
                     '', '', 'analysis_locked',
                     "Log bloqueado por outro processo: {$path}",
@@ -152,102 +163,131 @@ class AutoBanEngine
             }
 
             if ($lockResult['fp'] === null && $lockResult['reason'] === 'fopen_failed') {
-                // Lock file não pôde ser aberto (permissão do diretório).
-                // Modo degradado: continuar SEM lock — análise funciona,
-                // mas sem proteção de concorrência. Warning já foi logado
-                // por LogLock/detectWebGroup via lock_config_warning.
-                $logLock = null;
+                // Modo degradado: sem lock, decisão de sessão sem proteção atômica.
+                $decisionLock = null;
             } else {
-                $logLock = $lockResult['fp'];
+                $decisionLock = $lockResult['fp'];
             }
 
-            // Lock adquirido com sucesso → log foi acessível.
-            // Marcar ANTES de qualquer verificação subsequente (watermark,
-            // pre-filter, etc.) para que _locked_out só dispare quando
-            // NENHUM lock foi obtido — não quando locks foram obtidos mas
-            // não havia conteúdo relevante.
             $allLocked = false;
 
-            // Garantir liberação do lock mesmo em exceção
+            // Checar sessão de batch ativa — se heartbeat fresh, outro processo é dono.
+            // Owner é informativo, NÃO gate: decisão é apenas heartbeat fresh vs. expirado.
+            $batchSession = Database::getBatchSession($path);
+            $sessionAlive = $batchSession !== null && (time() - $batchSession['heartbeat']) < 120;
+
+            if ($sessionAlive) {
+                // Sessão viva = qualquer processo está ativo neste log — pular.
+                LogLock::release($decisionLock);
+                $results[] = ['log' => $path, 'mode' => 'skipped_batch_active'];
+                continue;
+            }
+
+            // Sessão morta ou inexistente — adquirir (criar/resetar).
+            // Owner único por invocação: rastreável em logs, não é gate.
+            Database::setBatchSession($path, self::getProcessOwner());
+
+            LogLock::release($decisionLock);
+            // Lock de decisão liberado. A partir daqui, a sessão é nossa.
+            // Outros processos verão heartbeat fresh → pular.
+
+            // ── Fase 2: loop de processamento (try/finally para cleanup) ───
+            $maxBatches = (int) Database::getConfig('ai_batch_max_per_session', 20);
+            $forceRereadDone = false; // previne loop infinito em forceReread
+
             try {
+                while (true) {
+                    $session = Database::getBatchSession($path);
+                    $batchCount = $session['batches'] ?? 0;
+                    if ($batchCount >= $maxBatches) {
+                        Database::logEvent(
+                            '', '', 'batch_limit_reached',
+                            "Teto de {$maxBatches} lotes atingido para {$path}.",
+                            null
+                        );
+                        $results[] = ['log' => $path, 'mode' => 'batch_limit_reached', 'batches' => $batchCount];
+                        break;
+                    }
 
-            $currentSize = @filesize($path);
-            if ($currentSize === false) {
-                continue;
-            }
+                    $currentSize = @filesize($path);
+                    if ($currentSize === false) {
+                        break;
+                    }
 
-            // ── Watermark (chave compartilhada com ajaxAnalyzeLog) ─────────
-            // Leitura sem lock — aceita corrida (ver CLAUDE.md "Concorrência").
-            $offsetKey    = 'ai_log_offset.' . md5($path);
-            $storedOffset = (int)Database::getConfig($offsetKey, 0);
+                    // ── Watermark (chave compartilhada com ajaxAnalyzeLog) ─────
+                    $offsetKey    = 'ai_log_offset.' . md5($path);
+                    $storedOffset = (int)Database::getConfig($offsetKey, 0);
 
-            if ($currentSize === $storedOffset) {
-                if (!$forceReread) {
-                    // Nenhum conteúdo novo — pular chamada à IA
-                    continue;
+                    if ($currentSize === $storedOffset) {
+                        if (!$forceReread) {
+                            break; // Nenhum conteúdo novo
+                        }
+                        // forceReread: relê as últimas linhas, mas só uma vez.
+                        // Sem este break, o loop re-lê infinitamente sem incrementar batches
+                        // (offset não avança em forceReread).
+                        if ($forceRereadDone) {
+                            break;
+                        }
+                        $forceRereadDone = true;
+                        $lines = $viewer->readLines($path, $logLineLimit);
+                    } else {
+                        if ($currentSize < $storedOffset) {
+                            $storedOffset = 0;
+                        }
+
+                        $result     = $this->readNewLinesWithOffset($path, $storedOffset, $logLineLimit);
+                        $lines      = $result['lines'];
+                        $readOffset = $result['offset'];
+
+                        Database::setConfig($offsetKey, (string)$readOffset);
+                    }
+
+                    if (empty($lines)) {
+                        break;
+                    }
+
+                    // ── Whitelist pre-filter ───────────────────────────────────
+                    $lines = LogViewer::filterLinesByIPs($lines, $skipIPs);
+
+                    if (empty($lines)) {
+                        break;
+                    }
+
+                    // ── Chamada à IA ─────────────────────────────────────────
+                    $rawSuggestions = $this->analyzer->analyze($lines);
+
+                    // ── Filtros pré-salvamento (método compartilhado) ─────────
+                    $filtered = self::filterSuggestions($rawSuggestions, $skipIPs);
+                    $skipIPs  = array_merge($skipIPs, array_column($filtered['valid'], 'ip'));
+
+                    foreach ($filtered['valid'] as $suggestion) {
+                        $ip     = $suggestion['ip'] ?? '';
+                        $suggestion['source_log'] = $path;
+                        $result = $this->processSuggestion($suggestion, $mode);
+
+                        $resultMode = match (true) {
+                            $mode === 'auto' && $result['banned']     => 'auto',
+                            $mode === 'auto'                          => 'auto_failed',
+                            $mode === 'threshold' && $result['threshold_reached'] && $result['banned'] => 'threshold_triggered',
+                            $mode === 'threshold' && $result['threshold_reached']                      => 'threshold_failed',
+                            $mode === 'threshold'                     => 'threshold_waiting',
+                            default                                   => 'suggestion',
+                        };
+
+                        $results[] = ['id' => $result['id'], 'ip' => $ip, 'mode' => $resultMode];
+                    }
+
+                    // Incrementar contador de batches na sessão (fonte única).
+                    // Também atualiza heartbeat internamente.
+                    Database::incrementBatchSessionBatches($path);
+
+                    // Atualizar skipIPs com novos bans
+                    $skipIPs = array_unique(array_merge($skipIPs, self::loadWhitelist()));
                 }
-                // Análise manual forçada: relê as últimas linhas mesmo sem
-                // conteúdo novo (igual ao Log Viewer). Não atualiza o watermark
-                // para não perder bytes novos que cheguem depois.
-                $lines = $viewer->readLines($path, $logLineLimit);
-            } else {
-                if ($currentSize < $storedOffset) {
-                    // Arquivo rotacionado/truncado — ler do início.
-                    // Edge case: logrotate copytruncate pode causar falso positivo.
-                    // Impacto: reanálise pontual, sem perda de dados. Ver CLAUDE.md.
-                    $storedOffset = 0;
-                }
-
-                $result     = $this->readNewLinesWithOffset($path, $storedOffset, $logLineLimit);
-                $lines      = $result['lines'];
-                $readOffset = $result['offset'];
-
-                // Atualiza o watermark para o offset real lido (via ftell()),
-                // não para o tamanho total do arquivo. Evita pular linhas quando
-                // o log tem mais conteúdo que o limite configurado.
-                Database::setConfig($offsetKey, (string)$readOffset);
-            }
-
-            if (empty($lines)) {
-                continue;
-            }
-
-            // ── Whitelist pre-filter ───────────────────────────────────────────
-            // Remove linhas cujos IPs são todos whitelisted/banidos/pendentes.
-            // Economiza tokens — filterSuggestions() continua como safety net.
-            $lines = LogViewer::filterLinesByIPs($lines, $skipIPs);
-
-            if (empty($lines)) {
-                continue;
-            }
-
-            // ── Chamada à IA ─────────────────────────────────────────────────
-            $rawSuggestions = $this->analyzer->analyze($lines);
-
-            // ── Filtros pré-salvamento (método compartilhado) ───────────────
-            $filtered = self::filterSuggestions($rawSuggestions, $skipIPs);
-            $skipIPs  = array_merge($skipIPs, array_column($filtered['valid'], 'ip'));
-
-            foreach ($filtered['valid'] as $suggestion) {
-                $ip     = $suggestion['ip'] ?? '';
-                $suggestion['source_log'] = $path; // propagar log de origem (Bug 1 fix)
-                $result = $this->processSuggestion($suggestion, $mode);
-
-                // Derivar mode string para backward compatibility no retorno
-                $resultMode = match (true) {
-                    $mode === 'auto' && $result['banned']     => 'auto',
-                    $mode === 'auto'                          => 'auto_failed',
-                    $mode === 'threshold' && $result['threshold_reached'] && $result['banned'] => 'threshold_triggered',
-                    $mode === 'threshold' && $result['threshold_reached']                      => 'threshold_failed',
-                    $mode === 'threshold'                     => 'threshold_waiting',
-                    default                                   => 'suggestion',
-                };
-
-                $results[] = ['id' => $result['id'], 'ip' => $ip, 'mode' => $resultMode];
-            }
-
             } finally {
-                LogLock::release($logLock);
+                // Limpar sessão mesmo em caso de exceção (reduz janela de
+                // 120s para quase zero em erros capturáveis).
+                Database::clearBatchSession($path);
             }
         }
 

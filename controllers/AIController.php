@@ -174,6 +174,7 @@ class AIController
             'ai_auto_create_window_days'       => (int)Database::getConfig('ai_auto_create_window_days', '30'),
             'ai_auto_max_jails_per_day'        => (int)Database::getConfig('ai_auto_max_jails_per_day', '5'),
             'ai_auto_create_min_distinct_ips'  => (int)Database::getConfig('ai_auto_create_min_distinct_ips', '2'),
+            'ai_batch_max_per_session'         => (int)Database::getConfig('ai_batch_max_per_session', '20'),
         ]);
     }
 
@@ -637,6 +638,38 @@ class AIController
         }
         $lockFp = $lockResult['fp'];
 
+        // Checar se há sessão de batch ativa de OUTRO processo/aba.
+        // Identificador de continuação: batch_token (random, único por execução do loop).
+        // NÃO usar session_id() — é compartilhado entre abas do mesmo admin.
+        $batchSession = Database::getBatchSession($path);
+        $sessionAlive = $batchSession !== null && (time() - $batchSession['heartbeat']) < 120;
+        $incomingToken = trim($post['batch_token'] ?? '');
+        $sessionToken  = $batchSession['batch_token'] ?? '';
+        $isMySession   = $sessionAlive && $incomingToken !== '' && hash_equals($sessionToken, $incomingToken);
+
+        if ($sessionAlive && !$isMySession) {
+            // Outro processo, outra aba, ou token ausente — bloquear.
+            \AMS\Fail2Ban\LogLock::release($lockFp);
+            return json_encode([
+                'success'    => false,
+                'log'        => $path,
+                'error'      => 'session_active',
+                'error_msg'  => 'Análise já em andamento desde ' . date('H:i', $batchSession['started']) . '. Aguarde a conclusão ou recarregue a página.',
+                'started'    => $batchSession['started'],
+                'owner'      => $batchSession['owner'] ?? 'unknown',
+            ]);
+        }
+
+        if ($isMySession) {
+            // Continuação legítima (mesmo token) — atualizar heartbeat.
+            Database::updateBatchSessionHeartbeat($path);
+            $batchToken = $sessionToken;
+        } else {
+            // Nova sessão — gerar token único e criar sessão.
+            $batchToken = bin2hex(random_bytes(16)); // 32 hex chars
+            Database::setBatchSession($path, 'manual_' . session_id(), 0, $batchToken);
+        }
+
         try {
 
         // Watermark compartilhado entre AutoBanEngine (cron) e ajaxAnalyzeLog (manual).
@@ -654,6 +687,7 @@ class AIController
         // (ex: log é root:adm 640 e www-data não está no grupo adm).
         // Sem este check, @filesize() retorna false → 0 < storedOffset → watermark resetado.
         if (!is_readable($path)) {
+            Database::clearBatchSession($path);
             return json_encode([
                 'success'    => false,
                 'log'        => $path,
@@ -663,6 +697,8 @@ class AIController
         }
 
         if (!$force && $currentSize === $storedOffset) {
+            // Sem conteúdo novo — limpar sessão de batch
+            Database::clearBatchSession($path);
             return json_encode([
                 'success'    => true,
                 'log'        => $path,
@@ -670,6 +706,10 @@ class AIController
                 'saved'      => 0,
                 'skipped'    => 0,
                 'message'    => 'Sem conteúdo novo.',
+                'has_more'   => false,
+                'batches_done' => 0,
+                'batch_limit'  => (int) Database::getConfig('ai_batch_max_per_session', 20),
+                'batch_token'  => '',
             ]);
         }
 
@@ -692,6 +732,7 @@ class AIController
         }
 
         if (empty($lines)) {
+            Database::clearBatchSession($path);
             return json_encode([
                 'success'    => true,
                 'log'        => $path,
@@ -699,6 +740,10 @@ class AIController
                 'saved'      => 0,
                 'skipped'    => 0,
                 'message'    => 'Log vazio ou ilegível.',
+                'has_more'   => false,
+                'batches_done' => 0,
+                'batch_limit'  => (int) Database::getConfig('ai_batch_max_per_session', 20),
+                'batch_token'  => '',
             ]);
         }
 
@@ -731,6 +776,18 @@ class AIController
             if (!$force) {
                 Database::setConfig($offsetKey, (string) $readOffset);
             }
+
+            // Batch session: avançou watermark mas sem sugestões — checar has_more
+            $maxBatches  = (int) Database::getConfig('ai_batch_max_per_session', 20);
+            $batchesDone = Database::incrementBatchSessionBatches($path);
+            $postFileSize = @filesize($path) ?: 0;
+            $postOffset   = (int) Database::getConfig($offsetKey, 0);
+            $hasMore      = ($postFileSize > $postOffset) && ($batchesDone < $maxBatches);
+
+            if (!$hasMore) {
+                Database::clearBatchSession($path);
+            }
+
             return json_encode([
                 'success'    => true,
                 'log'        => $path,
@@ -739,6 +796,10 @@ class AIController
                 'skipped'    => 0,
                 'message'    => 'Sem conteúdo novo após filtro de IPs.',
                 'filtered'   => true,
+                'has_more'   => $hasMore,
+                'batches_done' => $batchesDone,
+                'batch_limit'  => $maxBatches,
+                'batch_token'  => $batchToken,
             ]);
         }
 
@@ -820,14 +881,42 @@ class AIController
             Database::setConfig('ai_analysis_session_start', (string) time());
         }
 
+        // ── Batch session: incrementar e checar has_more ─────────────────
+        $maxBatches  = (int) Database::getConfig('ai_batch_max_per_session', 20);
+        $batchesDone = Database::incrementBatchSessionBatches($path);
+
+        // has_more: há conteúdo não processado E teto não atingido
+        $finalSize   = @filesize($path) ?: 0;
+        $finalOffset = (int) Database::getConfig($offsetKey, 0);
+        $hasMore     = !$parseFailed && ($finalSize > $finalOffset) && ($batchesDone < $maxBatches);
+
+        // Se não há mais conteúdo ou teto atingido, limpar sessão
+        $batchLimitReached = false;
+        if (!$hasMore) {
+            Database::clearBatchSession($path);
+            if ($batchesDone >= $maxBatches && $finalSize > $finalOffset) {
+                $batchLimitReached = true;
+                Database::logEvent(
+                    '', '', 'batch_limit_reached',
+                    "Teto de {$maxBatches} lotes atingido para {$path}. Restante será processado na próxima sessão.",
+                    null
+                );
+            }
+        }
+
         return json_encode([
-            'success'      => true,
-            'log'          => $path,
-            'suggestions'  => $savedList,
-            'saved'        => count($savedList),
-            'skipped'      => $filtered['skipped'],
-            'parse_failed' => $parseFailed,
-            'truncated'    => $truncated,
+            'success'            => true,
+            'log'                => $path,
+            'suggestions'        => $savedList,
+            'saved'              => count($savedList),
+            'skipped'            => $filtered['skipped'],
+            'parse_failed'       => $parseFailed,
+            'truncated'          => $truncated,
+            'has_more'           => $hasMore,
+            'batches_done'       => $batchesDone,
+            'batch_limit'        => $maxBatches,
+            'batch_limit_reached'=> $batchLimitReached,
+            'batch_token'        => $batchToken,
         ]);
 
         } finally {
@@ -1061,6 +1150,13 @@ class AIController
         $rawDistinct = trim($post['ai_auto_create_min_distinct_ips'] ?? '');
         $minDistinctIps = $rawDistinct === '' ? 2 : max(1, min(20, (int)$rawDistinct));
         Database::setConfig('ai_auto_create_min_distinct_ips', (string)$minDistinctIps);
+
+        // Batch max per session (processar log até esgotar)
+        $validBatchMax = [10, 20, 50, 100];
+        $batchMax = (int)($post['ai_batch_max_per_session'] ?? 20);
+        if (in_array($batchMax, $validBatchMax, true)) {
+            Database::setConfig('ai_batch_max_per_session', (string)$batchMax);
+        }
     }
 
     /** Decodifica o campo evidence (JSON) de cada sugestão. */
