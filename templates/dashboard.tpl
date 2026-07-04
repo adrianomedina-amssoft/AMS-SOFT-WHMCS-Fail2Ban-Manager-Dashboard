@@ -53,6 +53,27 @@
     </div>
 </div>
 
+<?php if (($auto_jails_today ?? 0) > 0): ?>
+<div class="alert alert-info" style="margin-top:16px;">
+    <strong>&#128736; <?= (int)$auto_jails_today ?> jail(s) auto-criado(s) hoje</strong>
+    — a IA criou filtros/jails automaticamente para padrões de ataque recorrentes.
+    <?php if (!empty($auto_jails_recent)): ?>
+    <ul style="margin:8px 0 0 16px; padding:0;">
+        <?php foreach ($auto_jails_recent as $evt): ?>
+        <li>
+            <code><?= $e($evt['jail']) ?></code>
+            — <?= $e($evt['reason'] ?? '') ?>
+            <small class="text-muted">(<?= $e($evt['timestamp']) ?>)</small>
+        </li>
+        <?php endforeach; ?>
+    </ul>
+    <?php endif; ?>
+    <a href="<?= $e($modulelink) ?>&action=reports&filter_action=jail_created" class="btn btn-sm btn-default" style="margin-top:8px;">
+        Ver histórico completo
+    </a>
+</div>
+<?php endif; ?>
+
 <!-- Charts row -->
 <div class="row" style="margin-top:24px;">
     <div class="col-md-7">

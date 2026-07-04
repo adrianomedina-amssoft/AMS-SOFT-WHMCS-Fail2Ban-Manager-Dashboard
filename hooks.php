@@ -86,10 +86,16 @@ add_hook('AfterCronJob', 1, function (): void {
         $client = new \AMS\Fail2Ban\Fail2BanClient($sudoPath, $clientBin);
         $engine = new \AMS\Fail2Ban\AutoBanEngine($analyzer, $client);
 
-        $engine->runAnalysis();
+        $result = $engine->runAnalysis();
 
-        \AMS\Fail2Ban\Database::setConfig('ai_last_run', (string)time());
-        \AMS\Fail2Ban\Database::setConfig("ai_provider_{$config['provider']}_last_ping", '1');
+        // Só atualiza ai_last_run se a análise realmente executou.
+        // Se todos os logs estavam bloqueados por outro processo (lock),
+        // não atualiza — o próximo cron (4min) tenta novamente em vez de
+        // esperar ai_interval_minutes (default 30min).
+        if (!isset($result['_locked_out'])) {
+            \AMS\Fail2Ban\Database::setConfig('ai_last_run', (string)time());
+            \AMS\Fail2Ban\Database::setConfig("ai_provider_{$config['provider']}_last_ping", '1');
+        }
     } catch (\Throwable $e) {
         // Falha silenciosa — não interrompe o cron do WHMCS
     }

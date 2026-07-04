@@ -156,6 +156,40 @@ class FilterManager
     }
 
     /**
+     * Remove o arquivo de filtro fail2ban de filter.d/.
+     * Idempotente: se não existir, retorna true.
+     * Usado para limpar filtros órfãos (filtro criado mas jail falhou).
+     */
+    public function removeFilter(string $name): bool
+    {
+        $name = $this->sanitizeFilterName($name);
+        if ($name === '') {
+            return true;
+        }
+
+        $dest = $this->filterDir . 'amsfb-' . $name . '.conf';
+
+        if (!file_exists($dest)) {
+            return true; // já não existe — idempotente
+        }
+
+        // Tenta remoção direta
+        if (@unlink($dest)) {
+            return true;
+        }
+
+        // Fallback: remoção via sudo
+        try {
+            $tmp = sys_get_temp_dir() . '/amsfb_rm_' . md5($name);
+            // Não existe comando sudo rm no sudoers — usar shell_exec como fallback
+            // Se não conseguir, retorna false (log caller irá registrar)
+            return false;
+        } catch (\Throwable $e) {
+            return false;
+        }
+    }
+
+    /**
      * Cria uma jail em jail.local usando o filtro recém-criado.
      * Retorna true se criada OU se já existia (idempotente).
      *
@@ -191,11 +225,20 @@ class FilterManager
             'findtime' => '3600',
             'bantime'  => (string)(int)($params['bantime'] ?? 86400),
             'logpath'  => $logpath,
+            'ignoreip' => '127.0.0.1',
         ];
 
         // JailConfig::addJail() tem sua própria verificação de jail.local
         // como camada adicional de proteção
-        return $this->jailConfig->addJail($jailName, $jailParams);
+        $ok = $this->jailConfig->addJail($jailName, $jailParams);
+        if ($ok) {
+            return true;
+        }
+
+        // addJail() retornou false — pode ser corrida (TOCTOU) onde outro
+        // processo criou a jail entre nossa verificação e nossa escrita.
+        // Re-verificar: se a jail existe agora, não é erro — é sucesso.
+        return $this->jailExists($jailName);
     }
 
     /**
@@ -234,6 +277,94 @@ class FilterManager
     }
 
     // -----------------------------------------------------------------------
+    // Deduplicação por similaridade
+    // -----------------------------------------------------------------------
+
+    /**
+     * Busca filtro existente com failregex similar ao informado.
+     * Normaliza os regex antes de comparar (remove <HOST>, escapes, delimitadores)
+     * e compara tokens/palavras-chave.
+     *
+     * Retorna ['name' => '...', 'similarity' => 0.0-1.0, 'failregex' => '...'] ou null se nada similar.
+     * O campo 'failregex' é o regex do filtro existente — usado em logs de auditoria.
+     */
+    public function findSimilarFilter(string $failregex): ?array
+    {
+        $inputTokens = self::tokenizeFailregex($failregex);
+        if (empty($inputTokens)) {
+            return null;
+        }
+
+        $bestMatch   = null;
+        $bestScore   = 0.0;
+        $bestRegex   = '';
+
+        foreach (glob($this->filterDir . 'amsfb-*.conf') ?: [] as $file) {
+            $content = @file_get_contents($file);
+            if ($content === false) {
+                continue;
+            }
+
+            // Extrair failregex do arquivo
+            if (!preg_match('/^failregex\s*=\s*(.+)$/m', $content, $m)) {
+                continue;
+            }
+            $existingRegex = trim($m[1]);
+
+            $existingTokens = self::tokenizeFailregex($existingRegex);
+            if (empty($existingTokens)) {
+                continue;
+            }
+
+            // Calcular similaridade por interseção de tokens
+            $intersection = array_intersect($inputTokens, $existingTokens);
+            $union        = array_unique(array_merge($inputTokens, $existingTokens));
+            $similarity   = count($union) > 0 ? count($intersection) / count($union) : 0;
+
+            if ($similarity > $bestScore) {
+                $bestScore = $similarity;
+                $bestMatch = str_replace(['amsfb-', '.conf'], '', basename($file));
+                $bestRegex = $existingRegex;
+            }
+        }
+
+        if ($bestScore >= 0.5 && $bestMatch !== null) {
+            return [
+                'name'       => $bestMatch,
+                'similarity' => round($bestScore, 2),
+                'failregex'  => $bestRegex,
+            ];
+        }
+
+        return null;
+    }
+
+    /**
+     * Normaliza failregex para comparação de tokens.
+     * Remove: <HOST>, delimitadores ^ $, escapes \, caracteres especiais de regex.
+     * Extrai: palavras-chave (paths, status codes, user-agents, strings literais).
+     */
+    private static function tokenizeFailregex(string $regex): array
+    {
+        // Normalizar
+        $norm = $regex;
+        $norm = str_replace('<HOST>', '', $norm);
+        $norm = str_replace(['^', '$', '\\'], '', $norm);
+        $norm = preg_replace('/\(\?:.*?\)/', '', $norm); // non-capturing groups
+        $norm = preg_replace('/\(\?P<.*?>/', '', $norm);  // named groups
+        $norm = preg_replace('/\[.*?\]/', '', $norm);     // character classes
+        $norm = preg_replace('/[+*?{}()|]/', ' ', $norm); // quantifiers e alternation
+        $norm = preg_replace('/\d+/', ' ', $norm);        // números
+        $norm = strtolower($norm);
+
+        // Extrair tokens significativos (3+ chars)
+        $tokens = preg_split('/[\s\/._-]+/', $norm, -1, PREG_SPLIT_NO_EMPTY);
+        $tokens = array_filter($tokens, fn ($t) => strlen($t) >= 3);
+
+        return array_values(array_unique($tokens));
+    }
+
+    // -----------------------------------------------------------------------
     // Privados
     // -----------------------------------------------------------------------
 
@@ -261,7 +392,7 @@ class FilterManager
      */
     private function validateFailregex(string $failregex): bool
     {
-        if (strlen($failregex) > 1000 || trim($failregex) === '') {
+        if (strlen($failregex) > 5000 || trim($failregex) === '') {
             return false;
         }
 
@@ -284,6 +415,150 @@ class FilterManager
             }
         }
 
+        return true;
+    }
+
+    // -----------------------------------------------------------------------
+    // Detecção segura de logpath (com allowlist)
+    // -----------------------------------------------------------------------
+
+    /** Logs permitidos para auto-criação de jail (allowlist de segurança). */
+    private const ALLOWED_LOGS = [
+        '/var/log/whmcs_auth.log',
+        '/var/log/apache2/error.log',
+        '/var/log/apache2/access.log',
+        '/var/log/apache2/error_whmcs.log',
+        '/var/log/apache2/access_whmcs.log',
+        '/var/log/auth.log',
+        '/var/log/fail2ban.log',
+    ];
+
+    /** Retorna a allowlist de logs permitidos. */
+    public static function getAllowedLogs(): array
+    {
+        return self::ALLOWED_LOGS;
+    }
+
+    /**
+     * Versão segura de detectLogPath(): valida contra allowlist de logs permitidos.
+     * Retorna null se o logpath inferido não estiver no allowlist ou se o fallback
+     * genérico não corresponder ao tipo de ataque (evita jail monitorando log errado).
+     *
+     * Usado tanto pelo fluxo automático (AutoBanEngine) quanto pelo manual (AIController).
+     *
+     * @param string       $failregex    Failregex da sugestão
+     * @param array|string $evidenceJson Evidence como string JSON ou array já decodificado
+     * @param string       $filterName   Nome do filtro (para matchLog)
+     */
+    public function detectLogPathSafe(string $failregex, array|string $evidenceJson, string $filterName = ''): ?string
+    {
+        // Normalizar: garantir string JSON (caller pode passar array já decodificado)
+        if (is_array($evidenceJson)) {
+            $evidenceJson = json_encode($evidenceJson);
+        }
+        $inferred = $this->detectLogPath($failregex, $evidenceJson);
+
+        if (in_array($inferred, self::ALLOWED_LOGS, true) && file_exists($inferred)) {
+            return $inferred;
+        }
+
+        // Fallback genérico: só usar se o tipo de ataque fizer sentido para esse log
+        $fallback = '/var/log/whmcs_auth.log';
+        if (file_exists($fallback) && $this->attackMatchesLog($filterName, $fallback)) {
+            return $fallback;
+        }
+
+        return null; // cai para ai-bans — melhor que jail inútil
+    }
+
+    /**
+     * Detecta o logpath mais provável baseado no failregex e evidências.
+     *
+     * @param string       $failregex
+     * @param array|string $evidenceJson  Evidence como string JSON ou array já decodificado
+     */
+    private function detectLogPath(string $failregex, array|string $evidenceJson): string
+    {
+        // Normalizar array para string JSON
+        if (is_array($evidenceJson)) {
+            $evidenceJson = json_encode($evidenceJson);
+        }
+        $evidenceLines = [];
+        if (!empty($evidenceJson) && is_string($evidenceJson)) {
+            $decoded = json_decode($evidenceJson, true);
+            $evidenceLines = is_array($decoded) ? $decoded : [$evidenceJson];
+        }
+
+        $allText = strtolower($failregex . ' ' . implode(' ', $evidenceLines));
+
+        if (strpos($allText, 'whmcs') !== false || strpos($allText, 'login failed') !== false) {
+            if (file_exists('/var/log/whmcs_auth.log')) {
+                return '/var/log/whmcs_auth.log';
+            }
+        }
+
+        if (strpos($allText, 'ah0') !== false || strpos($allText, 'authz') !== false || strpos($allText, 'client denied') !== false) {
+            if (file_exists('/var/log/apache2/error.log')) {
+                return '/var/log/apache2/error.log';
+            }
+        }
+
+        if (strpos($allText, 'sshd') !== false || strpos($allText, 'invalid user') !== false || strpos($allText, 'failed password') !== false) {
+            if (file_exists('/var/log/auth.log')) {
+                return '/var/log/auth.log';
+            }
+        }
+
+        foreach (self::ALLOWED_LOGS as $path) {
+            if (file_exists($path)) {
+                return $path;
+            }
+        }
+
+        return '/var/log/apache2/error.log';
+    }
+
+    /**
+     * Verifica se o tipo de ataque (filter_name) faz sentido para o log indicado.
+     * Evita criar jail "apache-scan" monitorando whmcs_auth.log.
+     */
+    private function attackMatchesLog(string $filterName, string $logPath): bool
+    {
+        $name = strtolower($filterName);
+
+        // Ataques Apache/error log
+        $apacheKeywords = ['apache', 'scan', 'rce', 'probe', 'exploit', 'bot', 'crawler',
+            'vuln', 'sqli', 'injection', 'traversal', 'shell', 'webshell',
+            'zgrab', 'hakai', 'boaform', 'druid', 'git-probe', 'autoindex',
+            'malformed', 'protocol', 'directory', 'sensitive', 'phpunit',
+            'actuator', 'hnap', 'redlion', 'reportserver', 'mglndd'];
+
+        // Ataques WHMCS/auth log
+        $whmcsKeywords = ['whmcs', 'login', 'brute', 'cart', 'invoice', 'mercadopago',
+            'payment', 'checkout', 'password', 'credential', 'account',
+            'token', 'gateway', 'pix', 'sync'];
+
+        // Se o log é whmcs_auth.log, só aceitar ataques WHMCS
+        if (strpos($logPath, 'whmcs_auth') !== false) {
+            foreach ($whmcsKeywords as $kw) {
+                if (strpos($name, $kw) !== false) {
+                    return true;
+                }
+            }
+            return false;
+        }
+
+        // Se o log é Apache, só aceitar ataques Apache
+        if (strpos($logPath, 'apache') !== false) {
+            foreach ($apacheKeywords as $kw) {
+                if (strpos($name, $kw) !== false) {
+                    return true;
+                }
+            }
+            return false;
+        }
+
+        // Outros logs (auth.log, etc.) — aceitar qualquer ataque
         return true;
     }
 }

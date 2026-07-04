@@ -87,6 +87,7 @@ class AIController
             'filters'        => $filters,
             'geo_data'       => $geoData,
             'country_groups' => $countryGroups,
+            'ai_mode'        => Database::getConfig('ai_mode', 'suggestion'),
         ]);
     }
 
@@ -156,18 +157,23 @@ class AIController
         $autoEnabled   = Database::getConfig('ai_auto_enabled', '1');
 
         return $this->router->render('ai_settings', [
-            'active_provider'  => $activeProvider,
-            'providers'        => $providers,
-            'provider_configs' => $providerConfigs,
-            'ai_mode'          => $mode,
-            'ai_log_lines'     => $aiLogLines,
-            'ai_interval'      => $interval,
-            'ai_min_conf'      => $minConf,
-            'ai_whitelist'     => $whitelist,
-            'ai_prompt'        => $prompt,
-            'thresholds'       => $thresholds,
-            'global_bantime'   => $globalBantime,
-            'ai_auto_enabled'  => $autoEnabled,
+            'active_provider'            => $activeProvider,
+            'providers'                  => $providers,
+            'provider_configs'           => $providerConfigs,
+            'ai_mode'                    => $mode,
+            'ai_log_lines'               => $aiLogLines,
+            'ai_interval'                => $interval,
+            'ai_min_conf'                => $minConf,
+            'ai_whitelist'               => $whitelist,
+            'ai_prompt'                  => $prompt,
+            'thresholds'                       => $thresholds,
+            'global_bantime'                   => $globalBantime,
+            'ai_auto_enabled'                  => $autoEnabled,
+            'ai_auto_create_filter'            => Database::getConfig('ai_auto_create_filter', '0'),
+            'ai_auto_create_min_occurrences'   => (int)Database::getConfig('ai_auto_create_min_occurrences', '3'),
+            'ai_auto_create_window_days'       => (int)Database::getConfig('ai_auto_create_window_days', '30'),
+            'ai_auto_max_jails_per_day'        => (int)Database::getConfig('ai_auto_max_jails_per_day', '5'),
+            'ai_auto_create_min_distinct_ips'  => (int)Database::getConfig('ai_auto_create_min_distinct_ips', '2'),
         ]);
     }
 
@@ -264,6 +270,7 @@ class AIController
                     'maxretry' => '5',
                     'findtime' => '600',
                     'bantime'  => (string)(int)Database::getConfig('global_bantime', 604800),
+                    'ignoreip' => '127.0.0.1',
                 ]);
                 $jailConfig->reloadAll();
             } else {
@@ -376,6 +383,32 @@ class AIController
         $filterAlreadyExisted = $filterManager->filterExists($filterName);
         $jailAlreadyExisted   = $filterManager->jailExists($jailName);
 
+        // Verificar similaridade com filtros existentes (modo sugestão)
+        // Pula se force=1 (admin confirmou que quer criar mesmo assim)
+        $force = !empty($post['force']);
+        if (!$force && !$filterAlreadyExisted) {
+            $similar = $filterManager->findSimilarFilter($failregex);
+            if ($similar !== null) {
+                // Log de decisão de deduplicação para calibração
+                Database::setConfig('ai_filter_dedup_log', json_encode([
+                    'suggested'   => $filterName,
+                    'similar_to'  => $similar['name'],
+                    'similarity'  => $similar['similarity'],
+                    'action'      => 'blocked',
+                    'timestamp'   => date('Y-m-d H:i:s'),
+                ]));
+                return json_encode([
+                    'success'      => false,
+                    'similar_to'   => $similar['name'],
+                    'similarity'   => $similar['similarity'],
+                    'filter_name'  => $filterName,
+                    'failregex'    => $failregex,
+                    'error'        => "Filtro similar encontrado: amsfb-{$similar['name']} ({$similar['similarity']}).",
+                    'suggestion'   => "Este filtro parece similar a 'amsfb-{$similar['name']}'. Criar mesmo assim?",
+                ]);
+            }
+        }
+
         if (!$filterAlreadyExisted) {
             $ok = $filterManager->createFilter($filterName, $failregex, $suggestion['threat'] ?? '');
             if (!$ok) {
@@ -387,9 +420,16 @@ class AIController
         }
 
         if (!$jailAlreadyExisted) {
+            $logpath = $filterManager->detectLogPathSafe($failregex, $suggestion['evidence'] ?? '', $filterName);
+            if ($logpath === null) {
+                return json_encode([
+                    'success' => false,
+                    'error'   => "Não foi possível determinar um logpath seguro para este tipo de ataque. Verifique se o log correspondente existe e está na allowlist.",
+                ]);
+            }
             $ok = $filterManager->createJailForFilter($jailName, $filterName, [
                 'bantime' => (int)Database::getConfig('global_bantime', 604800),
-                'logpath' => $this->detectLogPath($failregex, $suggestion['evidence'] ?? ''),
+                'logpath' => $logpath,
             ]);
             if (!$ok) {
                 return json_encode([
@@ -454,7 +494,10 @@ class AIController
     }
 
     // -----------------------------------------------------------------------
-    // AJAX: rodar análise agora (manual)
+    // AJAX: rodar análise agora (manual, legado — usado em ai_settings)
+    // Respeita ai_mode: modo auto → bane imediatamente; modo suggestion → salva pending.
+    // Diferente de ajaxAnalyzeLog() (fluxo sequencial em ai_suggestions) que sempre
+    // salva como pending independente do ai_mode (ferramenta de revisão manual).
     // -----------------------------------------------------------------------
 
     private function ajaxRunNow(): string
@@ -539,11 +582,17 @@ class AIController
             $result[] = $log;
         }
 
-        return json_encode(['success' => true, 'logs' => $result]);
+        return json_encode([
+            'success' => true,
+            'logs'    => $result,
+            'ai_mode' => Database::getConfig('ai_mode', 'suggestion'),
+        ]);
     }
 
     // -----------------------------------------------------------------------
-    // AJAX: analisar um único log
+    // AJAX: analisar um único log (fluxo sequencial — usado em ai_suggestions)
+    // Sempre salva como pending — não respeita ai_mode intencionalmente
+    // (ferramenta de revisão manual). Bans automáticos ocorrem via cron/run_now.
     // -----------------------------------------------------------------------
 
     private function ajaxAnalyzeLog(array $post): string
@@ -574,6 +623,21 @@ class AIController
         // Parâmetro force: ignora watermark e relê as últimas linhas.
         // Útil após trocar prompt/modelo de IA para reanalisar logs já vistos.
         $force = !empty($post['force']);
+
+        // ── Lock por log (previne cron + manual no mesmo arquivo) ───────────
+        $lockResult = \AMS\Fail2Ban\LogLock::acquire($path);
+        if ($lockResult['fp'] === null) {
+            return json_encode([
+                'success'   => false,
+                'log'       => $path,
+                'error'     => 'analysis_running',
+                'error_msg' => 'Este log já está sendo analisado por outro processo. Tente novamente em alguns segundos.',
+                'lock_reason' => $lockResult['reason'],
+            ]);
+        }
+        $lockFp = $lockResult['fp'];
+
+        try {
 
         // Watermark compartilhado entre AutoBanEngine (cron) e ajaxAnalyzeLog (manual).
         // Decisão de design: ambos competem pelo mesmo ponteiro (ai_log_offset.{md5}).
@@ -731,6 +795,7 @@ class AIController
         $savedList = [];
 
         foreach ($filtered['valid'] as $suggestion) {
+            $suggestion['source_log'] = $path; // propagar log de origem (Bug 1 fix)
             $id = Database::saveSuggestion($suggestion);
             $suggestion['id'] = $id;
             $savedList[] = $suggestion;
@@ -764,6 +829,10 @@ class AIController
             'parse_failed' => $parseFailed,
             'truncated'    => $truncated,
         ]);
+
+        } finally {
+            \AMS\Fail2Ban\LogLock::release($lockFp);
+        }
     }
 
     // -----------------------------------------------------------------------
@@ -950,7 +1019,10 @@ class AIController
 
         // Prompt customizável (compartilhado entre provedores)
         // [SEC-11] Limitar a 8000 caracteres
-        $prompt = substr(trim($post['ai_prompt'] ?? ''), 0, 8000);
+        // Decodificar HTML entities que vêm do formulário (template usa $e() = htmlspecialchars)
+        // Sem isso, cada salvamento double-encode: " → &quot; → &amp;quot; → ...
+        $prompt = html_entity_decode(trim($post['ai_prompt'] ?? ''), ENT_QUOTES, 'UTF-8');
+        $prompt = substr($prompt, 0, 8000);
         if ($prompt !== '') {
             Database::setConfig('ai_prompt', $prompt);
         }
@@ -977,6 +1049,18 @@ class AIController
 
         // Toggle análise automática via cron
         Database::setConfig('ai_auto_enabled', !empty($post['ai_auto_enabled']) ? '1' : '0');
+
+        // Auto-criação de filtro/jail (Auto e Threshold)
+        Database::setConfig('ai_auto_create_filter', !empty($post['ai_auto_create_filter']) ? '1' : '0');
+        $minOcc = max(2, min(50, (int)($post['ai_auto_create_min_occurrences'] ?? 3)));
+        Database::setConfig('ai_auto_create_min_occurrences', (string)$minOcc);
+        $windowDays = max(1, min(365, (int)($post['ai_auto_create_window_days'] ?? 30)));
+        Database::setConfig('ai_auto_create_window_days', (string)$windowDays);
+        $maxJails = max(1, min(50, (int)($post['ai_auto_max_jails_per_day'] ?? 5)));
+        Database::setConfig('ai_auto_max_jails_per_day', (string)$maxJails);
+        $rawDistinct = trim($post['ai_auto_create_min_distinct_ips'] ?? '');
+        $minDistinctIps = $rawDistinct === '' ? 2 : max(1, min(20, (int)$rawDistinct));
+        Database::setConfig('ai_auto_create_min_distinct_ips', (string)$minDistinctIps);
     }
 
     /** Decodifica o campo evidence (JSON) de cada sugestão. */
@@ -1068,6 +1152,7 @@ class AIController
                     'maxretry' => '5',
                     'findtime' => '600',
                     'bantime'  => (string)(int)Database::getConfig('global_bantime', 604800),
+                    'ignoreip' => '127.0.0.1',
                 ]);
                 $jailConfig->reloadAll();
             } else {
@@ -1221,48 +1306,5 @@ class AIController
         }
 
         return $bestFilter;
-    }
-
-    private function detectLogPath(string $failregex, string $evidenceJson): string
-    {
-        $evidenceLines = [];
-        if (!empty($evidenceJson) && is_string($evidenceJson)) {
-            $decoded = json_decode($evidenceJson, true);
-            $evidenceLines = is_array($decoded) ? $decoded : [$evidenceJson];
-        }
-
-        $allText = strtolower($failregex . ' ' . implode(' ', $evidenceLines));
-
-        if (strpos($allText, 'whmcs') !== false || strpos($allText, 'login failed') !== false) {
-            if (file_exists('/var/log/whmcs_auth.log')) {
-                return '/var/log/whmcs_auth.log';
-            }
-        }
-
-        if (strpos($allText, 'ah0') !== false || strpos($allText, 'authz') !== false || strpos($allText, 'client denied') !== false) {
-            if (file_exists('/var/log/apache2/error.log')) {
-                return '/var/log/apache2/error.log';
-            }
-        }
-
-        if (strpos($allText, 'sshd') !== false || strpos($allText, 'invalid user') !== false || strpos($allText, 'failed password') !== false) {
-            if (file_exists('/var/log/auth.log')) {
-                return '/var/log/auth.log';
-            }
-        }
-
-        $fallbacks = [
-            '/var/log/whmcs_auth.log',
-            '/var/log/apache2/error.log',
-            '/var/log/apache2/access.log',
-            '/var/log/auth.log',
-        ];
-        foreach ($fallbacks as $path) {
-            if (file_exists($path)) {
-                return $path;
-            }
-        }
-
-        return '/var/log/apache2/error.log';
     }
 }

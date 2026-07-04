@@ -46,6 +46,9 @@ package-lock.json
 *.pem
 *.key
 
+# Lock files (runtime, não commitar)
+data/locks/*.lock
+
 # Cache
 .cache/
 *.cache

@@ -78,6 +78,34 @@ class Database
             ->all();
     }
 
+    /**
+     * Conta jails auto-criados hoje (via logEvent com action='jail_created').
+     * Usado para badge no dashboard.
+     */
+    public static function countAutoCreatedJailsToday(): int
+    {
+        $today = date('Y-m-d');
+        return (int) Capsule::table('mod_amssoft_fail2ban_logs')
+            ->where('action', 'jail_created')
+            ->where('timestamp', '>=', $today . ' 00:00:00')
+            ->count();
+    }
+
+    /**
+     * Retorna os últimos eventos de auto-criação de jail.
+     * Usado para exibir detalhes no dashboard.
+     */
+    public static function getRecentAutoCreatedJails(int $limit = 5): array
+    {
+        return Capsule::table('mod_amssoft_fail2ban_logs')
+            ->where('action', 'jail_created')
+            ->orderBy('timestamp', 'desc')
+            ->limit($limit)
+            ->get()
+            ->map(fn ($r) => (array)$r)
+            ->all();
+    }
+
     // -----------------------------------------------------------------------
     // Queries — reports / history
     // -----------------------------------------------------------------------
@@ -177,6 +205,32 @@ class Database
             ->updateOrInsert(['key' => $key], ['value' => $value]);
     }
 
+    /**
+     * Incrementa atomicamente um valor numérico na config (UPDATE value = value + 1).
+     * Se a chave não existir, cria com valor 1.
+     * Retorna o novo valor após o incremento.
+     *
+     * Usado para contadores onde read-then-write causaria perda em concorrência.
+     */
+    public static function incrementConfig(string $key): int
+    {
+        $exists = Capsule::table('mod_amssoft_fail2ban_config')
+            ->where('key', $key)
+            ->exists();
+
+        if (!$exists) {
+            Capsule::table('mod_amssoft_fail2ban_config')
+                ->insert(['key' => $key, 'value' => '1']);
+            return 1;
+        }
+
+        Capsule::table('mod_amssoft_fail2ban_config')
+            ->where('key', $key)
+            ->update(['value' => Capsule::raw('CAST(`value` AS UNSIGNED) + 1')]);
+
+        return (int) self::getConfig($key, '1');
+    }
+
     // -----------------------------------------------------------------------
     // Sugestões da IA
     // -----------------------------------------------------------------------
@@ -216,6 +270,9 @@ class Database
                                     : null,
             'failregex'      => isset($data['failregex']) && $data['failregex'] !== ''
                                     ? substr($data['failregex'], 0, 1000)
+                                    : null,
+            'source_log'     => isset($data['source_log']) && $data['source_log'] !== ''
+                                    ? substr($data['source_log'], 0, 500)
                                     : null,
         ]);
     }
@@ -513,6 +570,71 @@ class Database
                 'failregex'   => substr($failregex, 0, 1000),
             ]);
         return $affected > 0;
+    }
+
+    /**
+     * Analisa ocorrências de um filter_name para o gate de auto-criação.
+     *
+     * Retorna:
+     *   'occurrences'  — total de ocorrências (excluindo rejected)
+     *   'distinct_ips' — IPs distintos que dispararam o padrão
+     *   'best_failregex' — failregex mais frequente entre as ocorrências
+     *   'window_days'  — janela de tempo usada (dias)
+     *
+     * Critérios (corrigidos):
+     * - Exclui status 'rejected' (decisão explícita do admin não conta a favor)
+     * - Janela de tempo configurável (default 30 dias)
+     * - Conta IPs distintos (mesmo IP repetindo não prova generalização)
+     * - Seleciona failregex mais frequente (não o último)
+     * - Retorna todos os failregex distintos (top 5) para filtro multi-padrão
+     * - Retorna source_log da ocorrência que forneceu o best_failregex
+     */
+    public static function analyzeFilterNameOccurrences(string $filterName, int $windowDays = 30): array
+    {
+        $since = date('Y-m-d H:i:s', time() - $windowDays * 86400);
+
+        $rows = Capsule::table('mod_amssoft_fail2ban_ai_suggestions')
+            ->where('filter_name', $filterName)
+            ->where('created_at', '>=', $since)
+            ->where('status', '!=', 'rejected')
+            ->orderBy('created_at', 'desc') // determinístico: mais recentes primeiro
+            ->get()
+            ->map(fn ($r) => (array)$r)
+            ->all();
+
+        $occurrences = count($rows);
+        $ips = array_unique(array_column($rows, 'ip'));
+        $distinctIps = count($ips);
+
+        // Failregex por frequência (top 5, determinístico via ordenação prévia)
+        $regexCounts = [];
+        foreach ($rows as $r) {
+            $fr = $r['failregex'] ?? '';
+            if ($fr !== '') {
+                $regexCounts[$fr] = ($regexCounts[$fr] ?? 0) + 1;
+            }
+        }
+        arsort($regexCounts);
+        $allFailregex = array_slice(array_keys($regexCounts), 0, 5);
+        $bestFailregex = !empty($allFailregex) ? $allFailregex[0] : '';
+
+        // source_log da ocorrência que forneceu o best_failregex
+        $bestSourceLog = '';
+        foreach ($rows as $r) {
+            if (($r['failregex'] ?? '') === $bestFailregex && ($r['source_log'] ?? '') !== '') {
+                $bestSourceLog = $r['source_log'];
+                break;
+            }
+        }
+
+        return [
+            'occurrences'     => $occurrences,
+            'distinct_ips'    => $distinctIps,
+            'best_failregex'  => $bestFailregex,
+            'all_failregex'   => $allFailregex,
+            'best_source_log' => $bestSourceLog,
+            'window_days'     => $windowDays,
+        ];
     }
 
     /** Returns ban-time cross-reference for a list of IPs from the DB log. */

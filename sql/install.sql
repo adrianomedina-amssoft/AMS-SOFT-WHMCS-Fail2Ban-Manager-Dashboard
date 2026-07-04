@@ -3,7 +3,7 @@ CREATE TABLE IF NOT EXISTS `mod_amssoft_fail2ban_logs` (
     `id`        BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,
     `ip`        VARCHAR(45)  NOT NULL,
     `jail`      VARCHAR(64)  NOT NULL,
-    `action`    ENUM('ban','unban','manual_ban','manual_unban') NOT NULL,
+    `action`    ENUM('ban','unban','manual_ban','manual_unban','jail_created','auto_filter_fallback','auto_filter_error','auto_filter_dedup','auto_filter_orphan','auto_filter_orphan_cleanup_failed','analysis_locked') NOT NULL,
     `reason`    VARCHAR(255) DEFAULT NULL,
     `timestamp` TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
     `admin_id`  INT UNSIGNED DEFAULT NULL,

@@ -106,6 +106,8 @@ find /var/www/html/modules/addons/amssoft_fail2ban/ -type d -exec chmod 755 {} \
 find /var/www/html/modules/addons/amssoft_fail2ban/ -type f -exec chmod 644 {} \;
 ```
 
+> **Nota sobre `data/locks/`:** O módulo usa um diretório `data/locks/` para lock files de concorrência (cron vs. painel). Ele é criado automaticamente ao ativar o módulo com permissão `2770` (setgid). **Não é necessário `chown root:www-data`** — o mecanismo de setgid funciona mesmo com `www-data:www-data`. Se o seu cron roda como o mesmo usuário do site (comum em hospedagem compartilhada), nenhum ajuste extra é necessário.
+
 ### Passo 4 — Configurar o sudoers (permite www-data chamar fail2ban-client sem senha)
 
 ```bash
@@ -240,6 +242,47 @@ visudo -c
 ```
 https://seu-whmcs.com/admin/addonmodules.php?module=amssoft_fail2ban
 ```
+
+---
+
+## Proteção do diretório `data/`
+
+O módulo usa `data/` para armazenar lock files de concorrência. Esse diretório **não deve ser acessível via HTTP**.
+
+### Apache (padrão)
+
+O módulo cria automaticamente `data/.htaccess` com `Deny from all` durante a ativação. Se o `.htaccess` não funcionar (AllowOverride desativado), adicione no vhost:
+
+```apache
+<Directory "/var/www/html/modules/addons/amssoft_fail2ban/data">
+    Require all denied
+</Directory>
+```
+
+### Nginx
+
+O Nginx **não lê `.htaccess`**. Adicione este bloco no `server {}` do seu vhost, **antes** do `location ~ \.php$`:
+
+```nginx
+location ~* /modules/addons/amssoft_fail2ban/data/ {
+    deny all;
+    return 404;
+}
+```
+
+> Em hospedagem compartilhada com cPanel/Plesk, o acesso a `data/` geralmente já é bloqueado pelo servidor web da plataforma. Verifique com seu provedor se tem dúvida.
+
+---
+
+## Hospedagem compartilhada (cron como o mesmo usuário do site)
+
+Em muitas hospedagens compartilhadas, o cron roda como o **mesmo usuário** do site (não como `root`). Nesse caso, **nenhum ajuste de permissão é necessário** — o lock file é criado e lido pelo mesmo usuário, sem conflito.
+
+O problema de permissão de lock só ocorre quando:
+- O cron roda como **root** (VPS/dedicado com crontab em root)
+- O site roda como **www-data** (Apache padrão)
+
+Nessa configuração, o módulo usa `setgid` no diretório `data/locks/` para garantir que ambos os processos consigam acessar os lock files. O `activate()` configura isso automaticamente.
 
 ---
 

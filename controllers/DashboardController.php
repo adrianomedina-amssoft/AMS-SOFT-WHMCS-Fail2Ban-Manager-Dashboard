@@ -48,6 +48,8 @@ class DashboardController
         $aiLastSuggestion = null;
         $aiMode          = 'suggestion';
         $aiApiOk         = '0';
+        $autoJailsToday  = 0;
+        $autoJailsRecent = [];
 
         try {
             $recentBans       = Database::getRecentBans(24);
@@ -57,6 +59,8 @@ class DashboardController
             $aiLastSuggestion = Database::getLastSuggestion();
             $aiMode           = Database::getConfig('ai_mode', 'suggestion');
             $aiApiOk          = Database::getConfig('ai_last_ping_ok', '0');
+            $autoJailsToday   = Database::countAutoCreatedJailsToday();
+            $autoJailsRecent  = Database::getRecentAutoCreatedJails(5);
         } catch (\Throwable $e) {
             // Tables may not exist yet (before activate())
         }
@@ -116,6 +120,8 @@ class DashboardController
             'ai_mode'           => $aiMode,
             'ai_api_ok'         => $aiApiOk,
             'geo_data'          => $geoData,
+            'auto_jails_today'  => $autoJailsToday,
+            'auto_jails_recent' => $autoJailsRecent,
         ]);
     }
 }

@@ -61,6 +61,13 @@ function amssoft_fail2ban_config(): array
                 'Default'      => 'yes',
                 'Description'  => 'Registrar falhas de login no log fail2ban',
             ],
+            'web_process_group' => [
+                'FriendlyName' => 'Grupo do processo web',
+                'Type'         => 'text',
+                'Size'         => 20,
+                'Default'      => '',
+                'Description'  => 'Grupo do processo web (ex: www-data, apache). Vazio = detecção automática via diretório do WHMCS.',
+            ],
         ],
     ];
 }
@@ -122,10 +129,28 @@ function amssoft_fail2ban_activate(): array
                     'maxretry' => '5',
                     'findtime' => '600',
                     'bantime'  => '3600',
+                    'ignoreip' => '127.0.0.1',
                 ]);
             }
         } catch (\Throwable $e) {
             // silencioso — jail será criada automaticamente no primeiro uso
+        }
+
+        // Setup do diretório de locks (data/locks/)
+        // Lock files precisam ser acessíveis por root (cron) e www-data (painel).
+        // O diretório data/ já é www-data:www-data (copiado do repo).
+        // Quando root criar lock files aqui, o setgid herda o grupo.
+        $dataDir  = __DIR__ . '/data/';
+        $locksDir = $dataDir . 'locks/';
+        if (!is_dir($locksDir)) {
+            @mkdir($locksDir, 0770, true);
+        }
+        @chmod($locksDir, 2770); // setgid: lock files herdam grupo do diretório
+
+        // .htaccess para bloquear acesso HTTP ao diretório data/
+        $htaccess = $dataDir . '.htaccess';
+        if (!file_exists($htaccess)) {
+            @file_put_contents($htaccess, "Order Deny,Allow\nDeny from all\n");
         }
 
         return ['status' => 'success', 'description' => 'AMS Fail2Ban Manager instalado com sucesso.'];
@@ -267,6 +292,113 @@ function amssoft_fail2ban_migrate_v6(): void
     }
 }
 
+/**
+ * v7: Expandir ENUM da coluna action para incluir eventos de auto-criação
+ * e concorrência (analysis_locked). Idempotente — ALTER TABLE só executa
+ * se o ENUM ainda não tiver os novos valores.
+ */
+function amssoft_fail2ban_migrate_v7(): void
+{
+    try {
+        \WHMCS\Database\Capsule::statement("
+            ALTER TABLE mod_amssoft_fail2ban_logs
+            MODIFY action ENUM(
+                'ban','unban','manual_ban','manual_unban',
+                'jail_created','auto_filter_fallback','auto_filter_error',
+                'auto_filter_dedup','auto_filter_orphan','auto_filter_orphan_cleanup_failed',
+                'analysis_locked'
+            ) NOT NULL
+        ");
+    } catch (\Throwable $e) {
+        // Silencioso — se a tabela não existe, activate() cria com o ENUM correto
+    }
+}
+
+/**
+ * v8: Lock directory no projeto + ENUM lock_config_warning.
+ *
+ * Resolve bug onde lock files criados por root (644) em /tmp não podiam ser
+ * abertos por www-data, causando falso "analysis_locked" em toda análise via painel.
+ *
+ * - Adiciona 'lock_config_warning' ao ENUM da coluna action
+ * - Garante data/locks/ com permissão 2770 (setgid)
+ * - Garante data/.htaccess com Deny from all
+ */
+function amssoft_fail2ban_migrate_v8(): void
+{
+    // 1. Expandir ENUM
+    try {
+        \WHMCS\Database\Capsule::statement("
+            ALTER TABLE mod_amssoft_fail2ban_logs
+            MODIFY action ENUM(
+                'ban','unban','manual_ban','manual_unban',
+                'jail_created','auto_filter_fallback','auto_filter_error',
+                'auto_filter_dedup','auto_filter_orphan','auto_filter_orphan_cleanup_failed',
+                'analysis_locked','lock_config_warning'
+            ) NOT NULL DEFAULT 'ban'
+        ");
+    } catch (\Throwable $e) {
+        // Silencioso — se a tabela não existe, activate() cria com o ENUM correto
+    }
+
+    // 2. Garantir data/locks/ existe com setgid (para instalações existentes)
+    $locksDir = dirname(__DIR__) . '/data/locks/';
+    if (!is_dir($locksDir)) {
+        @mkdir($locksDir, 0770, true);
+    }
+    @chmod($locksDir, 2770); // setgid: lock files herdam grupo
+
+    // Verificar se o grupo do diretório permite cross-user locking.
+    // Se grupo=root: setgid herda root → lock files ficam root:root 660
+    // → www-data não consegue fopen → falso "analysis_locked" (bug original).
+    // Grupo=www-data (ou qualquer não-root): setgid herda → root:www-data 660 → OK.
+    $stat = @stat($locksDir);
+    if ($stat && function_exists('posix_getgrgid')) {
+        $groupInfo = posix_getgrgid($stat['gid']);
+        $currentGroup = $groupInfo['name'] ?? (string)$stat['gid'];
+        if ($currentGroup === 'root') {
+            // Grupo=root: www-data não vai conseguir criar/abrir lock files.
+            // Logar warning visível no dashboard.
+            try {
+                \AMS\Fail2Ban\Database::logEvent('', '', 'lock_config_warning',
+                    "Diretório data/locks/ tem grupo 'root'. Lock cross-user (cron→painel) não funciona. "
+                    . "Corrija: chgrp www-data " . $locksDir . " && chmod 2770 " . $locksDir,
+                    null);
+            } catch (\Throwable $e) {}
+        }
+    }
+    // NOTA: NÃO é necessário chown root:www-data. O diretório pode ser
+    // www-data:www-data 2770. Root ignora permissões de diretório no Linux
+    // e setgid faz lock files herdam grupo www-data. Testado em produção.
+
+    // 3. Garantir data/.htaccess existe
+    $htaccess = dirname(__DIR__) . '/data/.htaccess';
+    if (!file_exists($htaccess)) {
+        @file_put_contents($htaccess, "Order Deny,Allow\nDeny from all\n");
+    }
+}
+
+/**
+ * v9: Adiciona coluna source_log na tabela de sugestões.
+ *
+ * Propaga o path do log de origem de cada sugestão — elimina a necessidade
+ * de inferir logpath por keywords no failregex (causa raiz do bug onde
+ * filtros auto-criados apontavam para whmcs_auth.log com failregex Apache).
+ *
+ * Idempotente — ADD COLUMN só executa se a coluna não existir.
+ */
+function amssoft_fail2ban_migrate_v9(): void
+{
+    try {
+        \WHMCS\Database\Capsule::statement(
+            "ALTER TABLE mod_amssoft_fail2ban_ai_suggestions
+             ADD COLUMN source_log VARCHAR(500) DEFAULT NULL AFTER failregex"
+        );
+    } catch (\Throwable $e) {
+        // Coluna já existe — idempotente
+    }
+}
+
 function amssoft_fail2ban_output(array $vars): void
 {
     // Migração automática: garante que tabelas do v2 existam mesmo em instalações antigas
@@ -300,6 +432,27 @@ function amssoft_fail2ban_output(array $vars): void
     // Migração automática v6: limpar chave de protocolo do MiMo
     try {
         amssoft_fail2ban_migrate_v6();
+    } catch (\Exception $e) {
+        // Silencioso
+    }
+
+    // Migração automática v7: expandir ENUM da coluna action
+    try {
+        amssoft_fail2ban_migrate_v7();
+    } catch (\Exception $e) {
+        // Silencioso
+    }
+
+    // Migração automática v8: diretório de lock compartilhado + ENUM lock_config_warning
+    try {
+        amssoft_fail2ban_migrate_v8();
+    } catch (\Exception $e) {
+        // Silencioso
+    }
+
+    // Migração automática v9: coluna source_log na tabela de sugestões
+    try {
+        amssoft_fail2ban_migrate_v9();
     } catch (\Exception $e) {
         // Silencioso
     }

@@ -593,6 +593,36 @@ $statusLabels = [
                     }
                     // Linha permanece na tabela — o IP ainda pode ser banido
                     alert('✓ ' + (data.message || 'Filtro criado com sucesso.'));
+                } else if (data.similar_to) {
+                    // Filtro similar encontrado — perguntar ao admin
+                    var simPct = Math.round((data.similarity || 0) * 100);
+                    var confirmMsg = '⚠️ Filtro similar encontrado!\n\n'
+                        + 'Filtro existente: amsfb-' + data.similar_to + '\n'
+                        + 'Similaridade: ' + simPct + '%\n'
+                        + 'Novo filtro: amsfb-' + (data.filter_name || filterName) + '\n\n'
+                        + 'Deseja criar um novo filtro mesmo assim?\n'
+                        + '(Selecione "Cancelar" para usar o filtro existente)';
+                    if (confirm(confirmMsg)) {
+                        // Reenviar com force=1
+                        self.innerHTML = '&#8987; Criando...';
+                        self.disabled = true;
+                        window.AMSFB.post('ai', 'create_filter', { id: id, force: 1 }, function (data2) {
+                            if (data2.success) {
+                                self.innerHTML = '&#10003; Filtro criado';
+                                self.disabled = true;
+                                self.classList.remove('btn-default');
+                                self.classList.add('btn-success');
+                                alert('✓ ' + (data2.message || 'Filtro criado com sucesso.'));
+                            } else {
+                                self.disabled = false;
+                                self.innerHTML = '&#128736; Criar Filtro';
+                                alert('✗ ' + (data2.error || 'Erro ao criar filtro.'));
+                            }
+                        });
+                    } else {
+                        self.disabled = false;
+                        self.innerHTML = '&#128736; Criar Filtro';
+                    }
                 } else {
                     self.disabled  = false;
                     self.innerHTML = hasRegex ? '&#128736; Criar Filtro' : '&#128736; Criar Filtro';
@@ -632,9 +662,15 @@ $statusLabels = [
     // Analisar agora — sequencial com progresso
     // -------------------------------------------------------------------------
     var runNowBtn = document.getElementById('amsfb-run-now-btn');
+    var currentAiMode = '<?= $e($ai_mode ?? 'suggestion') ?>';
     if (runNowBtn) {
         runNowBtn.addEventListener('click', function () {
-            if (!confirm('Rodar análise de IA agora em todos os logs configurados?')) return;
+            var confirmMsg = 'Rodar análise de IA agora em todos os logs configurados?';
+            if (currentAiMode === 'auto' || currentAiMode === 'threshold') {
+                confirmMsg += '\n\n⚠️ Modo automático ativo — a análise manual sempre gera sugestões pendentes para revisão.';
+                confirmMsg += '\nBans automáticos ocorrem apenas via cron.';
+            }
+            if (!confirm(confirmMsg)) return;
             runNowBtn.disabled = true;
 
             // 1. Buscar lista de logs (com retry CSRF)
@@ -700,6 +736,10 @@ $statusLabels = [
                             msg += '\n\nNenhum log com conteúdo novo — todos os logs já foram analisados.';
                         } else if (failedLogs.length === 0) {
                             msg += '. Nenhuma ameaça encontrada.';
+                        }
+                        if (currentAiMode === 'auto' || currentAiMode === 'threshold') {
+                            msg += '\n\n⚠️ Modo automático ativo — estas sugestões foram salvas como pendentes para sua revisão.';
+                            msg += '\nBans automáticos ocorrem apenas via cron.';
                         }
                         alert(msg);
                         return;
@@ -949,6 +989,33 @@ $statusLabels = [
                                     self.classList.remove('btn-default');
                                     self.classList.add('btn-success');
                                     alert('✓ ' + (data.message || 'Filtro criado.'));
+                                } else if (data.similar_to) {
+                                    var simPct = Math.round((data.similarity || 0) * 100);
+                                    var confirmMsg = '⚠️ Filtro similar encontrado!\n\n'
+                                        + 'Filtro existente: amsfb-' + data.similar_to + '\n'
+                                        + 'Similaridade: ' + simPct + '%\n'
+                                        + 'Novo filtro: amsfb-' + (data.filter_name || filterName) + '\n\n'
+                                        + 'Deseja criar um novo filtro mesmo assim?';
+                                    if (confirm(confirmMsg)) {
+                                        self.innerHTML = '&#8987; Criando...';
+                                        self.disabled = true;
+                                        window.AMSFB.post('ai', 'create_filter', { id: id, force: 1 }, function (data2) {
+                                            if (data2.success) {
+                                                self.innerHTML = '&#10003; Filtro criado';
+                                                self.disabled = true;
+                                                self.classList.remove('btn-default');
+                                                self.classList.add('btn-success');
+                                                alert('✓ ' + (data2.message || 'Filtro criado.'));
+                                            } else {
+                                                self.disabled = false;
+                                                self.innerHTML = '&#128736; Criar Filtro';
+                                                alert('✗ ' + (data2.error || 'Erro ao criar filtro.'));
+                                            }
+                                        });
+                                    } else {
+                                        self.disabled = false;
+                                        self.innerHTML = '&#128736; Criar Filtro';
+                                    }
                                 } else {
                                     self.disabled = false;
                                     self.innerHTML = '&#128736; Criar Filtro';

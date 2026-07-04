@@ -270,6 +270,58 @@
             </table>
         </div>
 
+        <!-- Auto-criar filtro/jail (Auto e Threshold) -->
+        <div id="amsfb-auto-filter-opt" style="<?= in_array($ai_mode, ['auto', 'threshold']) ? '' : 'display:none;' ?>">
+            <hr>
+            <label>
+                <input type="checkbox" name="ai_auto_create_filter" value="1"
+                       <?= ($ai_auto_create_filter ?? '0') === '1' ? 'checked' : '' ?>>
+                &nbsp;<strong>Criar filtro/jail automaticamente quando o padrão se repetir</strong>
+            </label>
+            <p class="help-block">
+                A IA cria um filtro fail2ban específico para o tipo de ataque e bane na jail
+                correspondente (ex: amsfb-apache-scan) em vez da jail genérica ai-bans.
+                O filtro só é criado depois que o mesmo padrão aparece N vezes com IPs diferentes,
+                garantindo que o regex generalize bem e não seja overfit para um único atacante.
+            </p>
+            <div style="margin-left:24px; margin-top:8px;">
+                <div style="margin-bottom:6px;">
+                    <label>Mínimo de ocorrências do padrão:</label>
+                    <input type="number" name="ai_auto_create_min_occurrences"
+                           value="<?= $e((int)($ai_auto_create_min_occurrences ?? 3)) ?>"
+                           min="2" max="50" class="form-control form-control-sm"
+                           style="display:inline-block; width:60px;">
+                    <span class="text-muted">(padrão: 3)</span>
+                </div>
+                <div style="margin-bottom:6px;">
+                    <label>Mínimo de IPs distintos:</label>
+                    <input type="number" name="ai_auto_create_min_distinct_ips"
+                           value="<?= $e((int)($ai_auto_create_min_distinct_ips ?? 2)) ?>"
+                           min="1" max="20" class="form-control form-control-sm"
+                           style="display:inline-block; width:60px;">
+                    <span class="text-muted">(padrão: 2)</span>
+                    <span class="help-block" style="display:block; margin-top:2px;">
+                        Exige IPs diferentes para provar que o padrão generaliza (não é overfit para um único atacante).
+                    </span>
+                </div>
+                <div style="margin-bottom:6px;">
+                    <label>Janela de tempo (dias):</label>
+                    <input type="number" name="ai_auto_create_window_days"
+                           value="<?= $e((int)($ai_auto_create_window_days ?? 30)) ?>"
+                           min="1" max="365" class="form-control form-control-sm"
+                           style="display:inline-block; width:60px;">
+                    <span class="text-muted">(padrão: 30)</span>
+                </div>
+                <div>
+                    <label>Limite de jails auto-criadas por dia:</label>
+                    <input type="number" name="ai_auto_max_jails_per_day"
+                           value="<?= $e((int)($ai_auto_max_jails_per_day ?? 5)) ?>"
+                           min="1" max="50" class="form-control form-control-sm"
+                           style="display:inline-block; width:60px;">
+                </div>
+            </div>
+        </div>
+
     </div>
 </div>
 
@@ -404,13 +456,29 @@
     var radios = document.querySelectorAll('input[name="ai_mode"]');
     var thresholdDiv  = document.getElementById('amsfb-threshold-config');
     var autoConfirm   = document.getElementById('amsfb-auto-confirm');
+    var autoFilterOpt = document.getElementById('amsfb-auto-filter-opt');
 
     radios.forEach(function (r) {
         r.addEventListener('change', function () {
-            if (thresholdDiv) thresholdDiv.style.display = this.value === 'threshold' ? '' : 'none';
-            if (autoConfirm)  autoConfirm.style.display  = (this.value === 'auto' || this.value === 'threshold') ? '' : 'none';
+            if (thresholdDiv)  thresholdDiv.style.display  = this.value === 'threshold' ? '' : 'none';
+            if (autoConfirm)   autoConfirm.style.display   = (this.value === 'auto' || this.value === 'threshold') ? '' : 'none';
+            if (autoFilterOpt) autoFilterOpt.style.display = (this.value === 'auto' || this.value === 'threshold') ? '' : 'none';
         });
     });
+
+    // Habilitar/desabilitar sub-campos de auto-create conforme checkbox
+    var autoCreateCb = document.querySelector('input[name="ai_auto_create_filter"]');
+    var autoFilterSubfields = autoFilterOpt
+        ? autoFilterOpt.querySelectorAll('input[type="number"]')
+        : [];
+    function toggleAutoCreateSubfields() {
+        var on = autoCreateCb && autoCreateCb.checked;
+        autoFilterSubfields.forEach(function (f) { f.disabled = !on; });
+    }
+    if (autoCreateCb) {
+        autoCreateCb.addEventListener('change', toggleAutoCreateSubfields);
+        toggleAutoCreateSubfields(); // estado inicial
+    }
 
     // -------------------------------------------------------------------------
     // Testar API (multi-provider)
