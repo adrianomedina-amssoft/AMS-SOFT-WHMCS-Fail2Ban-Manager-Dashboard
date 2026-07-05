@@ -71,6 +71,11 @@
             </div>
             <?php endforeach; ?>
         </div>
+        <div id="amsfb-mimo-security-warning" class="alert alert-warning" style="display:none; margin-top:10px;">
+            <strong>⚠️ Aviso de segurança:</strong> Este provedor tem resistência reduzida a certas técnicas de manipulação de log (prompt injection).
+            Recomendamos manter a heurística de fallback ativa — ela é a defesa primária contra evasão de detecção para este provedor.
+            Para máxima proteção, considere usar Anthropic.
+        </div>
     </div>
 </div>
 
@@ -456,6 +461,11 @@
         providerPanels.forEach(function (panel) {
             panel.style.display = panel.id === 'amsfb-provider-' + activeProvider ? '' : 'none';
         });
+        // Aviso de segurança para MiMo
+        var mimoWarning = document.getElementById('amsfb-mimo-security-warning');
+        if (mimoWarning) {
+            mimoWarning.style.display = activeProvider === 'mimo' ? 'block' : 'none';
+        }
     }
 
     providerRadios.forEach(function (r) {
@@ -463,6 +473,12 @@
             toggleProviderPanels(this.value);
         });
     });
+
+    // Inicializar: mostrar aviso se MiMo já estiver selecionado
+    var checkedProvider = document.querySelector('input[name="ai_active_provider"]:checked');
+    if (checkedProvider) {
+        toggleProviderPanels(checkedProvider.value);
+    }
 
     // Toggle análise automática
     var autoEnabledChk = document.getElementById('amsfb-auto-enabled');

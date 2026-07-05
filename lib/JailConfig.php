@@ -68,7 +68,7 @@ class JailConfig
             $data[$jail] = [];
         }
 
-        $allowed = ['enabled', 'maxretry', 'findtime', 'bantime', 'logpath', 'filter', 'action'];
+        $allowed = ['enabled', 'maxretry', 'findtime', 'bantime', 'logpath', 'filter', 'action', 'ignoreip'];
         foreach ($params as $key => $value) {
             if (in_array($key, $allowed, true)) {
                 // [SEC-2] Strip control characters (newlines, null bytes, etc.) to prevent

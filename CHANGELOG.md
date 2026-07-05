@@ -1,5 +1,34 @@
 # CHANGELOG
 
+## 2026-07-04 — Segurança: prompt injection, ignoreip, heurística de fallback
+
+### Prompt injection via delimitador de log (SEC-16)
+
+- **Vulnerabilidade:** payload `</log_data>` no User-Agent evada detecção em ~70% no MiMo (modelo retorna `[]` vazio). Anthropic resiste 100%.
+- **Causa raiz:** fraqueza do modelo MiMo, não do código. Qualquer sintaxe de fechamento de bloco (XML-like ou não) tem a mesma taxa de evasão.
+- **Correção 1:** delimitador aleatório por requisição (`<log_data_{token}>`) — `AIAnalyzer::buildPrompt()` e `generateFilterRegex()`.
+- **Correção 2:** heurística de fallback regex quando IA retorna `[]` — `AutoBanEngine::heuristicFallback()`. 15 padrões de ataque + detecção de UA >500 chars. Confidence 80 (acima do threshold). Intencionalmente "burra" (regex, não IA) — resistente a prompt injection por natureza.
+- **Aviso no painel:** alerta quando MiMo é selecionado como provedor (resistência reduzida a prompt injection).
+- **Documentação:** CLAUDE.md SEC-16 atualizado com taxas de evasão por provedor.
+
+### ai-bans sem ignoreip + saveJail() whitelist incompleta
+
+- **Problema:** `ignoreip = 127.0.0.1` sumiu do `ai-bans` após round-trip de `saveJail()`. Causa: `ignoreip` não estava na whitelist de campos permitidos.
+- **Correção:** `ignoreip` adicionado ao `$allowed` em `JailConfig::saveJail()`. Migration v11 verifica `logpath` + `ignoreip` em `ai-bans`.
+- **Falso positivo:** 127.0.0.1 banido por 43 min (nossos testes curl geraram tráfego que a IA classificou corretamente como scan).
+
+### Arquivos modificados
+
+| Arquivo | Mudança |
+|---|---|
+| `lib/AIAnalyzer.php` | Delimitador aleatório em `buildPrompt()` e `generateFilterRegex()` |
+| `lib/AutoBanEngine.php` | `heuristicFallback()` + `buildHeuristicSuggestion()`, integrado no batch loop |
+| `lib/JailConfig.php` | `ignoreip` adicionado ao `$allowed` de `saveJail()` |
+| `amssoft_fail2ban.php` | Migration v11: `logpath` + `ignoreip` para `ai-bans` |
+| `templates/ai_settings.tpl` | Aviso de segurança quando MiMo é selecionado |
+
+---
+
 ## 2026-07-03 — Fix: Filtros auto-criados ineficazes (logpath errado + failregex incompleto)
 
 ### Bug 1 — Logpath errado por inferência frágil

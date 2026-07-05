@@ -126,6 +126,7 @@ function amssoft_fail2ban_activate(): array
                 $jailConfig->addJail('ai-bans', [
                     'enabled'  => 'true',
                     'filter'   => 'apache-auth',
+                    'logpath'  => '/var/log/apache2/access_whmcs.log',
                     'maxretry' => '5',
                     'findtime' => '600',
                     'bantime'  => '3600',
@@ -399,6 +400,62 @@ function amssoft_fail2ban_migrate_v9(): void
     }
 }
 
+/**
+ * v10: Expandir ENUM com 'already_banned'.
+ *
+ * Quando executeBan() falha mas o IP já está banido (de ciclo anterior),
+ * processSuggestion() mantém auto_executed e registra already_banned
+ * em vez de reverter para pending (que causaria loop infinito).
+ */
+function amssoft_fail2ban_migrate_v10(): void
+{
+    try {
+        \WHMCS\Database\Capsule::statement("
+            ALTER TABLE mod_amssoft_fail2ban_logs
+            MODIFY action ENUM(
+                'ban','unban','manual_ban','manual_unban',
+                'jail_created','auto_filter_fallback','auto_filter_error',
+                'auto_filter_dedup','auto_filter_orphan','auto_filter_orphan_cleanup_failed',
+                'analysis_locked','lock_config_warning','already_banned'
+            ) NOT NULL DEFAULT 'ban'
+        ");
+    } catch (\Throwable $e) {
+        // Silencioso
+    }
+}
+
+/**
+ * v11: Corrigir jail ai-bans sem logpath e/ou ignoreip (bug desde v1.0.0).
+ *
+ * A jail ai-bans era criada sem o campo logpath (obrigatório no fail2ban).
+ * O campo ignoreip também podia se perder em round-trips de saveJail()
+ * porque não estava na whitelist de campos permitidos.
+ *
+ * Idempotente: só altera se ai-bans existir E algum campo estiver faltando.
+ */
+function amssoft_fail2ban_migrate_v11(): void
+{
+    try {
+        $jailConfig = new \AMS\Fail2Ban\JailConfig('/etc/fail2ban/jail.local');
+        $existing   = $jailConfig->readJailLocal();
+
+        if (isset($existing['ai-bans'])) {
+            $fix = [];
+            if (empty($existing['ai-bans']['logpath'])) {
+                $fix['logpath'] = '/var/log/apache2/access_whmcs.log';
+            }
+            if (empty($existing['ai-bans']['ignoreip'])) {
+                $fix['ignoreip'] = '127.0.0.1';
+            }
+            if (!empty($fix)) {
+                $jailConfig->saveJail('ai-bans', $fix);
+            }
+        }
+    } catch (\Throwable $e) {
+        // Silencioso — jail.local pode não existir ainda
+    }
+}
+
 function amssoft_fail2ban_output(array $vars): void
 {
     // Migração automática: garante que tabelas do v2 existam mesmo em instalações antigas
@@ -453,6 +510,20 @@ function amssoft_fail2ban_output(array $vars): void
     // Migração automática v9: coluna source_log na tabela de sugestões
     try {
         amssoft_fail2ban_migrate_v9();
+    } catch (\Exception $e) {
+        // Silencioso
+    }
+
+    // Migração automática v10: ENUM already_banned
+    try {
+        amssoft_fail2ban_migrate_v10();
+    } catch (\Exception $e) {
+        // Silencioso
+    }
+
+    // Migração automática v11: ai-bans sem logpath (bug desde v1.0.0)
+    try {
+        amssoft_fail2ban_migrate_v11();
     } catch (\Exception $e) {
         // Silencioso
     }

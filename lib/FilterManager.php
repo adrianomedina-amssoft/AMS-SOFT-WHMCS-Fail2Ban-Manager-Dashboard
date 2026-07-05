@@ -403,6 +403,13 @@ class FilterManager
         }
 
         foreach ($lines as $line) {
+            // Cada linha DEVE conter <HOST> (macro do fail2ban) para identificar o IP.
+            // Validação inversa: rejeitar linhas SEM <HOST> em vez de tentar enumerar
+            // todas as formas erradas (\<HOST>, \<HOST\>, etc.).
+            if (strpos($line, '<HOST>') === false) {
+                return false;
+            }
+
             // Múltiplos <HOST> numa linha = grupos nomeados duplicados no Python re = crash fatal
             if (substr_count($line, '<HOST>') > 1) {
                 return false;
@@ -416,6 +423,52 @@ class FilterManager
         }
 
         return true;
+    }
+
+    /**
+     * Teste de regressão para validateFailregex().
+     * Retorna array de resultados ['pass' => int, 'fail' => int, 'details' => [...]].
+     *
+     * Pode ser chamado via CLI: php -r "require 'lib/Router.php'; print_r(FilterManager::testValidateFailregex());"
+     */
+    public static function testValidateFailregex(): array
+    {
+        $tests = [
+            // Deve PASSAR
+            ['name' => 'valid_single_host',           'regex' => '^.* <HOST> .* "GET / HTTP',            'expect' => true],
+            ['name' => 'valid_multiple_lines',         'regex' => "^line1 <HOST> foo\nline2 <HOST> bar",  'expect' => true],
+            ['name' => 'valid_complex_pattern',        'regex' => '^\[.*\] \[client <HOST>:\d+\] AH01630:.*wp-.*\.php', 'expect' => true],
+
+            // Deve FALHAR
+            ['name' => 'escaped_host',                 'regex' => '^.* \\<HOST> - .* "GET /',             'expect' => false],
+            ['name' => 'escaped_host_both_sides',       'regex' => '^.* \\<HOST\\> - .* "GET /',           'expect' => false],
+            ['name' => 'no_host_macro',                 'regex' => '^.* 1\.2\.3\.4 - .* "GET /',          'expect' => false],
+            ['name' => 'multiple_host_same_line',       'regex' => '^.* <HOST> .* <HOST> .*',              'expect' => false],
+            ['name' => 'empty_string',                  'regex' => '',                                      'expect' => false],
+            ['name' => 'only_whitespace',               'regex' => '   ',                                   'expect' => false],
+        ];
+
+        $pass = 0;
+        $fail = 0;
+        $details = [];
+
+        // Instanciar com dummy para acessar método privado via reflection
+        $fm = new self('/tmp/', new JailConfig('/dev/null'), new Fail2BanClient('/usr/bin/sudo', '/usr/bin/fail2ban-client'));
+        $ref = new \ReflectionMethod($fm, 'validateFailregex');
+        $ref->setAccessible(true);
+
+        foreach ($tests as $t) {
+            $result = $ref->invoke($fm, $t['regex']);
+            $ok = $result === $t['expect'];
+            if ($ok) {
+                $pass++;
+            } else {
+                $fail++;
+                $details[] = "FAIL: {$t['name']} — expected " . ($t['expect'] ? 'true' : 'false') . ", got " . ($result ? 'true' : 'false');
+            }
+        }
+
+        return ['pass' => $pass, 'fail' => $fail, 'details' => $details];
     }
 
     // -----------------------------------------------------------------------

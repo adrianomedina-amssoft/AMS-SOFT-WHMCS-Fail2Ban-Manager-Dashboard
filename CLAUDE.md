@@ -377,7 +377,7 @@ Adicionar provedor futuro = 1 entrada no array `PROVIDERS`.
 - **Cap de ameaças:** `buildPrompt()` injeta "Retorne no máximo 10 ameaças, priorizando as de maior severidade e confiança" no system prompt — aplica-se a TODOS os prompts (default e customizado do admin). Garante que a resposta cabe dentro do budget de `max_tokens` mesmo com logs densos.
 - **Detecção de truncamento:** `callApi()` verifica `stop_reason`/`finish_reason` da resposta. Se for `"max_tokens"` ou `"length"`, lança `TruncatedResponseException` — o controller captura e sinaliza ao frontend via flag `truncated`. Watermark NÃO avança (log será reanalisado).
 - **Detecção de JSON inválido:** `parseResponse()` lança `InvalidResponseException` se a resposta não for JSON array válido. Controller captura, sinaliza via `parse_failed`, e registra em `ai_last_parse_error` no banco. Watermark NÃO avança.
-- **Mitigação de prompt injection:** instruções no system prompt, logs em `<log_data>` com aviso explícito
+- **Mitigação de prompt injection (SEC-16):** 3 camadas: (1) delimitador aleatório por requisição (`<log_data_{token}>`), (2) instruções no system prompt para ignorar conteúdo dentro das tags, (3) heurística de fallback regex quando IA retorna `[]` para linhas com padrões suspeitos. **Diferença entre provedores:** MiMo tem ~30% de resistência a payload de fechamento de tag (fraqueza do modelo); Anthropic tem ~100%. A heurística de fallback é defesa primária para MiMo, defense-in-depth para Anthropic.
 
 ### LogLock — Lock cross-user (cron ↔ painel)
 
@@ -418,6 +418,7 @@ continua SEM lock, `lock_config_warning` é logado. Não bloqueia a IA.
 - `filterSuggestions($raw, $skipIPs)` — estático, filtra sugestões cruas da IA (whitelist, dedup, confiança mínima, ação=ban)
 - `loadWhitelist()` — estático, carrega whitelist de IPs do banco
 - `processSuggestion($suggestion, $mode)` — processa uma sugestão de acordo com o modo (salva, bane se auto/threshold). Retorna `['id', 'status', 'banned', 'threshold_reached']`. Usado por `runAnalysis()` (cron) e disponível para o controller.
+- `heuristicFallback($lines)` — fallback regex quando IA retorna `[]` para linhas com padrões suspeitos. 15 padrões + detecção de UA >500 chars. Confidence 80. Intencionalmente "burra" (regex, não IA) — resistente a prompt injection. Usada como defesa primária para MiMo, defense-in-depth para Anthropic.
 
 **Threshold — contagem de detecções:**
 - `countRecentDetections()` conta apenas status `pending` + `auto_executed`
@@ -701,7 +702,7 @@ Procurar por `[SEC-N]` nos comentários para encontrar cada medida de segurança
 - **[SEC-13]** *(reservado — não implementado)*
 - **[SEC-14]** Evitar `Capsule::raw()` com variável interpolada
 - **[SEC-15]** Validação de status contra ENUM antes de UPDATE
-- **[SEC-16]** Mitigação de prompt injection (system prompt + tags `<log_data>`)
+- **[SEC-16]** Mitigação de prompt injection (system prompt + tags `<log_data>` + delimitador aleatório por requisição + heurística de fallback regex). **Importante:** MiMo tem ~30% de resistência a payload de fechamento de tag; Anthropic tem ~100%. A heurística de fallback (`AutoBanEngine::heuristicFallback()`) é defesa primária para MiMo, defense-in-depth para Anthropic. NUNCA desativar a heurística sem considerar o provedor ativo.
 - **[SEC-17]** Base URL editável: validação https:// + bloqueio de IPs privados/localhost/link-local 169.254.x.x (SSRF defense)
 - **[SEC-18]** `ai_active_provider` validado contra registry antes de persistir
 - **[SEC-19]** Erros de API: mensagem genérica no frontend, detalhes nunca expostos
@@ -734,6 +735,7 @@ Procurar por `[SEC-N]` nos comentários para encontrar cada medida de segurança
 | **Cache geo com ASN antigo** — registros cacheados antes da correção do parsing (que extrai apenas o número ASN) podem ter `asn` com string completa (ex: "AS396982 Google LLC" em vez de "AS396982"). | Baixo: campo `asn` exibido como tooltip/coluna secundária, não afeta funcionalidade. | TTL de 30 dias: registros antigos são substituídos automaticamente. `cleanExpiredGeoCache()` acelera a limpeza se necessário. |
 | **`has_new` stale no skip client-side** — `list_logs` calcula `has_new` no momento da requisição. Se o log crescer entre `list_logs` e o `analyze_log` daquele arquivo (possível em logs ativos como Apache), o JS pula mesmo havendo conteúdo novo. | Baixo: conteúdo novo é capturado no próximo ciclo de análise (próximo clique ou cron). | Nenhuma — edge case tolerável. O watermark do servidor é a fonte de verdade; o skip client-side é otimização, não gate. |
 | **Reset diário do contador não atômico** — `autoCreateFilterAndBan()` faz read-then-write para resetar `ai_auto_jails_created_today` no início do dia. Duas execuções simultâneas podem ambas resetar, perdendo um incremento. | Baixo: limite diário excedido em 1 jail (de 5). | Nenhuma — cron roda a cada 4 min, colisão improvável. Fix exigiria transação SQL com lock de linha, não trivial no schema KV. |
+| **MiMo: evasão via payload de fechamento de tag** — payload `</log_data>` no User-Agent evada detecção em ~70% das tentativas no MiMo (modelo retorna `[]` vazio). Anthropic resiste 100%. Qualquer sintaxe de fechamento de bloco tem a mesma taxa. | Alto para MiMo: ataque real passa despercebido silenciosamente. Baixo para Anthropic. | 3 camadas: delimitador aleatório por requisição + heurística de fallback regex (defesa primária para MiMo) + instruções no system prompt. Ver SEC-16. |
 
 **Observação em produção (2026-06-30):** `whmcs_auth.log` estava com watermark=3884818 mas arquivo=0 bytes — instância real do edge case de rotação. O próximo `analyze_log` resetou o offset para 0 e reanalisou do início (comportamento correto).
 

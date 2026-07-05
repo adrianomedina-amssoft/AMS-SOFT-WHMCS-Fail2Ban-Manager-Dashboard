@@ -256,6 +256,20 @@ class AutoBanEngine
                     // ── Chamada à IA ─────────────────────────────────────────
                     $rawSuggestions = $this->analyzer->analyze($lines);
 
+                    // ── Fallback heurístico (rede de segurança) ────────────────
+                    // Se a IA retornou vazio mas as linhas contêm tráfego suspeito,
+                    // gerar sugestão com confiança fixa (80, acima do threshold de 75).
+                    // Isso cobre o caso onde injeção no log silencia a IA
+                    // (payload fecha tag de delimitador).
+                    // Intencionalmente "burra" (regex, não IA) — essa camada é
+                    // resistente a prompt injection por natureza.
+                    if (empty($rawSuggestions) && !empty($lines)) {
+                        $heuristic = self::heuristicFallback($lines);
+                        if ($heuristic !== null) {
+                            $rawSuggestions = [$heuristic];
+                        }
+                    }
+
                     // ── Filtros pré-salvamento (método compartilhado) ─────────
                     $filtered = self::filterSuggestions($rawSuggestions, $skipIPs);
                     $skipIPs  = array_merge($skipIPs, array_column($filtered['valid'], 'ip'));
@@ -614,14 +628,24 @@ class AutoBanEngine
             case 'auto':
                 $id = $this->saveSuggestion($suggestion, 'auto_executed');
                 $banned = $this->executeBan($suggestion);
+                $alreadyBanned = false;
                 if (!$banned) {
-                    // Ban falhou (fail2ban offline, jail não existe, sudo sem permissão)
-                    // Reverter status para pending — admin pode tentar banir manualmente
-                    Database::updateSuggestionStatus($id, 'pending');
+                    // Verificar se IP já está banido (de ciclo anterior ou jail específica).
+                    // Se sim, manter auto_executed — não adianta reverter para pending.
+                    $alreadyBanned = $this->isIPAlreadyBanned($ip);
+                    if ($alreadyBanned) {
+                        Database::logEvent(
+                            $ip, self::AI_JAIL, 'already_banned',
+                            "IP já banido — mantendo status auto_executed (ban anterior)",
+                            null
+                        );
+                    } else {
+                        Database::updateSuggestionStatus($id, 'pending');
+                    }
                 }
                 return [
                     'id'               => $id,
-                    'status'           => $banned ? 'auto_executed' : 'pending',
+                    'status'           => ($banned || $alreadyBanned) ? 'auto_executed' : 'pending',
                     'banned'           => $banned,
                     'threshold_reached' => null,
                 ];
@@ -705,6 +729,129 @@ class AutoBanEngine
     // -----------------------------------------------------------------------
     // Privados
     // -----------------------------------------------------------------------
+
+    /**
+     * Verifica se o IP já está banido em qualquer jail do fail2ban.
+     * Usado como defense-in-depth: se executeBan() falhar mas o IP já está
+     * banido (de ciclo anterior), manter auto_executed em vez de reverter
+     * para pending (que causaria loop infinito de reprocessamento).
+     */
+    private function isIPAlreadyBanned(string $ip): bool
+    {
+        try {
+            if ($this->client->ping()) {
+                $bannedIPs = array_column($this->client->getBannedIPs(), 'ip');
+                return in_array($ip, $bannedIPs, true);
+            }
+        } catch (\Throwable $e) {
+            // fail2ban offline — não podemos verificar, assumir não banido
+        }
+        return false;
+    }
+
+    /**
+     * Fallback heurístico quando a IA retorna [] para linhas com tráfego suspeito.
+     *
+     * Intencionalmente "burra" (regex puro, não IA) — essa camada é resistente
+     * a prompt injection por natureza. Um atacante que silencia a IA via injeção
+     * de delimitador não consegue manipular esta heurística, porque ela não
+     * chama a IA novamente.
+     *
+     * Acionada quando: analyze() retornou array vazio mas as linhas contêm
+     * padrões de ataque reconhecíveis (path traversal, probes conhecidos,
+     * user-agent anormalmente longo, etc.).
+     *
+     * @return array|null Sugestão no formato esperado pelo pipeline, ou null se nada suspeito
+     */
+    private static function heuristicFallback(array $lines): ?array
+    {
+        // Padrões que indicam ataque real mesmo sem análise da IA
+        $suspiciousPatterns = [
+            '/\.\.\/\.\.\//',                        // path traversal
+            '/\/etc\/passwd/',                        // /etc/passwd access
+            '/\/\.env\b/',                            // .env probing
+            '/\/\.git\b/',                            // .git probing
+            '/\/\.htaccess/',                         // .htaccess probing
+            '/\/phpmyadmin/i',                        // phpMyAdmin probing
+            '/\/wp-login/i',                          // WordPress login probing
+            '/\/xmlrpc/i',                            // xmlrpc probing
+            '/\/admin\/config/i',                     // admin config probing
+            '/\/configuration\.php/',                 // WHMCS configuration
+            '/sqlmap|nikto|zgrab|nmap|masscan/i',     // scanner user-agents
+            '/<script|javascript:/i',                 // XSS attempts
+            '/UNION\s+SELECT|SELECT\s+\*/i',          // SQL injection
+            '/<\/log_data/',                          // prompt injection attempt
+            '/ignore.*previous.*instructions/i',      // prompt injection text
+        ];
+
+        $allText = implode(' ', $lines);
+
+        // User-Agent anormalmente longo (>500 chars) é sinal forte de payload
+        // injetado no campo — UAs legítimos raramente excedem 200 chars.
+        if (preg_match('/"([^"]{500,})"/', $allText)) {
+            // UA longo + qualquer padrão suspeito = high
+            foreach ($suspiciousPatterns as $pattern) {
+                if (preg_match($pattern, $allText)) {
+                    return self::buildHeuristicSuggestion($lines, 'high', 2,
+                        'User-Agent anormalmente longo + padrão suspeito detectado');
+                }
+            }
+            // UA longo sozinho = medium (pode ser legítimo, mas incomum)
+            return self::buildHeuristicSuggestion($lines, 'medium', 1,
+                'User-Agent anormalmente longo (>500 chars) — possível payload injetado');
+        }
+
+        // Contagem de padrões suspeitos
+        $matchedPatterns = 0;
+        foreach ($suspiciousPatterns as $pattern) {
+            if (preg_match($pattern, $allText)) {
+                $matchedPatterns++;
+            }
+        }
+
+        if ($matchedPatterns < 1) {
+            return null;
+        }
+
+        // Qualquer acionamento da heurística já indica tentativa de evasão
+        $severity = $matchedPatterns >= 3 ? 'high' : 'medium';
+        return self::buildHeuristicSuggestion($lines, $severity, $matchedPatterns,
+            "{$matchedPatterns} padrão(ões) suspeito(s) detectado(s)");
+    }
+
+    /**
+     * Constrói uma sugestão no formato esperado pelo pipeline para a heurística.
+     */
+    private static function buildHeuristicSuggestion(array $lines, string $severity, int $patternCount, string $reason): ?array
+    {
+        // Extrair IP da primeira linha
+        $ip = '';
+        foreach ($lines as $line) {
+            if (preg_match('/^(\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3})/', $line, $m)) {
+                $ip = $m[1];
+                break;
+            }
+        }
+
+        if (empty($ip) || !filter_var($ip, FILTER_VALIDATE_IP)) {
+            return null;
+        }
+
+        return [
+            'ip'             => $ip,
+            'threat'         => 'Possível ataque detectado por heurística (resposta da IA vazia)',
+            'severity'       => $severity,
+            'confidence'     => 80, // Acima do ai_min_confidence padrão (75)
+            'evidence'       => array_slice($lines, 0, 5),
+            'action'         => 'ban',
+            'jail'           => '',
+            'bantime'        => 3600,
+            'reason'         => "Heurística: {$reason}. Resposta da IA estava vazia (possível prompt injection).",
+            'suggested_rule' => '',
+            'filter_name'    => '',
+            'failregex'      => '',
+        ];
+    }
 
     /**
      * Lê apenas as linhas novas de um arquivo a partir de $offset bytes.
