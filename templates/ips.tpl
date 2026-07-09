@@ -75,15 +75,9 @@
                 <td><?= $e(\AMS\Fail2Ban\Helper::fmtDate($row['timestamp'] ?? '')) ?></td>
                 <td><?= $e($row['reason'] ?? '-') ?></td>
                 <td>
-                    <form method="post" action="<?= $e($modulelink . '&action=ips') ?>"
-                          class="amsfb-inline-form"
-                          onsubmit="return confirm('Desbanir <?= $e(addslashes($row['ip'])) ?> de <?= $e(addslashes($row['jail'])) ?>?')">
-                        <input type="hidden" name="csrf_token" value="<?= $e($csrf_token) ?>">
-                        <input type="hidden" name="do"   value="unban">
-                        <input type="hidden" name="ip"   value="<?= $e($row['ip']) ?>">
-                        <input type="hidden" name="jail" value="<?= $e($row['jail']) ?>">
-                        <button type="submit" class="btn btn-xs btn-warning">Desbanir</button>
-                    </form>
+                    <button type="button" class="btn btn-xs btn-warning amsfb-unban-btn"
+                            data-ip="<?= $e($row['ip']) ?>"
+                            data-jail="<?= $e($row['jail']) ?>">Desbanir</button>
                 </td>
             </tr>
         <?php endforeach; ?>
@@ -169,27 +163,107 @@
 </div>
 
 <script>
+// Auto-abrir modal "Banir IP" com IP pré-preenchido
+// (acionado quando o admin vem da tela de Sugestões IA com jail inativável)
+<?php if (!empty($open_ban_modal) && !empty($ban_ip)): ?>
 (function () {
-    // Auto-abrir modal "Banir IP" com IP pré-preenchido
-    // (acionado quando o admin vem da tela de Sugestões IA com jail inativável)
-    <?php if (!empty($open_ban_modal) && !empty($ban_ip)): ?>
-    (function () {
-        function openBanModal() {
-            if (typeof $ !== 'undefined') {
-                $('#modalBanIP').modal('show');
-            } else if (typeof bootstrap !== 'undefined') {
-                var el = document.getElementById('modalBanIP');
-                if (el) new bootstrap.Modal(el).show();
-            }
-        }
+    function openBanModal() {
         if (typeof $ !== 'undefined') {
-            $(document).ready(openBanModal);
-        } else {
-            document.addEventListener('DOMContentLoaded', openBanModal);
+            $('#modalBanIP').modal('show');
+        } else if (typeof bootstrap !== 'undefined') {
+            var el = document.getElementById('modalBanIP');
+            if (el) new bootstrap.Modal(el).show();
         }
-    })();
-    <?php endif; ?>
-
-    // filtro client-side removido (paginação server-side)
+    }
+    if (typeof $ !== 'undefined') {
+        $(document).ready(openBanModal);
+    } else {
+        document.addEventListener('DOMContentLoaded', openBanModal);
+    }
 })();
+<?php endif; ?>
+
+// Desbanir via AJAX — usa fetch direto para não depender de amssoft_fail2ban.js
+document.querySelectorAll('.amsfb-unban-btn').forEach(function (btn) {
+    btn.addEventListener('click', function () {
+        var ip   = this.dataset.ip;
+        var jail = this.dataset.jail;
+        if (!confirm('Desbanir ' + ip + ' de ' + jail + '?')) return;
+
+        btn.disabled    = true;
+        btn.textContent = '⏳';
+
+        // CSRF token pode estar stale se outra aba rotacionou — ler do cookie/session
+        var csrfToken = window.AMSFB && window.AMSFB.csrfToken
+            ? window.AMSFB.csrfToken
+            : (document.querySelector('input[name="csrf_token"]') || {}).value || '';
+
+        var url  = (window.AMSFB && window.AMSFB.moduleLink ? window.AMSFB.moduleLink : '')
+                 + '&action=ips&do=unban';
+        var body = 'csrf_token=' + encodeURIComponent(csrfToken)
+                 + '&ip=' + encodeURIComponent(ip)
+                 + '&jail=' + encodeURIComponent(jail);
+
+        fetch(url, {
+            method:  'POST',
+            headers: {
+                'Content-Type':     'application/x-www-form-urlencoded',
+                'X-Requested-With': 'XMLHttpRequest',
+            },
+            body: body,
+        })
+        .then(function (r) { return r.json(); })
+        .then(function (data) {
+            // Sincronizar CSRF token rotacionado
+            if (data && data.csrf_token && window.AMSFB) {
+                window.AMSFB.csrfToken = data.csrf_token;
+            }
+
+            if (data.success) {
+                var row = btn.closest('tr');
+                if (row) {
+                    row.style.transition = 'opacity .4s ease';
+                    row.style.opacity = '0';
+                    setTimeout(function () { row.remove(); }, 450);
+                }
+                showFlash('success', data.message || 'IP desbanido com sucesso.');
+            } else {
+                btn.disabled    = false;
+                btn.textContent = 'Desbanir';
+                showFlash('danger', data.error || 'Falha ao desbanir IP.');
+            }
+        })
+        .catch(function (err) {
+            btn.disabled    = false;
+            btn.textContent = 'Desbanir';
+            showFlash('danger', 'Erro de rede: ' + err);
+        });
+    });
+});
+
+function showFlash(type, msg) {
+    var existing = document.querySelector('.amsfb-flash-ajax');
+    if (existing) existing.remove();
+
+    var div = document.createElement('div');
+    div.className = 'alert alert-' + type + ' alert-dismissible amsfb-flash amsfb-flash-ajax';
+    div.setAttribute('role', 'alert');
+    div.innerHTML = '<button type="button" class="close" data-dismiss="alert" aria-label="Fechar">'
+        + '<span aria-hidden="true">&times;</span></button>' + escapeHtml(msg);
+
+    var content = document.querySelector('.amsfb-content');
+    if (content) content.insertBefore(div, content.firstChild);
+
+    setTimeout(function () {
+        div.style.transition = 'opacity .6s ease';
+        div.style.opacity = '0';
+        setTimeout(function () { if (div.parentNode) div.parentNode.removeChild(div); }, 700);
+    }, 5000);
+}
+
+function escapeHtml(str) {
+    var div = document.createElement('div');
+    div.appendChild(document.createTextNode(str));
+    return div.innerHTML;
+}
 </script>

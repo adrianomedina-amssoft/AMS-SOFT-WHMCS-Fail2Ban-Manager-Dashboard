@@ -83,6 +83,62 @@ class IpsController
     }
 
     // -----------------------------------------------------------------------
+    // AJAX handler
+    // -----------------------------------------------------------------------
+
+    public function handleAjax(string $do, array $post): string
+    {
+        if ($do === 'unban') {
+            $ip   = Helper::sanitizeIp($post['ip'] ?? '');
+            $jail = Helper::sanitizeJail($post['jail'] ?? '');
+
+            if (!$ip || !$jail) {
+                return json_encode(['success' => false, 'error' => 'IP ou jail inválido.']);
+            }
+
+            $client  = $this->router->makeClient();
+            $adminId = Helper::adminId();
+
+            $ok = $client->unbanIP($jail, $ip);
+            if ($ok) {
+                Database::logEvent($ip, $jail, 'manual_unban', 'Manual via WHMCS', $adminId);
+                return json_encode(['success' => true, 'message' => "IP {$ip} desbanido do jail {$jail}."]);
+            }
+
+            // Fallback: verificar se o IP já não está banido (pode ter sido removido por outro processo)
+            $status = $client->getJailStatus($jail);
+            if (!in_array($ip, $status['banned_ip_list'], true)) {
+                Database::logEvent($ip, $jail, 'manual_unban', 'Manual via WHMCS', $adminId);
+                return json_encode(['success' => true, 'message' => "IP {$ip} já não está banido no jail {$jail}."]);
+            }
+
+            return json_encode(['success' => false, 'error' => "Falha ao desbanir {$ip} do jail {$jail}."]);
+        }
+
+        if ($do === 'ban') {
+            $ip   = Helper::sanitizeIp($post['ip'] ?? '');
+            $jail = Helper::sanitizeJail($post['jail'] ?? '');
+
+            if (!$ip || !$jail) {
+                return json_encode(['success' => false, 'error' => 'IP ou jail inválido.']);
+            }
+
+            $client  = $this->router->makeClient();
+            $adminId = Helper::adminId();
+
+            $ok = $client->banIP($jail, $ip);
+            if ($ok) {
+                Database::logEvent($ip, $jail, 'manual_ban', 'Manual via WHMCS', $adminId);
+                return json_encode(['success' => true, 'message' => "IP {$ip} banido no jail {$jail}."]);
+            }
+
+            return json_encode(['success' => false, 'error' => "Falha ao banir {$ip} no jail {$jail}."]);
+        }
+
+        return json_encode(['success' => false, 'error' => 'Ação desconhecida.']);
+    }
+
+    // -----------------------------------------------------------------------
     // GET — list
     // -----------------------------------------------------------------------
 

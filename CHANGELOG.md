@@ -1,5 +1,29 @@
 # CHANGELOG
 
+## 2026-07-04 — Fix: Botão "Desbanir" não funcionava (CSRF stale + ordem de scripts)
+
+### Problema
+
+- **Sintoma:** Ao clicar em "Desbanir" na página IPs Banidos, nada acontecia. O IP permanecia banido.
+- **Causa raiz (CSRF):** O botão usava `<form method="post">` tradicional com CSRF token impresso no HTML hidden field. Quando o admin navegava entre abas do módulo antes de clicar "Desbanir", o CSRF token era rotacionado por outras requisições AJAX ([SEC-7]), tornando o token no form stale. O POST falhava silenciosamente com flash "Token CSRF inválido" que auto-dismissava em 5 segundos.
+- **Causa raiz (JS):** A primeira tentativa de correção usou `window.AMSFB.post()` dentro de um script inline no template. Mas o layout.tpl carrega `amssoft_fail2ban.js` (que define `window.AMSFB.post`) **após** o `$content` (onde o script inline é renderizado). Quando o IIFE era executado, `window.AMSFB.post` ainda não existia.
+- **Teste fail2ban-client:** `sudo fail2ban-client set ai-bans unbanip 160.20.161.217` retornou `1` (sucesso) — o fail2ban-client funcionava corretamente.
+
+### Correção final
+
+- **Template `ips.tpl`:** Convertido unban de form POST tradicional para `fetch()` direto no JavaScript inline. Não depende de `amssoft_fail2ban.js` carregar primeiro. Usa `window.AMSFB.csrfToken` (se disponível) ou fallback para input hidden. Handler anexado diretamente nos botões com `data-ip` e `data-jail`.
+- **Controller `IpsController.php`:** Adicionado método `handleAjax(string $do, array $post): string` para processar unban/ban via AJAX. Inclui fallback: se `unbanIP()` falhar, verifica se o IP já não está banido (pode ter sido removido por outro processo).
+- **Resultado:** Botão "Desbanir" funciona independentemente de quantas requisições AJAX tenham sido feitas antes. Feedback imediato (flash message + remoção da linha com animação).
+
+### Arquivos modificados
+
+| Arquivo | Mudança |
+|---|---|
+| `templates/ips.tpl` | Substituiu `<form method="post">` por `<button>` com handler `fetch()` direto |
+| `controllers/IpsController.php` | Adicionado `handleAjax()` para unban/ban via AJAX |
+
+---
+
 ## 2026-07-04 — Segurança: prompt injection, ignoreip, heurística de fallback
 
 ### Prompt injection via delimitador de log (SEC-16)

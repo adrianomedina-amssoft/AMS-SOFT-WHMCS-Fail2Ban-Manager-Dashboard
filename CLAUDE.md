@@ -606,7 +606,7 @@ Lookup de dados geográficos de IPs via API pública ip-api.com (sem chave, sem 
 | Action | Controller | Tipo |
 |---|---|---|
 | dashboard | DashboardController | Página |
-| ips | IpsController | Página + POST |
+| ips | IpsController | Página + AJAX |
 | jails | JailsController | Página + AJAX |
 | jail_edit | JailsController | Página |
 | logpaths | LogPathsController | Página + AJAX |
@@ -627,6 +627,10 @@ Todas as requisições AJAX são:
 - `do=disable` — desabilita jail
 - `do=remove` — remove jail
 - `do=reload_all` — reload geral do fail2ban
+
+### IPs (action=ips)
+- `do=unban` — desbane IP via AJAX. POST: `ip`, `jail`. Retorna `success`, `message` ou `error`. Inclui fallback: se `unbanIP()` falhar, verifica se o IP já não está banido.
+- `do=ban` — bane IP via AJAX. POST: `ip`, `jail`. Retorna `success`, `message` ou `error`.
 
 ### IA (action=ai)
 - `do=approve` — aprova sugestão (bane IP via provedor ativo)
@@ -739,7 +743,7 @@ Procurar por `[SEC-N]` nos comentários para encontrar cada medida de segurança
 
 **Observação em produção (2026-06-30):** `whmcs_auth.log` estava com watermark=3884818 mas arquivo=0 bytes — instância real do edge case de rotação. O próximo `analyze_log` resetou o offset para 0 e reanalisou do início (comportamento correto).
 
-> Histórico completo de bugs corrigidos: ver [CHANGELOG.md](CHANGELOG.md).
+> Histórico completo de bugs corrigidos: ver [CHANGELOG.md](CHANGELOG.md). Mudanças significativas são documentadas lá com data, contexto e correção aplicada.
 
 ### Padrão de retry CSRF (adotado em todos os endpoints AJAX)
 
@@ -763,6 +767,8 @@ doAction(false);
 4. Script inline — define `window.AMSFB.moduleLink`, `csrfToken`, etc.
 
 Templates que usam `window.AMSFB` na inicialização (não em handlers de evento) **devem** aguardar `DOMContentLoaded`.
+
+**Importante:** Scripts inline dentro de `$content` são executados **antes** de `amssoft_fail2ban.js` carregar. Para handlers de evento (click, submit), `window.AMSFB.post` estará disponível quando o handler for executado (pois o usuário clica depois do page load). Mas para código que roda imediatamente no IIFE, usar `fetch()` direto em vez de `window.AMSFB.post` — ver `templates/ips.tpl` como exemplo.
 
 ## Instalação (resumo)
 
