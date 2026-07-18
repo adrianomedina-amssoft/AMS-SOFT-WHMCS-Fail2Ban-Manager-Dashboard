@@ -123,6 +123,13 @@ class FilterManager
         // Múltiplas linhas de failregex são indentadas — fail2ban compila cada uma separadamente
         $description = preg_replace('/[\x00-\x1F\x7F]/', '', $description);
         $failregexLines  = array_filter(array_map('trim', explode("\n", $failregex)));
+
+        // Escapar % como %% — fail2ban interpreta % como caractere de formatação.
+        // Ex: %27 (apóstrofo URL-encoded) deve virar %%27 no arquivo de filtro.
+        $failregexLines = array_map(function ($line) {
+            return str_replace('%', '%%', $line);
+        }, $failregexLines);
+
         $failregexFormatted = implode("\n            ", $failregexLines);
         $content = "# AMS Fail2Ban Manager -- filtro gerado automaticamente\n"
                  . "# " . substr($description, 0, 200) . "\n"
@@ -407,6 +414,13 @@ class FilterManager
             // Validação inversa: rejeitar linhas SEM <HOST> em vez de tentar enumerar
             // todas as formas erradas (\<HOST>, \<HOST\>, etc.).
             if (strpos($line, '<HOST>') === false) {
+                return false;
+            }
+
+            // Rejeitar \<HOST> — escape incorreto que fail2ban não reconhece.
+            // strpos('<HOST>') já passou, então se a linha tiver \<HOST>,
+            // significa que há um \ antes do <HOST>.
+            if (preg_match('/\\\\<HOST>/', $line)) {
                 return false;
             }
 
