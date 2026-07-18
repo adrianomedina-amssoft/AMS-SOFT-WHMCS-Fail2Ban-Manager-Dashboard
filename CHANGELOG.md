@@ -1,5 +1,24 @@
 # CHANGELOG
 
+## 2026-07-18 — Fix: Filtros fail2ban com regex inválida quebravam o serviço
+
+### Problema
+
+- **Sintoma:** fail2ban não iniciava. Erro: `'%' must be followed by '%' or '('` e `unbalanced parenthesis`. Módulo mostrava aviso "sudo não está funcionando".
+- **Causa raiz:** Dois filtros gerados pela IA tinham regex inválidas:
+  - `amsfb-apache-language-scanner.conf` — `%27` (apóstrofo URL-encoded) não escapado. fail2ban interpreta `%` como caractere de formatação.
+  - `amsfb-cms-scanner-bot.conf` — `\<HOST>` com escape incorreto. fail2ban não reconhece `<HOST>` escapado.
+- **Correção manual:** Filtros corrigidos no servidor (`%%27` e `<HOST>`).
+- **Correção no código:** `FilterManager` agora previne ambos os casos.
+
+### Arquivos modificados
+
+| Arquivo | Mudança |
+|---|---|
+| `lib/FilterManager.php` | `validateFailregex()` rejeita `\<HOST>`; `createFilter()` escapa `%` como `%%` |
+
+---
+
 ## 2026-07-04 — Fix: Botão "Desbanir" não funcionava (CSRF stale + ordem de scripts)
 
 ### Problema
