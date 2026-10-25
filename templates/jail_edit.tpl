@@ -4,7 +4,7 @@
  * Available: $jail (string), $jail_data (array with keys: enabled, maxretry, findtime, bantime, logpath, ...)
  */
 $jd = $jail_data;
-$defaultEnabled  = isset($jd['enabled']) ? strtolower($jd['enabled']) !== 'false' : true;
+$defaultEnabled  = in_array(strtolower($jd['enabled']??'false'),['true','1','yes','on'],true);
 $defaultMaxretry = (int)($jd['maxretry'] ?? 5);
 $defaultFindtime = (int)($jd['findtime'] ?? 600);
 $defaultBantime  = (int)($jd['bantime']  ?? 3600);
@@ -15,6 +15,9 @@ $defaultLogpath  = $jd['logpath'] ?? '';
     <h3>&#128274; Editar Jail: <code><?= $e($jail) ?></code></h3>
     <a href="<?= $e($modulelink . '&action=jails') ?>" class="btn btn-sm btn-default">&larr; Voltar</a>
 </div>
+
+<div class="alert alert-info">O formulário mostra a configuração efetiva calculada pelo Fail2Ban. A gravação é em jail.local; overrides em jail.d e quarentena podem prevalecer. Nenhuma quarentena é removida por este formulário.</div>
+<details><summary>Valores solicitados em jail.local</summary><pre><?= $e(json_encode($requested_data??[],JSON_PRETTY_PRINT|JSON_UNESCAPED_UNICODE)) ?></pre></details>
 
 <div class="panel panel-default" style="max-width:640px;">
     <div class="panel-body">

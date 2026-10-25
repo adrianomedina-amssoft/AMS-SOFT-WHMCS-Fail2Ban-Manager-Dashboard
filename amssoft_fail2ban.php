@@ -25,7 +25,7 @@ function amssoft_fail2ban_config(): array
         'author'      => 'AMS SOFT',
         'authorurl' => 'https://www.amssoft.com.br',
         'language'    => 'portuguese-br',
-        'version'     => '2.0.1',
+        'version'     => '2.2.54',
         'fields'      => [
             'sudo_path'       => [
                 'FriendlyName' => 'Caminho sudo',
@@ -154,6 +154,7 @@ function amssoft_fail2ban_activate(): array
             @file_put_contents($htaccess, "Order Deny,Allow\nDeny from all\n");
         }
 
+        \AMS\Fail2Ban\Migrations::run();
         return ['status' => 'success', 'description' => 'AMS Fail2Ban Manager instalado com sucesso.'];
     } catch (\Exception $e) {
         return ['status' => 'error', 'description' => $e->getMessage()];
@@ -163,11 +164,8 @@ function amssoft_fail2ban_activate(): array
 function amssoft_fail2ban_deactivate(): array
 {
     try {
-        Capsule::schema()->dropIfExists('mod_amssoft_fail2ban_logs');
-        Capsule::schema()->dropIfExists('mod_amssoft_fail2ban_config');
-        Capsule::schema()->dropIfExists('mod_amssoft_fail2ban_ai_suggestions');
-        Capsule::schema()->dropIfExists('mod_amssoft_fail2ban_geo_cache');
-        return ['status' => 'success', 'description' => 'AMS Fail2Ban Manager removido.'];
+        \AMS\Fail2Ban\Database::setConfig('ai_auto_enabled', '0');
+        return ['status' => 'success', 'description' => 'Módulo desativado. Dados e configuração preservados; exclusão definitiva exige operação explícita.'];
     } catch (\Exception $e) {
         return ['status' => 'error', 'description' => $e->getMessage()];
     }
@@ -343,7 +341,7 @@ function amssoft_fail2ban_migrate_v8(): void
     }
 
     // 2. Garantir data/locks/ existe com setgid (para instalações existentes)
-    $locksDir = dirname(__DIR__) . '/data/locks/';
+    $locksDir = __DIR__ . '/data/locks/';
     if (!is_dir($locksDir)) {
         @mkdir($locksDir, 0770, true);
     }
@@ -373,7 +371,7 @@ function amssoft_fail2ban_migrate_v8(): void
     // e setgid faz lock files herdam grupo www-data. Testado em produção.
 
     // 3. Garantir data/.htaccess existe
-    $htaccess = dirname(__DIR__) . '/data/.htaccess';
+    $htaccess = __DIR__ . '/data/.htaccess';
     if (!file_exists($htaccess)) {
         @file_put_contents($htaccess, "Order Deny,Allow\nDeny from all\n");
     }
@@ -458,75 +456,8 @@ function amssoft_fail2ban_migrate_v11(): void
 
 function amssoft_fail2ban_output(array $vars): void
 {
-    // Migração automática: garante que tabelas do v2 existam mesmo em instalações antigas
-    try {
-        amssoft_fail2ban_migrate_v2();
-    } catch (\Exception $e) {
-        // Silencioso — não interrompe o carregamento do módulo
-    }
-
-    // Migração automática v3: colunas de filtro fail2ban
-    try {
-        amssoft_fail2ban_migrate_v3();
-    } catch (\Exception $e) {
-        // Silencioso
-    }
-
-    // Migração automática v4: multi-provider IA
-    try {
-        amssoft_fail2ban_migrate_v4();
-    } catch (\Exception $e) {
-        // Silencioso
-    }
-
-    // Migração automática v5: tabela de cache GeoIP
-    try {
-        amssoft_fail2ban_migrate_v5();
-    } catch (\Exception $e) {
-        // Silencioso
-    }
-
-    // Migração automática v6: limpar chave de protocolo do MiMo
-    try {
-        amssoft_fail2ban_migrate_v6();
-    } catch (\Exception $e) {
-        // Silencioso
-    }
-
-    // Migração automática v7: expandir ENUM da coluna action
-    try {
-        amssoft_fail2ban_migrate_v7();
-    } catch (\Exception $e) {
-        // Silencioso
-    }
-
-    // Migração automática v8: diretório de lock compartilhado + ENUM lock_config_warning
-    try {
-        amssoft_fail2ban_migrate_v8();
-    } catch (\Exception $e) {
-        // Silencioso
-    }
-
-    // Migração automática v9: coluna source_log na tabela de sugestões
-    try {
-        amssoft_fail2ban_migrate_v9();
-    } catch (\Exception $e) {
-        // Silencioso
-    }
-
-    // Migração automática v10: ENUM already_banned
-    try {
-        amssoft_fail2ban_migrate_v10();
-    } catch (\Exception $e) {
-        // Silencioso
-    }
-
-    // Migração automática v11: ai-bans sem logpath (bug desde v1.0.0)
-    try {
-        amssoft_fail2ban_migrate_v11();
-    } catch (\Exception $e) {
-        // Silencioso
-    }
+    // Versioned migrations: no DDL in ordinary page/AJAX requests.
+    \AMS\Fail2Ban\Migrations::run();
 
     // Detect AJAX requests — clear any WHMCS output buffers, return JSON and exit.
     $isAjax = isset($_SERVER['HTTP_X_REQUESTED_WITH'])

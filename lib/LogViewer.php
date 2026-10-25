@@ -41,6 +41,9 @@ class LogViewer
         '/var/log/apache2/error.log'           => 'Apache Error',
         '/var/log/apache2/access_whmcs.log'    => 'WHMCS Apache Access',
         '/var/log/apache2/error_whmcs.log'     => 'WHMCS Apache Error',
+        '/var/log/apache2/access_license_gateway.log' => 'Gateway Apache Access',
+        '/var/log/apache2/error_license_gateway.log' => 'Gateway Apache Error',
+        '/var/log/fail2ban.log'                => 'Fail2Ban operacional (visualização)',
         '/var/log/apache2/whmcs_access.log'    => 'WHMCS Apache Access (alt)',
         '/var/log/auth.log'                    => 'Linux Auth (SSH/sudo)',
         '/var/log/syslog'                      => 'Syslog',
@@ -64,7 +67,7 @@ class LogViewer
         // 2. DB: custom_log.* — adicionados pelo admin via tela Log Paths
         try {
             $rows = \WHMCS\Database\Capsule::table('mod_amssoft_fail2ban_config')
-                ->where('key', 'like', 'custom_log.%')
+                ->whereRaw("`key` LIKE ? ESCAPE '='", ['custom=_log.%'])
                 ->get();
             foreach ($rows as $row) {
                 $label = substr($row->key, strlen('custom_log.'));
@@ -218,7 +221,7 @@ class LogViewer
     public function extractIPs(array $lines): array
     {
         $ipv4 = '\b(?:\d{1,3}\.){3}\d{1,3}\b';
-        $ipv6 = '\b(?:[0-9a-fA-F]{1,4}:){2,7}[0-9a-fA-F]{1,4}\b';
+        $ipv6 = '(?<![a-zA-Z0-9:])[0-9a-fA-F]*:[0-9a-fA-F:.]+(?![a-zA-Z0-9:])';
         $pattern = '/(' . $ipv4 . '|' . $ipv6 . ')/';
 
         $found = [];
@@ -241,7 +244,7 @@ class LogViewer
     public function highlightSuspicious(array $lines): array
     {
         $ipv4 = '\b(?:\d{1,3}\.){3}\d{1,3}\b';
-        $ipv6 = '\b(?:[0-9a-fA-F]{1,4}:){2,7}[0-9a-fA-F]{1,4}\b';
+        $ipv6 = '(?<![a-zA-Z0-9:])[0-9a-fA-F]*:[0-9a-fA-F:.]+(?![a-zA-Z0-9:])';
         $ipPattern = '/(' . $ipv4 . '|' . $ipv6 . ')/';
 
         $result = [];
@@ -304,12 +307,17 @@ class LogViewer
         $skipSet = array_flip($skipIPs); // O(1) lookup
 
         $ipv4 = '\b(?:\d{1,3}\.){3}\d{1,3}\b';
-        $ipv6 = '\b(?:[0-9a-fA-F]{1,4}:){2,7}[0-9a-fA-F]{1,4}\b';
+        $ipv6 = '(?<![a-zA-Z0-9:])[0-9a-fA-F]*:[0-9a-fA-F:.]+(?![a-zA-Z0-9:])';
         $pattern = '/(' . $ipv4 . '|' . $ipv6 . ')/';
 
         $filtered = [];
 
         foreach ($lines as $line) {
+            $peer = Safety::sourceIp($line);
+            if ($peer !== null) {
+                if (!isset($skipSet[$peer]) && !Safety::isWhitelisted($peer, $skipIPs)) $filtered[] = $line;
+                continue;
+            }
             if (!preg_match_all($pattern, $line, $matches)) {
                 // Sem IP — manter (pode ter padrão de ataque)
                 $filtered[] = $line;
@@ -339,7 +347,7 @@ class LogViewer
      */
     public function isValidPath(string $path): bool
     {
-        if (strpos($path, '..') !== false) {
+        if (strpos($path, '..') !== false || preg_match('/[\x00-\x1f\x7f]/', $path)) {
             return false;
         }
         if (!str_starts_with($path, '/')) {
@@ -348,12 +356,10 @@ class LogViewer
         // [SEC-8] Restringir leitura a diretórios de log conhecidos.
         // Impede que um admin configure /etc/passwd, /etc/shadow, chaves SSH etc.
         // como path de log, expondo arquivos sensíveis via fetch_lines AJAX.
-        $allowedPrefixes = ['/var/log/', '/var/www/html/', '/tmp/'];
-        foreach ($allowedPrefixes as $prefix) {
-            if (str_starts_with($path, $prefix)) {
-                return true;
-            }
-        }
-        return false;
+        $canonical = realpath($path);
+        return $canonical !== false && is_file($canonical)
+            && str_starts_with($canonical, '/var/log/')
+            && (preg_match('/\.(?:log|txt)(?:\.\d+)?$/', $canonical)
+                || in_array(basename($canonical), ['syslog', 'messages', 'secure'], true));
     }
 }

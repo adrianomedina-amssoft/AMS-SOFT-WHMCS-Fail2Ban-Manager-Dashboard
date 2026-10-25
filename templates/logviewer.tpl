@@ -258,15 +258,13 @@ document.addEventListener('DOMContentLoaded', function () {
 
         if (data.success && data.truncated) {
             RESULT.className = 'alert alert-warning';
-            RESULT.innerHTML = '&#9888; ' + (data.message || 'Resposta truncada pela IA (limite de tokens).') +
-                (data.saved > 0 ? ' <a href="<?= $e($modulelink . '&action=ai') ?>">Ver sugestões parciais &rarr;</a>' : '');
+            RESULT.textContent = '⚠ ' + (data.message || 'Resposta truncada pela IA (limite de tokens).');
         } else if (data.success) {
             RESULT.className = 'alert alert-success';
-            RESULT.innerHTML = '&#10003; ' + (data.message || 'Análise concluída.') +
-                ' <a href="<?= $e($modulelink . '&action=ai') ?>">Ver sugestões &rarr;</a>';
+            RESULT.textContent = '✓ ' + (data.message || 'Análise concluída.');
         } else {
             RESULT.className = 'alert alert-danger';
-            RESULT.innerHTML = '&#10007; ' + (data.error || 'Erro desconhecido.');
+            RESULT.textContent = '✗ ' + (data.error || 'Erro desconhecido.');
         }
     }
 

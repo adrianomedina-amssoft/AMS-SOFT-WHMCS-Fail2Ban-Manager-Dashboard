@@ -25,6 +25,7 @@
             'reports'    => ['icon' => '&#128202;',  'label' => 'Relatórios'],
             'logviewer'  => ['icon' => '&#128220;',  'label' => 'Log Viewer'],
             'ai'         => ['icon' => '&#129302;',  'label' => 'IA'],
+            'protection' => ['icon' => '&#9881;', 'label' => 'Proteção e manutenção'],
         ];
         $activeNav = match(true) {
             in_array($current_action, ['jail_edit'], true) => 'jails',

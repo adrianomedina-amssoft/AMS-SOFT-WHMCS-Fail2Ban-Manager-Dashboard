@@ -1,0 +1,11 @@
+# AMSsoft: credential failures only. Authorization policy and SNI are not attacks.
+# Deliberately overrides the entire legacy failregex; no broad ignoreregex.
+# Sensitive-path probes remain covered by apache-sensitive and other native jails.
+[Definition]
+# Apache 2.4 pid records carry a connection port; consume it outside <HOST>.
+# With an optional suffix, e.g. IPv6 ::77 plus port 1234 becomes ::77:1234.
+# Legacy no-pid Apache 2.2 records carry only the address. Unknown forms fail closed.
+_apache_error_client = <apache-prefix>\[(:?error|<apache-pref-ignore>\S+:\S+)\](?P<amsfb_auth_pid> \[pid \d+(:\S+ \d+)?\])? \[client <HOST>(?(amsfb_auth_pid):\d{1,5})\]
+failregex = ^user (?!`)<F-USER>(?:\S*|.*?)</F-USER> (?:authentication failure|not found)\b
+            ^%(auth_type)suser <F-USER>(?:\S*|.*?)</F-USER>: password mismatch\b
+            ^%(auth_type)suser `<F-USER>(?:[^']*|.*?)</F-USER>' in realm `[^']+' (?:authentication failure|not found)\b

@@ -9,11 +9,16 @@ use AMS\Fail2Ban\AIAnalyzer;
 use AMS\Fail2Ban\AutoBanEngine;
 use AMS\Fail2Ban\LogViewer;
 use AMS\Fail2Ban\FilterManager;
+use AMS\Fail2Ban\AIDashboard;
+use AMS\Fail2Ban\AIView;
+use AMS\Fail2Ban\AIManual;
+use AMS\Fail2Ban\AISettings;
 
 class AIController
 {
     private array  $vars;
     private Router $router;
+    private ?array $activeJails = null;
 
     public function __construct(array $vars, Router $router)
     {
@@ -27,10 +32,17 @@ class AIController
 
     public function handle(string $action): string
     {
+        Helper::requireAdmin();
         if ($action === 'ai_settings') {
             return $this->showSettings();
         }
-        return $this->showSuggestions();
+        try {
+            return Database::withPresentationConfigCache(fn()=>$this->showSuggestions());
+        } catch (\InvalidArgumentException $e) {
+            return $this->router->render('ai_unavailable',['message'=>$e->getMessage()]);
+        } catch (\Throwable $e) {
+            return $this->router->render('ai_unavailable',['message'=>'Não foi possível confirmar os dados desta consulta. Verifique a disponibilidade local ou o limite de 5.000 decisões pendentes. Nenhuma decisão foi alterada.']);
+        }
     }
 
     // -----------------------------------------------------------------------
@@ -39,18 +51,68 @@ class AIController
 
     private function showSuggestions(): string
     {
-        $pendingPage   = max(1, (int)($_GET['pending_page'] ?? 1));
-        $pendingResult = Database::getPendingSuggestionsPaged($pendingPage, 10);
+        $query=AIView::input($_GET);
+        $this->activeJails=null;
+        $pendingPage=$query['pending_page'];$decisionView=$query['decision_view'];
+        $projection=AIView::projection();
+        $pendingResult=AIView::pending($projection,$decisionView,$pendingPage);
         $pending       = $this->decodeSuggestions($pendingResult['data']);
+        if($projection){
+            $priorBans=Database::getBanInfoForIps(array_column($pending,'ip'));
+            foreach($pending as &$s){$state=$projection['states'][$s['id']]??null;
+                $s['effectively_protected']=($state['state']??null)==='protected';
+                $s['actionable']=$decisionView==='actionable';
+                if(isset($state['eligibility'])){
+                    $el=$state['eligibility'];$reasonLabels=['evidence_expired'=>'Evidência antiga — histórico, sem bloqueio automático',
+                        'pending_new_analysis'=>'Atividade nova aguardando análise; prova antiga não autoriza ban',
+                        'protected_address'=>'Endereço protegido ou whitelist','not_attack'=>'Não é decisão de ataque',
+                        'confidence_low'=>'Confiança abaixo do limite','filter_missing'=>'Regra própria ausente',
+                        'proof_validation_pending'=>'Prova própria aguardando validação local','individual_multi_target'=>'Critério individual de múltiplos alvos atingido',
+                        'criteria_met'=>'Critérios atuais atingidos','waiting_threshold'=>'Aguardando critérios de repetição','individual_application_probe'=>'Sondagem individual entre aplicações validada',
+                        'non_offensive_signal'=>'Sinal operacional isolado — sem autoridade de bloqueio','waiting_query_criteria'=>'Manipulação suspeita — aguardando repetição individual validada','waiting_application_criteria'=>'Aguardando prova individual de aplicações distintas'];
+                    $s['decision_label']=$reasonLabels[$el['reason']]??$el['reason'];
+                    if(isset($el['count']))$s['decision_label'].=' — '.$el['count'].'/'.$el['needed'].' eventos em '.$el['minutes'].' min';
+                    if(isset($el['individual']))$s['decision_label'].='; individual: '.$el['individual']['events'].' eventos / '.$el['individual']['targets'].' alvos';
+                    if(isset($el['applications']))$s['decision_label'].='; aplicações: '.$el['applications']['events'].' eventos / '.$el['applications']['applications'].' aplicações';
+                    $s['evidence_latest_at']=$el['latest']?date('d/m/Y H:i:s',$el['latest']):'não comprovada';
+                }
+                $labels=['protected'=>'Bloqueio efetivo confirmado','unprotected'=>'Sem bloqueio confirmado para este serviço','unknown'=>'Aguardando consulta local','not_applicable'=>'Serviço não determinado; requer checagem'];
+                $s['protection_label']=($labels[$state['state']??'unknown']??'Aguardando checagem').' — '.strtoupper($state['service']??'unknown')
+                    .' — consulta '.date('d/m H:i:s',$projection['observed_at']);
+                if($s['effectively_protected'])$s['protection_label'].=' — '.implode(', ',array_unique(array_column($state['proof']['coverage'],'jail')))
+                    .' — válida até '.date('H:i:s',$state['valid_until']);
+                elseif(isset($priorBans[$s['ip']]))$s['protection_label'].=' — há ban anterior registrado; sem cobertura atual confirmada';
+            }unset($s);
+        }elseif($pending){
+            $snapshot=\AMS\Fail2Ban\Privileged::run(array_merge(['--read-budget','15','ban-coverage'],array_values(array_unique(array_column($pending,'ip')))));
+            $snapshot['ttl']=\AMS\Fail2Ban\Policy::number('ai_blocked_recheck_seconds');
+            foreach($pending as &$s){
+                $row=['ip'=>$s['ip'],'samples'=>json_encode(array_map(fn($line)=>['line'=>$line],$s['evidence']??[]))];
+                $proof=\AMS\Fail2Ban\BlockedTasks::protection($row,$snapshot);
+                $s['effectively_protected']=(bool)$proof;
+                $s['protection_label']=$proof?'Cobertura HTTP: '.implode(', ',array_unique(array_column($proof['coverage'],'jail'))).' — confirmada '.date('H:i:s',$proof['observed_at']).', revalidar até '.date('H:i:s',$proof['until']):'Cobertura HTTP não confirmada nesta consulta';
+            }unset($s);
+        }
+        $observationScope=$query['observation_scope'];
+        $learningScope=$query['learning_scope'];
+        $dashboard=$projection?AIDashboard::read($projection,$observationScope,$query['observations_page'],
+            $learningScope,$query['learning_page']):null;
+        $observations=$dashboard['observations']??Database::getAllSuggestionsPaged(['classification'=>'observations'],$query['observations_page'],10);
+        foreach($observations['data'] as &$observation){
+            $latest=\AMS\Fail2Ban\RecentActivity::latest($observation);
+            $observation['event_at']=$latest?date('d/m/Y H:i:s',$latest):'Data do evento não comprovada';
+            $observation['recency']=$latest?($latest>=\AMS\Fail2Ban\RecentActivity::cutoff()?'Recente':'Histórica'):'Sem data comprovada';
+            $observation['vector_review']=AIDashboard::vector($observation);
+        }unset($observation);
 
         $filters = [
-            'status'    => $_GET['filter_status']   ?? '',
-            'severity'  => $_GET['filter_severity'] ?? '',
-            'date_from' => $_GET['date_from']        ?? '',
-            'date_to'   => $_GET['date_to']          ?? '',
+            'status'    => $query['filter_status'],
+            'severity'  => $query['filter_severity'],
+            'date_from' => $query['date_from'],
+            'date_to'   => $query['date_to'],
         ];
-        $historyPage   = max(1, (int)($_GET['history_page'] ?? 1));
-        $historyResult = Database::getAllSuggestionsPaged($filters, $historyPage, 10);
+        $historyPage   = $query['history_page'];
+        $historyResult = AIView::history($filters,$historyPage);
         $history       = $this->decodeSuggestions($historyResult['data']);
 
         // GeoIP: lookup de todos os IPs visíveis (pending + history)
@@ -60,23 +122,32 @@ class AIController
                 array_column($pending, 'ip'),
                 array_column($history, 'ip')
             );
-            $geoData = GeoIP::bulkLookup(array_unique($allIps));
+            $geoData = Database::getGeoCache(array_values(array_unique($allIps)));
         } catch (\Throwable $e) {
             // GeoIP indisponível — segue sem dados geo
         }
 
         // Grupos por país para ações em massa (só se há pendentes)
         $countryGroups = [];
-        if ($pendingResult['total'] > 0) {
+        if ($pendingResult['total'] > 0&&$decisionView==='actionable') {
             try {
-                $countryGroups = Database::getPendingGroupedByCountry();
+                $countryGroups = AIView::countries($projection);
             } catch (\Throwable $e) {
                 // fallback: sem agrupamento
             }
         }
 
-        return $this->router->render('ai_suggestions', [
+        return $this->router->render('ai_overview', [
             'pending'        => $pending,
+            'decision_view'=>$decisionView,
+            'decision_counts'=>$projection?array_map('count',$projection['groups']):['actionable'=>$pendingResult['total']],
+            'dashboard'=>$dashboard,
+            'observation_scope'=>$observationScope,
+            'learning_scope'=>$learningScope,
+            'observations'=>$this->decodeSuggestions($observations['data']),
+            'observations_total'=>$observations['total'],
+            'observations_page'=>$observations['page'],
+            'observations_pages'=>$observations['pages'],
             'pending_total'  => $pendingResult['total'],
             'pending_pages'  => $pendingResult['pages'],
             'pending_page'   => $pendingResult['page'],
@@ -97,85 +168,19 @@ class AIController
 
     private function showSettings(): string
     {
-        // POST: salvar configurações via formulário normal (fallback sem JS)
-        if ($_SERVER['REQUEST_METHOD'] === 'POST') {
-            $token = $_POST['csrf_token'] ?? '';
-            if (Helper::checkCsrf($token)) {
-                $this->persistSettings($_POST);
-                Helper::setFlash('success', 'Configurações salvas com sucesso.');
-            } else {
-                Helper::setFlash('danger', 'Token CSRF inválido.');
+        if(($_SERVER['REQUEST_METHOD']??'GET')==='POST'){
+            if(!is_string($_POST['csrf_token']??null)||!Helper::checkCsrf($_POST['csrf_token']))
+                return $this->router->render('ai_settings_problem',['message'=>'Token CSRF inválido. Nenhuma configuração foi salva.']);
+            $response=json_decode($this->ajaxSaveSettings($_POST),true);
+            if(!empty($response['success'])){
+                Helper::setFlash('success',$response['message']);
+                Helper::redirect(($this->vars['modulelink']??'').'&action=ai_settings');
+                return '';
             }
-            Helper::redirect(($this->vars['modulelink'] ?? '') . '&action=ai_settings');
-            return '';
+            return $this->router->render('ai_settings_problem',['message'=>$response['error']??'Salvamento não confirmado.']);
         }
-
-        $activeProvider = Database::getConfig('ai_active_provider', 'anthropic');
-        $providers      = AIAnalyzer::getProviders();
-
-        // [SEC-18] Validar provedor ativo contra o registry
-        if (!isset($providers[$activeProvider])) {
-            $activeProvider = 'anthropic';
-            Database::setConfig('ai_active_provider', 'anthropic');
-        }
-
-        // Carregar config de cada provedor
-        $providerConfigs = [];
-        foreach ($providers as $key => $def) {
-            $encrypted = Database::getConfig("ai_provider_{$key}_api_key", '');
-            $providerConfigs[$key] = [
-                'api_key_set' => $encrypted !== '',
-                'model'       => Database::getConfig("ai_provider_{$key}_model", $def['default_model']),
-                'base_url'    => Database::getConfig("ai_provider_{$key}_base_url", $def['default_base_url']),
-                'last_ping'   => Database::getConfig("ai_provider_{$key}_last_ping", '0'),
-                'protocol'    => $def['protocol'],
-            ];
-            // Verificar se chave corrompida pode ser descriptografada
-            if ($providerConfigs[$key]['api_key_set']) {
-                $decrypted = Helper::decryptApiKey($encrypted);
-                if ($decrypted === '') {
-                    Database::setConfig("ai_provider_{$key}_api_key", '');
-                    $providerConfigs[$key]['api_key_set'] = false;
-                }
-            }
-        }
-
-        $mode      = Database::getConfig('ai_mode', 'suggestion');
-        $interval  = Database::getConfig('ai_interval_minutes', '30');
-        $minConf   = Database::getConfig('ai_min_confidence', '75');
-        $whitelist = Database::getConfig('ai_whitelist_ips', '');
-        $prompt    = Database::getConfig('ai_prompt', AIAnalyzer::getDefaultPrompt());
-        $aiLogLines = (int)Database::getConfig('ai_log_lines', 200);
-
-        $thresholds = [
-            'critical' => Database::getConfig('ai_threshold_critical', '1:5'),
-            'high'     => Database::getConfig('ai_threshold_high',     '2:10'),
-            'medium'   => Database::getConfig('ai_threshold_medium',   '5:30'),
-        ];
-
-        $globalBantime = (int)Database::getConfig('global_bantime', 604800);
-        $autoEnabled   = Database::getConfig('ai_auto_enabled', '1');
-
-        return $this->router->render('ai_settings', [
-            'active_provider'            => $activeProvider,
-            'providers'                  => $providers,
-            'provider_configs'           => $providerConfigs,
-            'ai_mode'                    => $mode,
-            'ai_log_lines'               => $aiLogLines,
-            'ai_interval'                => $interval,
-            'ai_min_conf'                => $minConf,
-            'ai_whitelist'               => $whitelist,
-            'ai_prompt'                  => $prompt,
-            'thresholds'                       => $thresholds,
-            'global_bantime'                   => $globalBantime,
-            'ai_auto_enabled'                  => $autoEnabled,
-            'ai_auto_create_filter'            => Database::getConfig('ai_auto_create_filter', '0'),
-            'ai_auto_create_min_occurrences'   => (int)Database::getConfig('ai_auto_create_min_occurrences', '3'),
-            'ai_auto_create_window_days'       => (int)Database::getConfig('ai_auto_create_window_days', '30'),
-            'ai_auto_max_jails_per_day'        => (int)Database::getConfig('ai_auto_max_jails_per_day', '5'),
-            'ai_auto_create_min_distinct_ips'  => (int)Database::getConfig('ai_auto_create_min_distinct_ips', '2'),
-            'ai_batch_max_per_session'         => (int)Database::getConfig('ai_batch_max_per_session', '20'),
-        ]);
+        try{return $this->router->render('ai_settings_overview',['view'=>AISettings::read()]);}
+        catch(\Throwable $e){return $this->router->render('ai_settings_problem',['message'=>'Não foi possível obter uma configuração consistente. Consulte novamente; nenhum valor foi alterado.']);}
     }
 
     // -----------------------------------------------------------------------
@@ -184,6 +189,14 @@ class AIController
 
     public function handleAjax(string $do, array $post): string
     {
+        if(Helper::adminId()<=0||($_SERVER['REQUEST_METHOD']??'GET')!=='POST')
+            return json_encode(['success'=>false,'error'=>'Ação exige sessão administrativa e POST.']);
+        if(!is_string($post['csrf_token']??null)||!Helper::checkCsrf($post['csrf_token']))
+            return json_encode(['success'=>false,'error'=>'Token CSRF inválido.']);
+        try {
+            if(in_array($do,['approve','reject','create_filter'],true))AIView::id($post['id']??null);
+            if(in_array($do,['bulk_approve_ids','bulk_reject_ids'],true))$post['ids']=json_encode(AIView::ids($post['ids']??null));
+            if($do==='get_ids_by_country'&&!is_string($post['country_code']??null))throw new \InvalidArgumentException('País inválido.');
         switch ($do) {
             case 'approve':
                 return $this->ajaxApprove($post);
@@ -192,10 +205,16 @@ class AIController
                 return $this->ajaxReject($post);
 
             case 'run_now':
-                return $this->ajaxRunNow();
+                return json_encode(['success'=>false,'error'=>'Use a análise manual confirmada na tela IA. Este endpoint não executa ciclos; a automação continua independente.']);
 
             case 'ping_api':
-                return $this->ajaxPingApi($post);
+                return json_encode(AISettings::test($post),JSON_INVALID_UTF8_SUBSTITUTE);
+
+            case 'preview_prompt':
+                \AMS\Fail2Ban\Policy::assertVersion($post['policy_version']??null);
+                $preview=AIAnalyzer::promptPreview();
+                \AMS\Fail2Ban\Policy::assertVersion($post['policy_version']??null);
+                return json_encode(['success'=>true,'preview'=>$preview],JSON_INVALID_UTF8_SUBSTITUTE);
 
             case 'save_settings':
                 return $this->ajaxSaveSettings($post);
@@ -204,15 +223,17 @@ class AIController
                 return $this->ajaxCreateFilter($post);
 
             case 'list_logs':
-                return $this->ajaxListLogs();
+                return json_encode(AIManual::start($this->router,$post),JSON_INVALID_UTF8_SUBSTITUTE);
 
             case 'analyze_log':
-                return $this->ajaxAnalyzeLog($post);
+                return json_encode(AIManual::analyze($this->router,$post),JSON_INVALID_UTF8_SUBSTITUTE);
 
             case 'ping_geoip':
+                if(($post['confirm_external']??null)!=='1')throw new \InvalidArgumentException('Confirme a consulta externa de GeoIP.');
                 return $this->ajaxPingGeoip();
 
             case 'clear_geoip_cache':
+                if(($post['confirm_clear']??null)!=='1')throw new \InvalidArgumentException('Confirme a limpeza do cache geográfico.');
                 return $this->ajaxClearGeoipCache();
 
             case 'bulk_approve_ids':
@@ -227,6 +248,11 @@ class AIController
             default:
                 return json_encode(['success' => false, 'error' => 'Ação desconhecida.']);
         }
+        }catch(\InvalidArgumentException $e){
+            if($do==='save_settings')throw $e;
+            return json_encode(['success'=>false,'error'=>$e->getMessage()],JSON_INVALID_UTF8_SUBSTITUTE);
+        }
+        catch(\Throwable $e){return json_encode(['success'=>false,'error'=>'Resultado não confirmado. Atualize os dados antes de repetir; não houve reenvio automático.'],JSON_INVALID_UTF8_SUBSTITUTE);}
     }
 
     // -----------------------------------------------------------------------
@@ -240,6 +266,8 @@ class AIController
             return json_encode(['success' => false, 'error' => 'ID inválido.']);
         }
 
+        $projection=Database::withPresentationConfigCache(fn()=>AIView::projection());
+        if(!in_array($id,$projection['groups']['actionable']??[],true))return json_encode(['success'=>false,'error'=>'Decisão não está acionável nesta consulta; pode estar protegida, antiga ou aguardando critérios. Atualize a tela.']);
         $suggestion = Database::getSuggestion($id);
         if (!$suggestion) {
             return json_encode(['success' => false, 'error' => 'Sugestão não encontrada.']);
@@ -253,6 +281,7 @@ class AIController
             };
             return json_encode(['success' => false, 'error' => "Sugestão já foi {$label}."]);
         }
+        if(($suggestion['classification']??'')!=='ban')return json_encode(['success'=>false,'error'=>'Observação não autoriza bloqueio.']);
 
         $ip       = $suggestion['ip'];
         $client   = $this->router->makeClient();
@@ -260,7 +289,7 @@ class AIController
         $engine   = new AutoBanEngine($analyzer, $client);
         $adminId  = Helper::adminId();
 
-        // Garantir que a jail ai-bans existe
+        /* Legacy preparation removed: executeBan uses the validated narrow bridge.
         try {
             $jailConfig = $this->router->makeJailConfig();
             $jailLocal  = $jailConfig->readJailLocal();
@@ -291,26 +320,19 @@ class AIController
             // silencioso
         }
 
+        */
         $ok = $engine->approveSuggestion($id, $adminId);
 
         if ($ok) {
             $dismissed = Database::autoDismissDuplicates($ip, $id, $adminId);
-            return json_encode(['success' => true, 'message' => "IP {$ip} banido com sucesso.", 'dismissed_ids' => $dismissed]);
+            $confirmed=Database::getSuggestion($id);
+            $message=($confirmed['decision_code']??'')==='protected_existing'?"IP {$ip} já protegido; nenhum ticket ou vencimento alterado.":"Bloqueio de {$ip} confirmado.";
+            return json_encode(['success' => true, 'message' => $message, 'dismissed_ids' => $dismissed]);
         }
 
         if (!$client->ping()) {
             return json_encode(['success' => false, 'error' => "fail2ban está offline — não foi possível banir {$ip}."]);
         }
-
-        try {
-            $bannedIPs = array_column($client->getBannedIPs(), 'ip');
-            if (in_array($ip, $bannedIPs, true)) {
-                Database::updateSuggestionStatus($id, 'approved', $adminId);
-                Database::logEvent($ip, AutoBanEngine::AI_JAIL, 'manual_ban', 'AI: IP já estava banido — aprovação registrada', $adminId);
-                $dismissed = Database::autoDismissDuplicates($ip, $id, $adminId);
-                return json_encode(['success' => true, 'message' => "IP {$ip} já estava banido. Sugestão marcada como aprovada.", 'dismissed_ids' => $dismissed]);
-            }
-        } catch (\Throwable $e) {}
 
         return json_encode(['success' => false, 'error' => "Falha ao banir {$ip}. Verifique se o fail2ban está online."]);
     }
@@ -330,10 +352,19 @@ class AIController
         if (!$suggestion) {
             return json_encode(['success' => false, 'error' => 'Sugestão não encontrada.']);
         }
+        if(($suggestion['classification']??'')!=='ban'||$suggestion['status']==='rejected')
+            return json_encode(['success'=>false,'error'=>'Somente uma decisão de ataque não rejeitada pode gerar proteção.']);
+        if((int)Database::getConfig('schema_version','0')>=21){
+            return json_encode(\AMS\Fail2Ban\ManagedRules::request($suggestion,Helper::adminId()),JSON_UNESCAPED_UNICODE);
+        }
 
         $failregex   = $suggestion['failregex']   ?? '';
-        $filterName  = $suggestion['filter_name'] ?? '';
+        $filterName  = \AMS\Fail2Ban\Safety::filterName($suggestion['filter_name'] ?? '');
         $generatedByAi = false;
+
+        if (!in_array($suggestion['source_log'] ?? '', FilterManager::getAllowedLogs(), true)) {
+            return json_encode(['success' => false, 'error' => 'Origem ausente ou operacional. Reanalise o log original antes de criar um filtro.']);
+        }
 
         // Cenário B: sem failregex — gerar on-demand via IA
         if (empty($failregex)) {
@@ -411,7 +442,9 @@ class AIController
         }
 
         if (!$filterAlreadyExisted) {
-            $ok = $filterManager->createFilter($filterName, $failregex, $suggestion['threat'] ?? '');
+            $evidence = $suggestion['evidence'] ?? [];
+            if (is_string($evidence)) $evidence = json_decode($evidence, true) ?: [];
+            $ok = $filterManager->createFilter($filterName, $failregex, $suggestion['threat'] ?? '', $evidence);
             if (!$ok) {
                 return json_encode([
                     'success' => false,
@@ -420,8 +453,17 @@ class AIController
             }
         }
 
+        $evidence = $suggestion['evidence'] ?? [];
+        if (is_string($evidence)) $evidence = json_decode($evidence, true) ?: [];
+        if (!$filterManager->isFilterSafe($filterName, $evidence)) {
+            return json_encode(['success' => false, 'error' => 'Filtro reprovado no motor fail2ban ou nos testes de tráfego legítimo.']);
+        }
+
         if (!$jailAlreadyExisted) {
-            $logpath = $filterManager->detectLogPathSafe($failregex, $suggestion['evidence'] ?? '', $filterName);
+            $logpath = $suggestion['source_log'] ?? '';
+            if (!in_array($logpath, \AMS\Fail2Ban\FilterManager::getAllowedLogs(), true)) {
+                $logpath = $filterManager->detectLogPathSafe($failregex, $suggestion['evidence'] ?? '', $filterName);
+            }
             if ($logpath === null) {
                 return json_encode([
                     'success' => false,
@@ -449,7 +491,9 @@ class AIController
         }
 
         if (!$filterAlreadyExisted || !$jailAlreadyExisted) {
-            $filterManager->reloadJail($jailName);
+            if (!$filterManager->reloadJail($jailName)) {
+                return json_encode(['success' => false, 'error' => 'Configuração gravada, mas reload não confirmado.']);
+            }
         }
 
         Database::updateFilterCreated($id);
@@ -501,474 +545,14 @@ class AIController
     // salva como pending independente do ai_mode (ferramenta de revisão manual).
     // -----------------------------------------------------------------------
 
-    private function ajaxRunNow(): string
-    {
-        // [SEC-10] Rate limiting
-        $lastRun = (int)Database::getConfig('ai_last_run', 0);
-        if ((time() - $lastRun) < 60) {
-            return json_encode([
-                'success' => false,
-                'error'   => 'Aguarde pelo menos 60 segundos entre análises manuais.',
-            ]);
-        }
 
-        $analyzer = $this->makeAnalyzer();
-        if ($analyzer === null) {
-            return json_encode(['success' => false, 'error' => 'Chave API não configurada para o provedor ativo.']);
-        }
-
-        $client  = $this->router->makeClient();
-        $engine  = new AutoBanEngine($analyzer, $client);
-        $results = $engine->runAnalysis(true);
-
-        Database::setConfig('ai_last_run', (string)time());
-        $activeProvider = Database::getConfig('ai_active_provider', 'anthropic');
-        Database::setConfig("ai_provider_{$activeProvider}_last_ping", '1');
-
-        return json_encode([
-            'success' => true,
-            'total'   => count($results),
-            'message' => count($results) . ' resultado(s) processado(s).',
-        ]);
-    }
 
     // -----------------------------------------------------------------------
     // AJAX: listar logs disponíveis para análise
     // -----------------------------------------------------------------------
 
-    private function ajaxListLogs(): string
-    {
-        // [SEC-10] Rate limit: 60s entre sessões de análise
-        $lastRun = (int) Database::getConfig('ai_last_run', 0);
-        if ((time() - $lastRun) < 60) {
-            return json_encode([
-                'success' => false,
-                'error'   => 'Aguarde pelo menos 60 segundos entre análises.',
-            ]);
-        }
 
-        // Marcar início da sessão de análise (permite analyze_log sem rate limit individual)
-        Database::setConfig('ai_analysis_session_start', (string) time());
 
-        $extra = [];
-        try {
-            $jailConfig = $this->router->makeJailConfig();
-            $jailData   = $jailConfig->readJailLocal();
-            foreach ($jailData as $jail => $cfg) {
-                if ($jail === 'DEFAULT' || empty($cfg['logpath'])) {
-                    continue;
-                }
-                $extra[$cfg['logpath']] = $jail;
-            }
-        } catch (\Throwable $e) {
-            // jail.local inacessível — segue sem extra
-        }
-
-        $viewer = new LogViewer();
-        $logs   = $viewer->getAvailableLogs($extra);
-
-        // Enriquecer com metadata de watermark para skip client-side.
-        // Limitação conhecida: has_new é calculado no momento do list_logs.
-        // Se o log crescer entre list_logs e analyze_log daquele arquivo,
-        // o JS vai pular mesmo havendo conteúdo novo — capturado no próximo ciclo.
-        $result = [];
-        foreach ($logs as $log) {
-            $path      = $log['path'];
-            $size      = @filesize($path) ?: 0;
-            $offsetKey = 'ai_log_offset.' . md5($path);
-            $watermark = (int) Database::getConfig($offsetKey, 0);
-            $log['filesize']  = $size;
-            $log['watermark'] = $watermark;
-            $log['has_new']   = $size > $watermark;
-            $result[] = $log;
-        }
-
-        return json_encode([
-            'success' => true,
-            'logs'    => $result,
-            'ai_mode' => Database::getConfig('ai_mode', 'suggestion'),
-        ]);
-    }
-
-    // -----------------------------------------------------------------------
-    // AJAX: analisar um único log (fluxo sequencial — usado em ai_suggestions)
-    // Sempre salva como pending — não respeita ai_mode intencionalmente
-    // (ferramenta de revisão manual). Bans automáticos ocorrem via cron/run_now.
-    // -----------------------------------------------------------------------
-
-    private function ajaxAnalyzeLog(array $post): string
-    {
-        // Validar que existe uma sessão de análise ativa (iniciada por list_logs)
-        // Previne chamada direta via script sem passar pelo fluxo da UI
-        $sessionStart = (int) Database::getConfig('ai_analysis_session_start', 0);
-        if ($sessionStart === 0 || (time() - $sessionStart) > 300) {
-            return json_encode(['success' => false, 'error' => 'Sessão de análise não iniciada ou expirada. Clique em "Analisar agora" novamente.']);
-        }
-
-        $path = trim($post['path'] ?? '');
-        if (empty($path)) {
-            return json_encode(['success' => false, 'error' => 'Path não informado.']);
-        }
-
-        // [SEC-8] Validar path
-        $viewer = new LogViewer();
-        if (!$viewer->isValidPath($path)) {
-            return json_encode(['success' => false, 'error' => 'Path não autorizado.']);
-        }
-
-        $analyzer = $this->makeAnalyzer();
-        if ($analyzer === null) {
-            return json_encode(['success' => false, 'error' => 'Chave API não configurada para o provedor ativo.']);
-        }
-
-        // Parâmetro force: ignora watermark e relê as últimas linhas.
-        // Útil após trocar prompt/modelo de IA para reanalisar logs já vistos.
-        $force = !empty($post['force']);
-
-        // ── Lock por log (previne cron + manual no mesmo arquivo) ───────────
-        $lockResult = \AMS\Fail2Ban\LogLock::acquire($path);
-        if ($lockResult['fp'] === null) {
-            return json_encode([
-                'success'   => false,
-                'log'       => $path,
-                'error'     => 'analysis_running',
-                'error_msg' => 'Este log já está sendo analisado por outro processo. Tente novamente em alguns segundos.',
-                'lock_reason' => $lockResult['reason'],
-            ]);
-        }
-        $lockFp = $lockResult['fp'];
-
-        // Checar se há sessão de batch ativa de OUTRO processo/aba.
-        // Identificador de continuação: batch_token (random, único por execução do loop).
-        // NÃO usar session_id() — é compartilhado entre abas do mesmo admin.
-        $batchSession = Database::getBatchSession($path);
-        $sessionAlive = $batchSession !== null && (time() - $batchSession['heartbeat']) < 120;
-        $incomingToken = trim($post['batch_token'] ?? '');
-        $sessionToken  = $batchSession['batch_token'] ?? '';
-        $isMySession   = $sessionAlive && $incomingToken !== '' && hash_equals($sessionToken, $incomingToken);
-
-        if ($sessionAlive && !$isMySession) {
-            // Outro processo, outra aba, ou token ausente — bloquear.
-            \AMS\Fail2Ban\LogLock::release($lockFp);
-            return json_encode([
-                'success'    => false,
-                'log'        => $path,
-                'error'      => 'session_active',
-                'error_msg'  => 'Análise já em andamento desde ' . date('H:i', $batchSession['started']) . '. Aguarde a conclusão ou recarregue a página.',
-                'started'    => $batchSession['started'],
-                'owner'      => $batchSession['owner'] ?? 'unknown',
-            ]);
-        }
-
-        if ($isMySession) {
-            // Continuação legítima (mesmo token) — atualizar heartbeat.
-            Database::updateBatchSessionHeartbeat($path);
-            $batchToken = $sessionToken;
-        } else {
-            // Nova sessão — gerar token único e criar sessão.
-            $batchToken = bin2hex(random_bytes(16)); // 32 hex chars
-            Database::setBatchSession($path, 'manual_' . session_id(), 0, $batchToken);
-        }
-
-        try {
-
-        // Watermark compartilhado entre AutoBanEngine (cron) e ajaxAnalyzeLog (manual).
-        // Decisão de design: ambos competem pelo mesmo ponteiro (ai_log_offset.{md5}).
-        // Se o cron avançar o watermark entre dois cliques manuais, o botão manual
-        // "perde" visibilidade do que o cron já viu — comportamento desejado.
-        $logLineLimit = (int) Database::getConfig('ai_log_lines', 200);
-        $offsetKey    = 'ai_log_offset.' . md5($path);
-        // Leitura sem lock — aceita corrida (ver CLAUDE.md "Concorrência").
-        $storedOffset = (int) Database::getConfig($offsetKey, 0);
-        $currentSize  = @filesize($path) ?: 0;
-
-        // Verificar se o arquivo é legível antes de processar.
-        // Evita reset de watermark quando www-data não tem permissão de leitura
-        // (ex: log é root:adm 640 e www-data não está no grupo adm).
-        // Sem este check, @filesize() retorna false → 0 < storedOffset → watermark resetado.
-        if (!is_readable($path)) {
-            Database::clearBatchSession($path);
-            return json_encode([
-                'success'    => false,
-                'log'        => $path,
-                'error'      => 'not_readable',
-                'error_msg'  => 'Arquivo não legível pelo servidor web. Verifique as permissões do arquivo.',
-            ]);
-        }
-
-        if (!$force && $currentSize === $storedOffset) {
-            // Sem conteúdo novo — limpar sessão de batch
-            Database::clearBatchSession($path);
-            return json_encode([
-                'success'    => true,
-                'log'        => $path,
-                'suggestions'=> [],
-                'saved'      => 0,
-                'skipped'    => 0,
-                'message'    => 'Sem conteúdo novo.',
-                'has_more'   => false,
-                'batches_done' => 0,
-                'batch_limit'  => (int) Database::getConfig('ai_batch_max_per_session', 20),
-                'batch_token'  => '',
-            ]);
-        }
-
-        if ($currentSize < $storedOffset) {
-            // Arquivo rotacionado/truncado — ler do início.
-            // Edge case: logrotate copytruncate pode causar falso positivo aqui
-            // se o analysis rodar na janela em que o arquivo está vazio.
-            // Impacto: reanálise pontual, sem perda de dados. Ver CLAUDE.md.
-            $storedOffset = 0;
-        }
-
-        // force: relê as últimas N linhas do arquivo (ignora offset)
-        $readOffset = $storedOffset;
-        if ($force) {
-            $lines = $viewer->readLines($path, $logLineLimit);
-        } else {
-            $result     = $viewer->readNewLinesFromOffset($path, $storedOffset, $logLineLimit);
-            $lines      = $result['lines'];
-            $readOffset = $result['offset'];
-        }
-
-        if (empty($lines)) {
-            Database::clearBatchSession($path);
-            return json_encode([
-                'success'    => true,
-                'log'        => $path,
-                'suggestions'=> [],
-                'saved'      => 0,
-                'skipped'    => 0,
-                'message'    => 'Log vazio ou ilegível.',
-                'has_more'   => false,
-                'batches_done' => 0,
-                'batch_limit'  => (int) Database::getConfig('ai_batch_max_per_session', 20),
-                'batch_token'  => '',
-            ]);
-        }
-
-        // ── Montar skipIPs (uma única vez, antes da IA) ──────────────────
-        // Usado pelo pre-filter E pelo filterSuggestions (pós-IA).
-        // Composição: banidos + known + pending + whitelist.
-        $skipIPs = [];
-        try {
-            $client = $this->router->makeClient();
-            if ($client->ping()) {
-                $skipIPs = array_column($client->getBannedIPs(), 'ip');
-            }
-        } catch (\Throwable $e) {}
-        if (empty($skipIPs)) {
-            $bantimeDays = (int) ceil((int) Database::getConfig('global_bantime', 604800) / 86400);
-            $skipIPs = Database::getKnownIPs($bantimeDays);
-        }
-        $skipIPs = array_merge($skipIPs, Database::getPendingIPs());
-        $skipIPs = array_merge($skipIPs, AutoBanEngine::loadWhitelist());
-        $skipIPs = array_unique($skipIPs);
-
-        // ── Whitelist pre-filter ──────────────────────────────────────────
-        // Remove linhas cujos IPs são todos skip antes de enviar à IA.
-        // Economiza tokens. filterSuggestions() continua como safety net.
-        $lines = LogViewer::filterLinesByIPs($lines, $skipIPs);
-
-        if (empty($lines)) {
-            // Watermark deve avançar mesmo sem linhas relevantes — evita
-            // reprocessar o mesmo trecho infinitamente na próxima análise.
-            if (!$force) {
-                Database::setConfig($offsetKey, (string) $readOffset);
-            }
-
-            // Batch session: avançou watermark mas sem sugestões — checar has_more
-            $maxBatches  = (int) Database::getConfig('ai_batch_max_per_session', 20);
-            $batchesDone = Database::incrementBatchSessionBatches($path);
-            $postFileSize = @filesize($path) ?: 0;
-            $postOffset   = (int) Database::getConfig($offsetKey, 0);
-            $hasMore      = ($postFileSize > $postOffset) && ($batchesDone < $maxBatches);
-
-            if (!$hasMore) {
-                Database::clearBatchSession($path);
-            }
-
-            return json_encode([
-                'success'    => true,
-                'log'        => $path,
-                'suggestions'=> [],
-                'saved'      => 0,
-                'skipped'    => 0,
-                'message'    => 'Sem conteúdo novo após filtro de IPs.',
-                'filtered'   => true,
-                'has_more'   => $hasMore,
-                'batches_done' => $batchesDone,
-                'batch_limit'  => $maxBatches,
-                'batch_token'  => $batchToken,
-            ]);
-        }
-
-        // Chamar IA — protegido por try-catch para garantir que o watermark
-        // não avance em caso de erro inesperado na API.
-        $parseFailed  = false;
-        $truncated    = false;
-
-        try {
-            $rawSuggestions = $analyzer->analyze($lines);
-        } catch (\AMS\Fail2Ban\TruncatedResponseException $e) {
-            // Resposta truncada por max_tokens — parcialmente útil, mas sinalizar.
-            $rawSuggestions = [];
-            $parseFailed    = true;
-            $truncated      = true;
-            // Log interno: qual log truncou e quando
-            Database::setConfig('ai_last_parse_error', json_encode([
-                'log'       => $path,
-                'type'      => 'truncated',
-                'message'   => $e->getMessage(),
-                'timestamp' => date('Y-m-d H:i:s'),
-            ]));
-        } catch (\AMS\Fail2Ban\InvalidResponseException $e) {
-            // Resposta da IA não é JSON válido — não avançar watermark.
-            $rawSuggestions = [];
-            $parseFailed    = true;
-            // Log interno: qual log falhou e o trecho da resposta
-            Database::setConfig('ai_last_parse_error', json_encode([
-                'log'       => $path,
-                'type'      => 'invalid_json',
-                'message'   => $e->getMessage(),
-                'timestamp' => date('Y-m-d H:i:s'),
-            ]));
-        } catch (\Throwable $e) {
-            // Detectar 429 do provedor
-            if ($analyzer->getLastHttpCode() === 429) {
-                return json_encode([
-                    'success'     => false,
-                    'log'         => $path,
-                    'error'       => 'rate_limited',
-                    'retry_after' => 60,
-                ]);
-            }
-            return json_encode([
-                'success' => false,
-                'log'     => $path,
-                'error'   => 'Erro ao chamar a API de análise. O log será reanalisado na próxima tentativa.',
-            ]);
-        }
-
-        // Filtrar sugestões (método compartilhado)
-        // $skipIPs já montado antes da chamada à IA (pre-filter)
-        $filtered  = \AMS\Fail2Ban\AutoBanEngine::filterSuggestions($rawSuggestions, $skipIPs);
-        $savedList = [];
-
-        foreach ($filtered['valid'] as $suggestion) {
-            $suggestion['source_log'] = $path; // propagar log de origem (Bug 1 fix)
-            $id = Database::saveSuggestion($suggestion);
-            $suggestion['id'] = $id;
-            $savedList[] = $suggestion;
-        }
-
-        // Atualizar watermark SOMENTE após sucesso (IA + save).
-        // Usa $readOffset (offset real onde a leitura parou, via ftell())
-        // em vez de $currentSize (filesize) — evita pular linhas não lidas
-        // quando o log tem mais linhas que o limite configurado.
-        // force: não atualiza watermark para não perder bytes novos que cheguem depois.
-        // parse_failed: não atualiza watermark — resposta truncada ou JSON inválido
-        // deve ser reanalisada (com prompt/modelo diferente ou mais max_tokens).
-        if (!$force && !$parseFailed) {
-            Database::setConfig($offsetKey, (string) $readOffset);
-        }
-
-        // Rolling TTL: renova a sessão de análise apenas após processamento
-        // bem-sucedido do log (sem parse failure). Se a chamada à IA falhar
-        // ou o parse quebrar, o TTL NÃO é renovado — a sessão expira
-        // naturalmente se ficar 5min sem progresso real.
-        if (!$parseFailed) {
-            Database::setConfig('ai_analysis_session_start', (string) time());
-        }
-
-        // ── Batch session: incrementar e checar has_more ─────────────────
-        $maxBatches  = (int) Database::getConfig('ai_batch_max_per_session', 20);
-        $batchesDone = Database::incrementBatchSessionBatches($path);
-
-        // has_more: há conteúdo não processado E teto não atingido
-        $finalSize   = @filesize($path) ?: 0;
-        $finalOffset = (int) Database::getConfig($offsetKey, 0);
-        $hasMore     = !$parseFailed && ($finalSize > $finalOffset) && ($batchesDone < $maxBatches);
-
-        // Se não há mais conteúdo ou teto atingido, limpar sessão
-        $batchLimitReached = false;
-        if (!$hasMore) {
-            Database::clearBatchSession($path);
-            if ($batchesDone >= $maxBatches && $finalSize > $finalOffset) {
-                $batchLimitReached = true;
-                Database::logEvent(
-                    '', '', 'batch_limit_reached',
-                    "Teto de {$maxBatches} lotes atingido para {$path}. Restante será processado na próxima sessão.",
-                    null
-                );
-            }
-        }
-
-        return json_encode([
-            'success'            => true,
-            'log'                => $path,
-            'suggestions'        => $savedList,
-            'saved'              => count($savedList),
-            'skipped'            => $filtered['skipped'],
-            'parse_failed'       => $parseFailed,
-            'truncated'          => $truncated,
-            'has_more'           => $hasMore,
-            'batches_done'       => $batchesDone,
-            'batch_limit'        => $maxBatches,
-            'batch_limit_reached'=> $batchLimitReached,
-            'batch_token'        => $batchToken,
-        ]);
-
-        } finally {
-            \AMS\Fail2Ban\LogLock::release($lockFp);
-        }
-    }
-
-    // -----------------------------------------------------------------------
-    // AJAX: testar conexão com a API (multi-provider)
-    // -----------------------------------------------------------------------
-
-    private function ajaxPingApi(array $post): string
-    {
-        // [SEC-18] Validar provedor contra registry
-        $provider = $post['provider'] ?? Database::getConfig('ai_active_provider', 'anthropic');
-        if (!in_array($provider, AIAnalyzer::getValidProviders(), true)) {
-            return json_encode(['success' => false, 'error' => 'Provedor inválido.']);
-        }
-
-        $newKey = trim($post['api_key'] ?? '');
-        $apiKey = $newKey !== '' ? $newKey : Helper::decryptApiKey(
-            Database::getConfig("ai_provider_{$provider}_api_key", '')
-        );
-
-        if (empty($apiKey)) {
-            return json_encode(['success' => false, 'error' => 'Chave API não informada.']);
-        }
-
-        $model    = $post['model'] ?? Database::getConfig("ai_provider_{$provider}_model", '');
-        $def      = AIAnalyzer::getProviderDef($provider);
-        $protocol = $def ? $def['protocol'] : 'anthropic';
-        $baseUrl  = $post['base_url'] ?? Database::getConfig("ai_provider_{$provider}_base_url", $def['default_base_url'] ?? '');
-
-        // [SEC-17] Validar base URL se editável
-        if ($def && $def['needs_base_url'] && $baseUrl !== '') {
-            if (!$this->validateBaseUrl($baseUrl)) {
-                return json_encode(['success' => false, 'error' => 'Base URL inválida. Deve ser HTTPS e não apontar para IPs privados.']);
-            }
-        }
-
-        $analyzer = new AIAnalyzer($provider, $apiKey, $model, $baseUrl, $protocol);
-        $ok       = $analyzer->ping();
-
-        Database::setConfig("ai_provider_{$provider}_last_ping", $ok ? '1' : '0');
-
-        // [SEC-19] Mensagem genérica — detalhes do erro não expostos
-        $label = $def['label'] ?? $provider;
-        return json_encode([
-            'success' => $ok,
-            'message' => $ok ? "API {$label} respondeu com sucesso." : "Falha na conexão com a API {$label}.",
-        ]);
-    }
 
     // -----------------------------------------------------------------------
     // AJAX: salvar configurações (multi-provider)
@@ -976,8 +560,17 @@ class AIController
 
     private function ajaxSaveSettings(array $post): string
     {
-        $this->persistSettings($post);
-        return json_encode(['success' => true, 'message' => 'Configurações salvas.']);
+        try{
+            $result=AISettings::save($post);
+            return json_encode(['success'=>true,'message'=>$result['changed']?'Configurações salvas. Atualize para conferir os valores efetivos.':'Nenhuma alteração: configuração e versão preservadas.',
+                'policy_version'=>$result['version'],'changed'=>$result['changed']]);
+        }catch(\AMS\Fail2Ban\PolicyConflict $e){
+            return json_encode(['success'=>false,'code'=>'policy_conflict','reload_required'=>true,'error'=>'A configuração mudou ou a versão está ausente. Nada foi salvo. Recarregue e confira os valores antes de salvar novamente.']);
+        }catch(\InvalidArgumentException $e){
+            return json_encode(['success'=>false,'code'=>'validation_error','error'=>$e->getMessage()],JSON_INVALID_UTF8_SUBSTITUTE);
+        }catch(\Throwable $e){
+            return json_encode(['success'=>false,'reload_required'=>true,'error'=>'Salvamento não confirmado. Consulte novamente as configurações e Proteção antes de repetir; uma sincronização nativa pode exigir reconciliação.']);
+        }
     }
 
     // -----------------------------------------------------------------------
@@ -999,164 +592,18 @@ class AIController
             $config['api_key'],
             $config['model'],
             $config['base_url'],
-            $config['protocol'] ?? ''
+            $config['protocol'] ?? '',
+            $config['reasoning_effort'] ?? ''
         );
     }
 
     /** [SEC-17] Valida base URL: deve ser https:// e não apontar para IPs privados. */
-    private function validateBaseUrl(string $url): bool
-    {
-        if (!str_starts_with($url, 'https://')) {
-            return false;
-        }
 
-        $parsed = parse_url($url);
-        if (!$parsed || empty($parsed['host'])) {
-            return false;
-        }
-
-        $host = $parsed['host'];
-
-        // Bloquear localhost
-        if (in_array($host, ['localhost', '127.0.0.1', '::1', '0.0.0.0'], true)) {
-            return false;
-        }
-
-        // Bloquear IPs privados e link-local (SSRF defense)
-        $ip = filter_var($host, FILTER_VALIDATE_IP);
-        if ($ip !== false) {
-            // Bloquear redes privadas (10.x, 172.16-31.x, 192.168.x)
-            if (filter_var($ip, FILTER_VALIDATE_IP, FILTER_FLAG_NO_PRIV_RANGE) === false) {
-                return false;
-            }
-            // Bloquear link-local (169.254.x.x — metadata endpoint AWS/GCP/Azure)
-            if (preg_match('/^169\.254\./', $ip)) {
-                return false;
-            }
-        }
-
-        return true;
-    }
 
     /** Salva as configurações da IA no banco (multi-provider). */
-    private function persistSettings(array $post): void
+    private function persistSettings(array $post): string
     {
-        // ── Provedor ativo ──────────────────────────────────────────────
-        // [SEC-18] Validar contra registry
-        $activeProvider = $post['ai_active_provider'] ?? 'anthropic';
-        if (!in_array($activeProvider, AIAnalyzer::getValidProviders(), true)) {
-            $activeProvider = 'anthropic';
-        }
-        Database::setConfig('ai_active_provider', $activeProvider);
-
-        // ── Config por provedor ─────────────────────────────────────────
-        foreach (AIAnalyzer::getProviders() as $key => $def) {
-            // Chave API — só salva se foi preenchida
-            $newKey = trim($post["ai_provider_{$key}_api_key"] ?? '');
-            if ($newKey !== '') {
-                Database::setConfig("ai_provider_{$key}_api_key", Helper::encryptApiKey($newKey));
-            }
-
-            // Modelo — validar contra lista do provedor
-            $model = $post["ai_provider_{$key}_model"] ?? $def['default_model'];
-            if (isset($def['models'][$model])) {
-                Database::setConfig("ai_provider_{$key}_model", $model);
-            }
-
-            // Base URL — só para provedores que precisam
-            if ($def['needs_base_url']) {
-                $baseUrl = trim($post["ai_provider_{$key}_base_url"] ?? $def['default_base_url']);
-                // [SEC-17] Validar URL
-                if ($this->validateBaseUrl($baseUrl)) {
-                    Database::setConfig("ai_provider_{$key}_base_url", $baseUrl);
-                } elseif ($baseUrl === '') {
-                    // Vazio = usar default
-                    Database::setConfig("ai_provider_{$key}_base_url", $def['default_base_url']);
-                }
-            }
-        }
-
-        // ── Config compartilhada ────────────────────────────────────────
-
-        // Linhas por análise
-        $validLines = [200, 400, 600, 800, 1000];
-        $logLines = (int)($post['ai_log_lines'] ?? 200);
-        if (in_array($logLines, $validLines, true)) {
-            Database::setConfig('ai_log_lines', (string)$logLines);
-        }
-
-        // Modo de operação
-        $mode = $post['ai_mode'] ?? 'suggestion';
-        if (in_array($mode, ['suggestion', 'auto', 'threshold'], true)) {
-            Database::setConfig('ai_mode', $mode);
-        }
-
-        // Intervalo de análise (minutos)
-        $interval = (int)($post['ai_interval_minutes'] ?? 30);
-        $interval = max(5, min(1440, $interval));
-        Database::setConfig('ai_interval_minutes', (string)$interval);
-
-        // Confiança mínima
-        $minConf = (int)($post['ai_min_confidence'] ?? 75);
-        $minConf = max(0, min(100, $minConf));
-        Database::setConfig('ai_min_confidence', (string)$minConf);
-
-        // Whitelist IPs
-        $whitelist = $post['ai_whitelist_ips'] ?? '';
-        $whitelist = substr(strip_tags($whitelist), 0, 5000);
-        Database::setConfig('ai_whitelist_ips', $whitelist);
-
-        // Prompt customizável (compartilhado entre provedores)
-        // [SEC-11] Limitar a 8000 caracteres
-        // Decodificar HTML entities que vêm do formulário (template usa $e() = htmlspecialchars)
-        // Sem isso, cada salvamento double-encode: " → &quot; → &amp;quot; → ...
-        $prompt = html_entity_decode(trim($post['ai_prompt'] ?? ''), ENT_QUOTES, 'UTF-8');
-        $prompt = substr($prompt, 0, 8000);
-        if ($prompt !== '') {
-            Database::setConfig('ai_prompt', $prompt);
-        }
-
-        // Bantime global
-        $validBantimes = [604800, 1209600, 1814400, 2419200, 7776000, 15552000, 31536000];
-        $bt = (int)($post['global_bantime'] ?? 604800);
-        if (in_array($bt, $validBantimes, true)) {
-            Database::setConfig('global_bantime', (string)$bt);
-        }
-
-        // Thresholds por severidade
-        foreach (['critical', 'high', 'medium'] as $sev) {
-            $det = (int)($post["threshold_{$sev}_detections"] ?? 0);
-            $min = (int)($post["threshold_{$sev}_minutes"]    ?? 0);
-            if ($det > 0 && $min > 0) {
-                Database::setConfig("ai_threshold_{$sev}", "{$det}:{$min}");
-            }
-        }
-
-        // Confirmação de modo automático
-        // [SEC-9] Sempre definir o valor
-        Database::setConfig('ai_confirmed_auto', !empty($post['confirm_auto']) ? '1' : '0');
-
-        // Toggle análise automática via cron
-        Database::setConfig('ai_auto_enabled', !empty($post['ai_auto_enabled']) ? '1' : '0');
-
-        // Auto-criação de filtro/jail (Auto e Threshold)
-        Database::setConfig('ai_auto_create_filter', !empty($post['ai_auto_create_filter']) ? '1' : '0');
-        $minOcc = max(2, min(50, (int)($post['ai_auto_create_min_occurrences'] ?? 3)));
-        Database::setConfig('ai_auto_create_min_occurrences', (string)$minOcc);
-        $windowDays = max(1, min(365, (int)($post['ai_auto_create_window_days'] ?? 30)));
-        Database::setConfig('ai_auto_create_window_days', (string)$windowDays);
-        $maxJails = max(1, min(50, (int)($post['ai_auto_max_jails_per_day'] ?? 5)));
-        Database::setConfig('ai_auto_max_jails_per_day', (string)$maxJails);
-        $rawDistinct = trim($post['ai_auto_create_min_distinct_ips'] ?? '');
-        $minDistinctIps = $rawDistinct === '' ? 2 : max(1, min(20, (int)$rawDistinct));
-        Database::setConfig('ai_auto_create_min_distinct_ips', (string)$minDistinctIps);
-
-        // Batch max per session (processar log até esgotar)
-        $validBatchMax = [10, 20, 50, 100];
-        $batchMax = (int)($post['ai_batch_max_per_session'] ?? 20);
-        if (in_array($batchMax, $validBatchMax, true)) {
-            Database::setConfig('ai_batch_max_per_session', (string)$batchMax);
-        }
+        return AISettings::save($post)['version'];
     }
 
     /** Decodifica o campo evidence (JSON) de cada sugestão. */
@@ -1168,6 +615,28 @@ class AIController
                 $s['evidence'] = is_array($decoded) ? $decoded : [$s['evidence']];
             }
         }
+        $quarantine=json_decode(Database::getConfig('native_detection_quarantine','[]'),true)?:[];
+        if($this->activeJails===null){try{$this->activeJails=$this->router->makeClient()->getJails();}catch(\Throwable $e){$this->activeJails=[];}}
+        $active=$this->activeJails;
+        $proofCounts=AIView::proofCounts($suggestions);
+        $labels=['observation'=>'Observação — sem bloqueio','non_offensive_signal'=>'Observação — SNI/status/rota normal sem evidência ofensiva','blocked'=>'Bloqueio confirmado','protected_existing'=>'Já protegido por bloqueio nativo confirmado','waiting_threshold'=>'Aguardando repetição ou campanha validada',
+            'waiting_query_criteria'=>'Manipulação suspeita — aguardando repetição individual validada','query_behavior_only'=>'Sinal comportamental — sem promoção de regra nativa',
+            'manual_review'=>'Revisão manual — sem execução automática','confidence_low'=>'Confiança abaixo do limite automático','firewall_unconfirmed'=>'Bloqueio não confirmado',
+            'no_eligible_proof'=>'Sem evidência vigente não rejeitada — sem bloqueio automático',
+            'promotion_queued'=>'Aprendizado solicitado ao cron','filter_positive'=>'Regra não reconhece a evidência','filter_identity'=>'Regra depende apenas de identidade/status',
+            'filter_peer'=>'Regra captura peer incorreto','filter_branch'=>'Alternativa sem evidência','filter_legitimate'=>'Regra reconhece tráfego legítimo',
+            'reused'=>'Proteção existente reutilizada','extended'=>'Proteção existente ampliada','created'=>'Proteção canônica criada'];
+        foreach($suggestions as &$s){
+            $s['decision_label']=$labels[$s['decision_code']??'']??($s['decision_code']??'Histórico — motivo não medido');
+            $name=\AMS\Fail2Ban\Safety::filterName($s['filter_name']??'');$jail='amsfb-'.$name;
+            $s['filter_state']=in_array($jail,$quarantine,true)?'Detecção em quarentena — não protege novas ocorrências por esse filtro':(in_array($jail,$active,true)?'Jail ativa — compatibilidade e origem ainda não comprovadas para este evento':(is_file('/etc/fail2ban/filter.d/'.$jail.'.conf')?'Somente em disco; ativação não confirmada':'Nome sugerido pela IA; instalação não confirmada'));
+            $s['promotion']=json_decode($s['promotion_result']??'null',true);
+            if(\AMS\Fail2Ban\EvidenceLinks::enabled()){
+                $valid=$proofCounts[$s['id']]['valid']??0;$unknown=$proofCounts[$s['id']]['unknown']??0;
+                $s['proof_summary']=$valid.' vínculo(s) historicamente validado(s); '.$unknown.' aguardando validação. Elegibilidade atual depende de prazo e rejeição.';
+            }
+        }
+        unset($s);
         return $suggestions;
     }
 
@@ -1218,11 +687,15 @@ class AIController
             return json_encode(['success' => false, 'error' => 'Nenhum ID válido informado.']);
         }
 
+        $projection=Database::withPresentationConfigCache(fn()=>AIView::projection());
+        $eligible=array_values(array_intersect($ids,$projection['groups']['actionable']??[]));
+        if(count($eligible)!==count($ids))return json_encode(['success'=>false,'error'=>'Seleção desatualizada: uma ou mais decisões não estão acionáveis. Nenhum item deste lote foi executado; atualize a tela.']);
         // Buscar APENAS sugestões pending — IDs com status != pending são
         // ignorados silenciosamente (não entram em approved_ids nem failed_ids)
         $suggestions = \WHMCS\Database\Capsule::table('mod_amssoft_fail2ban_ai_suggestions')
             ->whereIn('id', $ids)
             ->where('status', 'pending')
+            ->where('classification','ban')
             ->get()
             ->map(fn ($r) => (array)$r)
             ->keyBy('id')
@@ -1237,7 +710,7 @@ class AIController
         $engine   = new AutoBanEngine($analyzer, $client);
         $adminId  = Helper::adminId();
 
-        // Garantir que a jail ai-bans existe (mesma lógica de ajaxApprove)
+        /* All native preparation is delegated to executeBan, not UI.
         try {
             $jailConfig = $this->router->makeJailConfig();
             $jailLocal  = $jailConfig->readJailLocal();
@@ -1268,6 +741,7 @@ class AIController
             // silencioso — tenta banir mesmo sem jail configurada
         }
 
+        */
         // Best-effort: aprovar cada sugestão individualmente
         // approveSuggestion() retorna false e NÃO altera status se o ban falhar
         // (o IP permanece pending para o admin tentar novamente)
@@ -1287,7 +761,7 @@ class AIController
             }
         }
 
-        $msg = count($approvedIds) . ' IP(s) banido(s).';
+        $msg = count($approvedIds) . ' decisão(ões) aprovada(s), com proteção confirmada.';
         if (count($failedIds) > 0) {
             $msg .= ' ' . count($failedIds) . ' falhou.';
         }
@@ -1325,6 +799,7 @@ class AIController
         $pendingIds = \WHMCS\Database\Capsule::table('mod_amssoft_fail2ban_ai_suggestions')
             ->whereIn('id', $ids)
             ->where('status', 'pending')
+            ->where('classification','ban')
             ->pluck('id')
             ->map(fn ($id) => (int) $id)
             ->toArray();
@@ -1333,14 +808,9 @@ class AIController
             return json_encode(['success' => false, 'error' => 'Nenhuma sugestão pendente para estes IDs.']);
         }
 
-        // UPDATE batch — [SEC-15] status validado contra ENUM
-        $affected = \WHMCS\Database\Capsule::table('mod_amssoft_fail2ban_ai_suggestions')
-            ->whereIn('id', $pendingIds)
-            ->update([
-                'status'      => 'rejected',
-                'resolved_at' => \WHMCS\Database\Capsule::raw('NOW()'),
-                'resolved_by' => $adminId,
-            ]);
+        $resolved=[];
+        foreach($pendingIds as $id)if(Database::updateSuggestionStatus($id,'rejected',$adminId))$resolved[]=$id;
+        $pendingIds=$resolved;$affected=count($resolved);
 
         return json_encode([
             'success'      => true,
@@ -1362,12 +832,14 @@ class AIController
             return json_encode(['success' => false, 'error' => 'Código de país inválido.']);
         }
 
-        $ids = Database::getPendingIdsByCountry($countryCode);
+        return json_encode(AIView::countryIds($countryCode),JSON_INVALID_UTF8_SUBSTITUTE);
+        /* retired legacy response
+        $ids = [];
         return json_encode([
             'success' => true,
             'ids'     => $ids,
             'count'   => count($ids),
-        ]);
+        ]); */
     }
 
     // -----------------------------------------------------------------------

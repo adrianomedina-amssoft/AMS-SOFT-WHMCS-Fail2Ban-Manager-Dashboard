@@ -17,7 +17,7 @@
 <?php endif; ?>
 
 <?php if (empty($jail_data) && ($total ?? 0) === 0): ?>
-<div class="alert alert-info">Nenhum jail encontrado em jail.local. Verifique o caminho nas configurações do módulo.</div>
+<div class="alert alert-info">Nenhuma jail encontrada na configuração efetiva. Verifique os arquivos e o leitor nativo.</div>
 <?php else: ?>
 
 <p class="text-muted" style="margin-top:8px;">Total: <strong><?= (int)($total ?? 0) ?></strong> jail(s)</p>
@@ -38,7 +38,7 @@
         <tbody>
         <?php foreach ($jail_data as $jail => $cfg): ?>
             <?php
-            $enabled  = isset($cfg['enabled']) ? strtolower($cfg['enabled']) !== 'false' : true;
+            $enabled  = in_array(strtolower($cfg['enabled']??'false'),['true','1','yes','on'],true);
             $live     = $live_status[$jail] ?? null;
             $banned   = $live ? (int)$live['currently_banned'] : '-';
             ?>
@@ -49,6 +49,7 @@
                           id="status-<?= $e($jail) ?>">
                         <?= $enabled ? 'Habilitado' : 'Desabilitado' ?>
                     </span>
+                    <small class="help-block">jail.local: <?= $e($cfg['_requested_enabled']??'herdado') ?> · daemon: <?= $live?'ativa':'inativa' ?><?= !$enabled&&($cfg['_requested_enabled']??'')==='true'?' · override/quarentena':'' ?></small>
                 </td>
                 <td>
                     <?php if (is_int($banned)): ?>

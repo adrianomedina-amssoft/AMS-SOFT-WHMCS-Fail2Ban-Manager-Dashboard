@@ -1,0 +1,29 @@
+/* Scoped to the protection page. Versioned independently of cached global CSS. */
+#amsfb-protection [hidden] { display: none !important; }
+#amsfb-protection .amsfb-protection-links { display:flex; flex-wrap:wrap; gap:8px 18px; margin:16px 0; }
+#amsfb-protection .amsfb-health-grid { display:grid; grid-template-columns:repeat(4,minmax(0,1fr)); gap:12px; margin-bottom:16px; }
+#amsfb-protection .amsfb-health-card { border:1px solid #ddd; border-radius:5px; padding:12px; min-width:0; }
+#amsfb-protection .amsfb-health-card h4 { margin-top:0; }
+#amsfb-protection .amsfb-health-card p { margin:10px 0 0; }
+#amsfb-protection .amsfb-detail { border:1px solid #ddd; padding:12px; border-radius:4px; margin:12px 0; }
+#amsfb-protection summary { cursor:pointer; font-weight:600; }
+#amsfb-protection details[open] > summary { margin-bottom:12px; }
+#amsfb-protection pre { max-height:320px; overflow:auto; white-space:pre-wrap; overflow-wrap:anywhere; }
+#amsfb-protection code { overflow-wrap:anywhere; }
+#amsfb-protection .table-responsive { width:100%; overflow-x:auto; }
+#amsfb-protection .amsfb-policy-tabs { display:flex; flex-wrap:wrap; }
+#amsfb-protection [role="tabpanel"] { padding:20px 0; }
+#amsfb-protection .amsfb-probe-grid { display:grid; grid-template-columns:repeat(3,minmax(0,1fr)); gap:10px; }
+#amsfb-protection .amsfb-probe-grid label { font-weight:normal; border:1px solid #ddd; padding:10px; border-radius:4px; }
+#amsfb-protection fieldset legend { font-size:16px; }
+#amsfb-protection [role="tab"]:focus-visible,
+#amsfb-protection summary:focus-visible { outline:3px solid #287bb5; outline-offset:3px; }
+#maintenance-preview-summary { border:1px solid #d9b260; padding:12px; margin:12px 0; white-space:pre-wrap; }
+@media(max-width:800px) {
+    #amsfb-protection .amsfb-health-grid { grid-template-columns:repeat(2,minmax(0,1fr)); }
+    #amsfb-protection .amsfb-probe-grid { grid-template-columns:repeat(2,minmax(0,1fr)); }
+}
+@media(max-width:480px) {
+    #amsfb-protection .amsfb-health-grid,
+    #amsfb-protection .amsfb-probe-grid { grid-template-columns:minmax(0,1fr); }
+}

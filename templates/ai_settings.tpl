@@ -14,9 +14,11 @@
 </div>
 
 <div id="amsfb-settings-result" class="alert" style="display:none;"></div>
+<div class="alert alert-info"><a href="<?= $e($modulelink.'&action=protection') ?>">Proteção e manutenção</a>: política completa, confiança automática, comportamento, aprendizado, consumo e acompanhamento.</div>
 
 <form id="amsfb-settings-form">
 <input type="hidden" name="csrf_token" id="amsfb-csrf-settings" value="<?= $e($csrf_token) ?>">
+<input type="hidden" name="policy_version" id="amsfb-settings-version" value="<?= $e($policy_version) ?>">
 
 <!-- =========================================================
      Card 0: Bantime Global
@@ -29,6 +31,12 @@
             <select name="global_bantime" class="form-control" style="max-width:260px;">
                 <?php
                 $bantimeOptions = [
+                    300      => '5 minutos',
+                    600      => '10 minutos',
+                    1800     => '30 minutos',
+                    3600     => '1 hora',
+                    21600    => '6 horas',
+                    86400    => '1 dia',
                     604800   => '1 semana',
                     1209600  => '2 semanas',
                     1814400  => '3 semanas',
@@ -37,9 +45,13 @@
                     15552000 => '6 meses',
                     31536000 => '12 meses',
                 ];
+                $effectiveBantime = (int)($global_bantime ?? 3600);
+                if (!isset($bantimeOptions[$effectiveBantime])) {
+                    $bantimeOptions[$effectiveBantime] = $effectiveBantime . ' segundos (atual)';
+                }
                 foreach ($bantimeOptions as $val => $label):
                 ?>
-                <option value="<?= $val ?>" <?= ($global_bantime ?? 604800) === $val ? 'selected' : '' ?>>
+                <option value="<?= $val ?>" <?= $effectiveBantime === $val ? 'selected' : '' ?>>
                     <?= $e($label) ?>
                 </option>
                 <?php endforeach; ?>
@@ -66,7 +78,7 @@
                         <?= ($active_provider === $key) ? 'checked' : '' ?>
                         data-provider-toggle="<?= $e($key) ?>">
                     <strong><?= $e($def['label']) ?></strong>
-                    <span class="label label-default" style="margin-left:6px;">Protocolo <?= $e(ucfirst($def['protocol'])) ?></span>
+                    <span class="label label-default" style="margin-left:6px;">Protocolo <?= $e($def['protocol'] === 'openai_responses' ? 'OpenAI Responses' : ucfirst($def['protocol'])) ?></span>
                 </label>
             </div>
             <?php endforeach; ?>
@@ -149,6 +161,27 @@
             </div>
             <?php endforeach; ?>
         </div>
+
+        <?php if (!empty($def['reasoning_efforts'])): ?>
+        <div class="form-group">
+            <label>Nível de raciocínio</label>
+            <?php foreach ($def['reasoning_efforts'] as $effortId => $effortLabel): ?>
+            <div class="radio">
+                <label>
+                    <input type="radio"
+                           name="ai_provider_<?= $e($key) ?>_reasoning_effort"
+                           value="<?= $e($effortId) ?>"
+                        <?= ($pcfg['reasoning_effort'] === $effortId) ? 'checked' : '' ?>>
+                    <strong><?= $e($effortLabel) ?></strong>
+                    <code><?= $e($effortId) ?></code>
+                </label>
+            </div>
+            <?php endforeach; ?>
+            <div class="alert alert-info" style="margin-top:10px; margin-bottom:0;">
+                Níveis maiores aumentam latência e consumo. Para análise recorrente de logs, recomendamos <strong>Leve</strong>.
+            </div>
+        </div>
+        <?php endif; ?>
 
     </div>
 </div>
@@ -391,15 +424,29 @@
      Card 6: Prompt customizável (compartilhado)
      ========================================================= -->
 <div class="panel panel-default">
-    <div class="panel-heading"><strong>&#128172; Prompt enviado à IA</strong></div>
+    <div class="panel-heading"><strong>&#128172; Template e instruções enviadas à IA</strong></div>
     <div class="panel-body">
         <div class="form-group">
-            <label>Template do prompt (use <code>{logs}</code> onde as linhas serão inseridas)</label>
-            <textarea name="ai_prompt" class="form-control amsfb-prompt-textarea" rows="14"><?= $e($ai_prompt) ?></textarea>
+            <label for="amsfb-ai-prompt">Template personalizado (exatamente um <code>{logs}</code>)</label>
+            <textarea id="amsfb-ai-prompt" name="ai_prompt" maxlength="8000" class="form-control amsfb-prompt-textarea" rows="14"><?= $e($ai_prompt) ?></textarea>
             <p class="help-block">
-                Altere para personalizar como a IA analisa os logs. Use <code>{logs}</code> como placeholder.
-                Este prompt é compartilhado entre todos os provedores.
+                Texto simples, até 8000 bytes. Instruções antes e depois de <code>{logs}</code> são preservadas;
+                os logs seguem separados como dados não confiáveis. O template é compartilhado entre provedores.
+                As regras obrigatórias de segurança e o formato do provedor são acrescentados pelo módulo e prevalecem.
+                País, ASN e User-Agent não verificam identidade nem autorizam ban/whitelist.
+                Ajuste as rotas normais em <a href="<?= $e($modulelink.'&action=protection') ?>">Proteção</a>:
+                caminho literal, sem imunidade para descendentes sensíveis ou query ofensiva.
+                Mudar prompt/modelo invalida o reaproveitamento de análise, sem apagar histórico ou desbloquear IPs.
             </p>
+            <?php if(!empty($prompt_warning)): ?><p class="alert alert-warning"><?= $e($prompt_warning) ?></p><?php endif; ?>
+            <?php if(!empty($prompt_preview)): ?>
+            <details><summary>Prévia local das instruções efetivas salvas (sem envio à API)</summary>
+                <p>Inclui template salvo, regras obrigatórias e inventário atual. Não acompanha alterações ainda não salvas.
+                Logs, tarefas, contexto e exemplos transformados são anexados em execução; delimitadores mudam por chamada.</p>
+                <pre style="max-height:320px;overflow:auto;white-space:pre-wrap"><?= $e($prompt_preview['system']) ?></pre>
+                <small>Contrato: <?= $e($prompt_preview['contract']['revision']) ?> · Modelo: <?= $e($prompt_preview['contract']['model']) ?></small>
+            </details>
+            <?php endif; ?>
         </div>
     </div>
 </div>
@@ -526,12 +573,21 @@
             var keyInput = document.querySelector('.amsfb-api-key[data-provider="' + provider + '"]');
             var resultSpan = document.querySelector('.amsfb-ping-result[data-provider="' + provider + '"]');
             var key = keyInput ? keyInput.value : '';
+            var modelInput = document.querySelector('input[name="ai_provider_' + provider + '_model"]:checked');
+            var reasoningInput = document.querySelector('input[name="ai_provider_' + provider + '_reasoning_effort"]:checked');
+            var baseUrlInput = document.querySelector('input[name="ai_provider_' + provider + '_base_url"]');
 
             btn.disabled = true;
             btn.innerHTML = '&#9685; Testando...';
             if (resultSpan) resultSpan.style.display = 'none';
 
-            window.AMSFB.post('ai', 'ping_api', { provider: provider, api_key: key }, function (data) {
+            window.AMSFB.post('ai', 'ping_api', {
+                provider: provider,
+                api_key: key,
+                model: modelInput ? modelInput.value : '',
+                reasoning_effort: reasoningInput ? reasoningInput.value : '',
+                base_url: baseUrlInput ? baseUrlInput.value : ''
+            }, function (data) {
                 btn.disabled = false;
                 btn.innerHTML = '&#128268; Testar API';
                 if (!resultSpan) return;
@@ -547,15 +603,25 @@
     // Salvar configurações
     // -------------------------------------------------------------------------
     var saveBtn    = document.getElementById('amsfb-save-btn');
+    var managedPolicyFields=<?= json_encode(array_keys(\AMS\Fail2Ban\Policy::fields())) ?>;
+    document.querySelectorAll('#amsfb-settings-form [name]').forEach(function(el){
+        if(managedPolicyFields.indexOf(el.name)!==-1 || /^threshold_/.test(el.name) || el.name==='confirm_auto'){
+            el.disabled=true;el.title='Ajuste este valor em Proteção e manutenção';
+        }
+    });
     var resultDiv  = document.getElementById('amsfb-settings-result');
+    var settingsResultTimer = null;
+    var settingsConflict = false;
 
     if (saveBtn) {
         saveBtn.addEventListener('click', function () {
+            if (settingsConflict || saveBtn.disabled) return;
+            if (settingsResultTimer !== null) clearTimeout(settingsResultTimer);
             var form = document.getElementById('amsfb-settings-form');
             var data = {};
             var inputs = form.querySelectorAll('input[name], select[name], textarea[name]');
             inputs.forEach(function (el) {
-                if (el.name === 'csrf_token') return;
+                if (el.name === 'csrf_token' || el.disabled) return;
                 if (el.type === 'radio' && !el.checked) return;
                 if (el.type === 'checkbox') {
                     if (el.checked) data[el.name] = el.value;
@@ -563,16 +629,42 @@
                 }
                 data[el.name] = el.value;
             });
+            // ASCII transport avoids another HTML-sanitization layer in WHMCS.
+            // It is encoding, not encryption; the server validates decoded UTF-8.
+            if (typeof data.ai_prompt === 'string') {
+                data.ai_prompt_b64 = window.btoa(unescape(encodeURIComponent(data.ai_prompt)));
+                delete data.ai_prompt;
+            }
 
             saveBtn.disabled = true;
 
             window.AMSFB.post('ai', 'save_settings', data, function (resp) {
-                saveBtn.disabled = false;
+                if (settingsResultTimer !== null) clearTimeout(settingsResultTimer);
+                settingsResultTimer = null;
+                settingsConflict = !resp.success && resp.code === 'policy_conflict' && resp.reload_required === true;
+                saveBtn.disabled = settingsConflict;
+                if(resp.success && typeof resp.policy_version==='string')
+                    document.getElementById('amsfb-settings-version').value=resp.policy_version;
                 if (!resultDiv) return;
                 resultDiv.style.display = 'block';
                 resultDiv.className = resp.success ? 'alert alert-success' : 'alert alert-danger';
                 resultDiv.textContent = resp.success ? (resp.message || 'Salvo.') : (resp.error || 'Erro.');
-                setTimeout(function () { resultDiv.style.display = 'none'; }, 4000);
+                if (settingsConflict) {
+                    resultDiv.className = 'alert alert-warning';
+                    var notice = document.createElement('p');
+                    notice.textContent = 'Seus campos não foram enviados novamente. Recarregar descartará as alterações ainda não salvas nesta tela.';
+                    var reload = document.createElement('button');
+                    reload.type = 'button';
+                    reload.className = 'btn btn-warning btn-sm';
+                    reload.textContent = 'Recarregar página';
+                    reload.addEventListener('click', function () {
+                        if (confirm('Recarregar e descartar as alterações ainda não salvas nesta tela?')) window.location.reload();
+                    });
+                    resultDiv.appendChild(notice);
+                    resultDiv.appendChild(reload);
+                } else {
+                    settingsResultTimer = setTimeout(function () { resultDiv.style.display = 'none'; settingsResultTimer = null; }, 4000);
+                }
             });
         });
     }

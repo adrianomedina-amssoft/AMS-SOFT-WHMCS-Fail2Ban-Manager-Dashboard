@@ -19,6 +19,9 @@ class FilterManager
     private string $filterDir;
     private JailConfig $jailConfig;
     private Fail2BanClient $client;
+    private array $lastDiagnostic=['success'=>false,'code'=>'filter_install','error'=>'Instalação não confirmada.'];
+
+    public function lastDiagnostic(): array { return $this->lastDiagnostic; }
 
     public function __construct(string $filterDir, JailConfig $jailConfig, Fail2BanClient $client)
     {
@@ -67,7 +70,7 @@ class FilterManager
 
         // Fonte 2: arquivos em /etc/fail2ban/jail.d/
         $jailDDir = dirname(rtrim($this->filterDir, '/')) . '/jail.d/';
-        foreach (glob($jailDDir . '*.conf') ?: [] as $file) {
+        foreach (array_merge(glob($jailDDir . '*.conf') ?: [],glob($jailDDir . '*.local') ?: []) as $file) {
             $content = @file_get_contents($file);
             if ($content === false) {
                 continue;
@@ -91,8 +94,9 @@ class FilterManager
      * Retorna true se criado com sucesso OU se já existia (idempotente).
      * Retorna false em caso de erro real (permissão, regex inválido, etc.).
      */
-    public function createFilter(string $name, string $failregex, string $description): bool
+    public function createFilter(string $name, string $failregex, string $description, array $evidence = []): bool
     {
+        $this->lastDiagnostic=['success'=>false,'code'=>'filter_install','error'=>'Instalação não confirmada.'];
         $name = $this->sanitizeFilterName($name);
         if ($name === '') {
             return false;
@@ -104,7 +108,7 @@ class FilterManager
 
         // Já existe — sucesso silencioso (idempotente)
         if ($this->filterExists($name)) {
-            return true;
+            return $this->isFilterSafe($name, $evidence);
         }
 
         $dest = $this->filterDir . 'amsfb-' . $name . '.conf';
@@ -149,17 +153,59 @@ class FilterManager
             return false;
         }
 
-        // Tenta cópia direta (funciona se filter.d for gravável pelo processo)
-        if (@copy($tmp, $dest)) {
-            @chmod($dest, 0644);
+        $samples = tempnam(sys_get_temp_dir(), 'amsfb_evidence_');
+        if ($samples === false) { @unlink($tmp); return false; }
+        try {
+            if (file_put_contents($samples, json_encode(array_values($evidence), JSON_INVALID_UTF8_SUBSTITUTE)) === false) return false;
+            $result = Privileged::run(['install-filter', $tmp, $name, $samples]);
+            $this->lastDiagnostic=$result;
+            return !empty($result['success']);
+        } finally {
             @unlink($tmp);
-            return true;
+            @unlink($samples);
         }
+    }
 
-        // Fallback: cópia via sudo (requer entradas no sudoers)
-        $ok = $this->client->copySudoFile($tmp, $dest);
-        @unlink($tmp);
-        return $ok;
+    public function isFilterSafe(string $name, array $evidence): bool
+    {
+        return !empty($this->filterDiagnostic($name,$evidence)['success']);
+    }
+
+    public function filterDiagnostic(string $name,array $evidence): array
+    {
+        $name = $this->sanitizeFilterName($name);
+        $content = @file_get_contents($this->filterDir . 'amsfb-' . $name . '.conf');
+        if ($content === false) return $this->lastDiagnostic=['success'=>false,'code'=>'filter_read','error'=>'Filtro existente não legível.'];
+        return $this->contentDiagnostic($content,$evidence);
+    }
+
+    public function loadedFilterDiagnostic(string $jail,array $evidence,string $source): array
+    {
+        $state=Privileged::run(['jail-filter-state',$jail]);
+        if(empty($state['success']))return ['success'=>false,'code'=>'loaded_filter_unavailable','error'=>'Definição carregada não confirmada.'];
+        if(!empty($state['prefregex'])||!array_key_exists('ignoreregex',$state)||$state['ignoreregex']!==[]
+            ||empty($state['patterns'])||!is_array($state['patterns']))
+            return ['success'=>false,'code'=>'loaded_filter_context','error'=>'Filtro carregado sem definição independente verificável.'];
+        $paths=array_map('realpath',$state['paths']??[]);
+        if(!realpath($source)||!in_array(realpath($source),$paths,true))
+            return ['success'=>false,'code'=>'loaded_source_mismatch','error'=>'Origem não está nos arquivos monitorados pelo daemon.'];
+        $body="[Definition]\nfailregex = ".implode("\n            ",array_map(fn($s)=>str_replace('%','%%',$s),$state['patterns']))."\nignoreregex =\n";
+        return $this->contentDiagnostic($body,$evidence);
+    }
+
+    private function contentDiagnostic(string $content,array $evidence): array
+    {
+        $tmp = tempnam(sys_get_temp_dir(), 'amsfb_filter_');
+        $samples = tempnam(sys_get_temp_dir(), 'amsfb_evidence_');
+        try {
+            if ($tmp === false || $samples === false) return $this->lastDiagnostic=['success'=>false,'code'=>'bridge_error','error'=>'Temporário indisponível.'];
+            if (file_put_contents($tmp, $content) === false || file_put_contents($samples,
+                json_encode(array_values($evidence), JSON_INVALID_UTF8_SUBSTITUTE)) === false) return $this->lastDiagnostic=['success'=>false,'code'=>'bridge_error','error'=>'Escrita temporária falhou.'];
+            return $this->lastDiagnostic=Privileged::run(['validate-filter', $tmp, $samples]);
+        } finally {
+            if ($tmp !== false) @unlink($tmp);
+            if ($samples !== false) @unlink($samples);
+        }
     }
 
     /**
@@ -180,20 +226,7 @@ class FilterManager
             return true; // já não existe — idempotente
         }
 
-        // Tenta remoção direta
-        if (@unlink($dest)) {
-            return true;
-        }
-
-        // Fallback: remoção via sudo
-        try {
-            $tmp = sys_get_temp_dir() . '/amsfb_rm_' . md5($name);
-            // Não existe comando sudo rm no sudoers — usar shell_exec como fallback
-            // Se não conseguir, retorna false (log caller irá registrar)
-            return false;
-        } catch (\Throwable $e) {
-            return false;
-        }
+        return !empty(Privileged::run(['quarantine-filter',$name])['success']);
     }
 
     /**
@@ -228,11 +261,12 @@ class FilterManager
         $jailParams = [
             'enabled'  => 'true',
             'filter'   => 'amsfb-' . $filterName,
-            'maxretry' => '3',
-            'findtime' => '3600',
-            'bantime'  => (string)(int)($params['bantime'] ?? 86400),
+            'maxretry' => (string)Policy::number('ai_new_jail_maxretry'),
+            'findtime' => (string)Policy::number('ai_new_jail_findtime'),
+            'bantime'  => (string)Policy::number('global_bantime'),
             'logpath'  => $logpath,
-            'ignoreip' => '127.0.0.1',
+            'ignoreip' => implode(' ', array_unique(array_merge(['127.0.0.0/8', '::1'], AutoBanEngine::loadWhitelist()))),
+            'action' => 'iptables-multiport[name=' . Safety::actionName($jailName) . ',port="0:65535"]',
         ];
 
         // JailConfig::addJail() tem sua própria verificação de jail.local
@@ -313,7 +347,7 @@ class FilterManager
             }
 
             // Extrair failregex do arquivo
-            if (!preg_match('/^failregex\s*=\s*(.+)$/m', $content, $m)) {
+            if (!preg_match('/^failregex\s*=\s*([^\n]*(?:\n[ \t]+[^\n]+)*)/m', $content, $m)) {
                 continue;
             }
             $existingRegex = trim($m[1]);
@@ -330,7 +364,7 @@ class FilterManager
 
             if ($similarity > $bestScore) {
                 $bestScore = $similarity;
-                $bestMatch = str_replace(['amsfb-', '.conf'], '', basename($file));
+                $bestMatch = Safety::filterName(pathinfo($file, PATHINFO_FILENAME));
                 $bestRegex = $existingRegex;
             }
         }
@@ -381,11 +415,7 @@ class FilterManager
      */
     private function sanitizeFilterName(string $name): string
     {
-        $name = strtolower($name);
-        $name = preg_replace('/[^a-z0-9-]/', '', $name);
-        $name = preg_replace('/-+/', '-', $name);
-        $name = trim($name, '-');
-        return substr($name, 0, 50);
+        return Safety::filterName($name);
     }
 
     /**
@@ -496,14 +526,16 @@ class FilterManager
         '/var/log/apache2/access.log',
         '/var/log/apache2/error_whmcs.log',
         '/var/log/apache2/access_whmcs.log',
+        '/var/log/apache2/access_license_gateway.log',
+        '/var/log/apache2/error_license_gateway.log',
         '/var/log/auth.log',
-        '/var/log/fail2ban.log',
     ];
 
     /** Retorna a allowlist de logs permitidos. */
     public static function getAllowedLogs(): array
     {
-        return self::ALLOWED_LOGS;
+        $configured=Database::getConfig('ai_learning_sources',implode("\n",self::ALLOWED_LOGS));
+        return array_values(array_intersect(self::ALLOWED_LOGS,preg_split('/\s+/',trim($configured),-1,PREG_SPLIT_NO_EMPTY)));
     }
 
     /**
@@ -576,13 +608,8 @@ class FilterManager
             }
         }
 
-        foreach (self::ALLOWED_LOGS as $path) {
-            if (file_exists($path)) {
-                return $path;
-            }
-        }
-
-        return '/var/log/apache2/error.log';
+        // Unknown provenance must never silently select an unrelated log.
+        return '';
     }
 
     /**

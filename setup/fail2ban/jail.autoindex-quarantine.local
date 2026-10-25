@@ -1,0 +1,10 @@
+# Detection-only quarantine: AH01276 on / is not individual attack proof.
+# Keep both jails active: existing actions, tickets and expirations survive.
+# No unban, restart or heuristic replacement. Sensitive-path protection is separate.
+[apache-autoindex-dir]
+failregex = ^(?!)<HOST>$
+usedns = no
+
+[apache-autoindex-ah01276]
+failregex = ^(?!)<HOST>$
+usedns = no

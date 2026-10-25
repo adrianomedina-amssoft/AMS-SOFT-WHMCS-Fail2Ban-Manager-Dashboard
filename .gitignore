@@ -1,58 +1,71 @@
-# OS
-.DS_Store
-Thumbs.db
-desktop.ini
-
-# Editors / IDE
-*.swp
-*.swo
-*~
-.idea/
-.vscode/
-*.sublime-project
-*.sublime-workspace
-nbproject/
-
-# Claude / AI
-.claude/
-
-# Backups (jail.local, filtros, config)
-*.bak
-*.bakp
-*.bak.*
-*.old
-*.orig
-*.backup
-
-# Logs
-*.log
-
-# Temp files
-*.tmp
-*.temp
-
-# PHP / Composer (caso alguém instale dependências)
-vendor/
-composer.lock
-composer.phar
-
-# Node (caso alguém build assets)
-node_modules/
-package-lock.json
-
-# Environment / credentials
+# Local configuration and credentials
 .env
 .env.*
 *.pem
 *.key
-
-# Lock files (runtime, não commitar)
-data/locks/*.lock
-
-# Cache
-.cache/
-*.cache
-
-# WHMCS data (nunca commitar configs do ambiente)
+*.p12
+*.pfx
+*.jks
+auth.json
+.netrc
+.npmrc
 /config.php
 /configuration.php
+
+# Private instructions, audits and deployment records
+.claude/
+.codex/
+CLAUDE.md
+AGENTS.md
+docs/PRD*
+docs/audit*
+docs/auditoria*
+docs/screenshots/
+backups/
+private/
+artifacts/
+*-secrets.json
+gitleaks-report*
+
+# Runtime data: only empty installation scaffolding is distributed
+data/*
+!data/.htaccess
+!data/locks/
+data/locks/*
+!data/locks/.gitkeep
+*.log
+*.lock
+*.sqlite
+*.sqlite3
+*.db
+*.dump
+*.sql.gz
+*.tar
+*.tar.gz
+*.tgz
+*.zip
+*.bak
+*.bak.*
+*.bakp
+*.bakp.*
+*.backup
+*.old
+*.orig
+*.tmp
+*.temp
+*.cache
+.cache/
+__pycache__/
+*.pyc
+
+# Build dependencies and editor metadata
+vendor/
+node_modules/
+composer.phar
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+.DS_Store
+Thumbs.db

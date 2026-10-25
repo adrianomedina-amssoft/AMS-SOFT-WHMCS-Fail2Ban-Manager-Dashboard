@@ -21,11 +21,9 @@ class Helper
     {
         $valid = !empty($_SESSION['amssoft_fail2ban_csrf'])
             && hash_equals($_SESSION['amssoft_fail2ban_csrf'], $token);
-        if ($valid) {
-            // [SEC-7] Rotate token after each successful validation so a stolen token
-            // cannot be reused for the remainder of the session.
-            $_SESSION['amssoft_fail2ban_csrf'] = bin2hex(random_bytes(32));
-        }
+        // Session-scoped token: per-request rotation breaks concurrent AJAX/tabs.
+        // WHMCS regenerates the session at authentication; a CSRF token is not
+        // a one-time authorization token.
         return $valid;
     }
 
@@ -159,7 +157,7 @@ class Helper
         if (empty($plaintext)) {
             return '';
         }
-        $encKey = self::getEncryptionKey();
+        $encKey = self::getEncryptionKey(true);
         $iv     = random_bytes(16);
         $cipher = openssl_encrypt($plaintext, 'AES-256-CBC', $encKey, OPENSSL_RAW_DATA, $iv);
         if ($cipher === false) {
@@ -181,7 +179,8 @@ class Helper
         if ($raw === false || strlen($raw) <= 16) {
             return '';
         }
-        $encKey  = self::getEncryptionKey();
+        try { $encKey = self::getEncryptionKey(false); }
+        catch (\Throwable $e) { return ''; }
         $iv      = substr($raw, 0, 16);
         $cipher  = substr($raw, 16);
         $plain   = openssl_decrypt($cipher, 'AES-256-CBC', $encKey, OPENSSL_RAW_DATA, $iv);
@@ -189,7 +188,7 @@ class Helper
     }
 
     /** Deriva a chave de criptografia a partir de chave aleatória persistida no banco. */
-    private static function getEncryptionKey(): string
+    private static function getEncryptionKey(bool $create): string
     {
         // Chave aleatória persistida no banco — método único e confiável.
         // (Abordagem anterior via licença WHMCS foi removida: o valor retornado
@@ -204,13 +203,15 @@ class Helper
                 if ($decoded !== false && strlen($decoded) === 32) {
                     return $decoded;
                 }
+                throw new \RuntimeException('Chave de criptografia inválida; restaure o backup.');
             }
+            if (!$create) throw new \RuntimeException('Chave de criptografia ausente.');
             $newKey = random_bytes(32);
             Capsule::table('mod_amssoft_fail2ban_config')
-                ->updateOrInsert(['key' => '_enc_key'], ['value' => base64_encode($newKey)]);
-            return $newKey;
+                ->insertOrIgnore(['key' => '_enc_key', 'value' => base64_encode($newKey)]);
+            return self::getEncryptionKey(false);
         } catch (\Throwable $e) {
-            return hash('sha256', php_uname() . gethostname(), true);
+            throw new \RuntimeException('Chave de criptografia indisponível; nenhuma credencial foi alterada.',0,$e);
         }
     }
 }

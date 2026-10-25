@@ -1,243 +1,34 @@
 <?php
 namespace AMS\Fail2Ban\Controllers;
 
-use AMS\Fail2Ban\Database;
-use AMS\Fail2Ban\GeoIP;
-use AMS\Fail2Ban\Helper;
-use AMS\Fail2Ban\Router;
+use AMS\Fail2Ban\{Helper, Router, IpBanActions, IpBanView};
 
 class IpsController
 {
-    private array  $vars;
-    private Router $router;
-
-    public function __construct(array $vars, Router $router)
-    {
-        $this->vars   = $vars;
-        $this->router = $router;
-    }
+    public function __construct(private array $vars,private Router $router) {}
 
     public function handle(string $action): string
     {
-        // POST: ban or unban action
-        if ($_SERVER['REQUEST_METHOD'] === 'POST') {
-            return $this->handlePost();
+        if(($_SERVER['REQUEST_METHOD']??'GET')==='POST'){
+            $operation=is_string($_POST['do']??null)?$_POST['do']:'';
+            $result=IpBanActions::execute($operation,$_POST,$this->router->makeClient());
+            $this->flash($result);
+            Helper::redirect(($this->vars['modulelink']??'').'&action=ips');
+            return '';
         }
-
-        // GET: list banned IPs
-        return $this->listIPs();
+        return $this->router->render('ips_overview',['view'=>IpBanView::read($this->vars,$_GET)]);
     }
 
-    // -----------------------------------------------------------------------
-    // POST handler
-    // -----------------------------------------------------------------------
-
-    private function handlePost(): string
+    public function handleAjax(string $do,array $post): string
     {
-        $token = $_POST['csrf_token'] ?? '';
-        if (!Helper::checkCsrf($token)) {
-            Helper::setFlash('danger', 'Token CSRF inválido.');
-            return $this->redirectToIps();
-        }
-
-        $do   = $_POST['do'] ?? '';
-        $ip   = Helper::sanitizeIp($_POST['ip'] ?? '');
-        $jail = Helper::sanitizeJail($_POST['jail'] ?? '');
-
-        if (!$ip || !$jail) {
-            Helper::setFlash('danger', 'IP ou jail inválido.');
-            return $this->redirectToIps();
-        }
-
-        $client  = $this->router->makeClient();
-        $adminId = Helper::adminId();
-
-        if ($do === 'ban') {
-            $ok = $client->banIP($jail, $ip);
-            if ($ok) {
-                Database::logEvent($ip, $jail, 'manual_ban', 'Manual via WHMCS', $adminId);
-                Helper::setFlash('success', "IP {$ip} banido no jail {$jail}.");
-            } else {
-                Helper::setFlash('danger', "Falha ao banir {$ip}.");
-            }
-        } elseif ($do === 'unban') {
-            $ok = $client->unbanIP($jail, $ip);
-            if ($ok) {
-                Database::logEvent($ip, $jail, 'manual_unban', 'Manual via WHMCS', $adminId);
-                Helper::setFlash('success', "IP {$ip} desbanido do jail {$jail}.");
-            } else {
-                Helper::setFlash('danger', "Falha ao desbanir {$ip}.");
-            }
-        } else {
-            Helper::setFlash('danger', 'Ação desconhecida.');
-        }
-
-        return $this->redirectToIps();
+        $result=IpBanActions::execute($do,$post,$this->router->makeClient());
+        if($result['success'])$this->flash($result);
+        return json_encode($result,JSON_INVALID_UTF8_SUBSTITUTE);
     }
 
-    private function redirectToIps(): string
+    private function flash(array $result): void
     {
-        $url = ($this->vars['modulelink'] ?? '') . '&action=ips';
-        Helper::redirect($url);
-        return ''; // unreachable
-    }
-
-    // -----------------------------------------------------------------------
-    // AJAX handler
-    // -----------------------------------------------------------------------
-
-    public function handleAjax(string $do, array $post): string
-    {
-        if ($do === 'unban') {
-            $ip   = Helper::sanitizeIp($post['ip'] ?? '');
-            $jail = Helper::sanitizeJail($post['jail'] ?? '');
-
-            if (!$ip || !$jail) {
-                return json_encode(['success' => false, 'error' => 'IP ou jail inválido.']);
-            }
-
-            $client  = $this->router->makeClient();
-            $adminId = Helper::adminId();
-
-            $ok = $client->unbanIP($jail, $ip);
-            if ($ok) {
-                Database::logEvent($ip, $jail, 'manual_unban', 'Manual via WHMCS', $adminId);
-                return json_encode(['success' => true, 'message' => "IP {$ip} desbanido do jail {$jail}."]);
-            }
-
-            // Fallback: verificar se o IP já não está banido (pode ter sido removido por outro processo)
-            $status = $client->getJailStatus($jail);
-            if (!in_array($ip, $status['banned_ip_list'], true)) {
-                Database::logEvent($ip, $jail, 'manual_unban', 'Manual via WHMCS', $adminId);
-                return json_encode(['success' => true, 'message' => "IP {$ip} já não está banido no jail {$jail}."]);
-            }
-
-            return json_encode(['success' => false, 'error' => "Falha ao desbanir {$ip} do jail {$jail}."]);
-        }
-
-        if ($do === 'ban') {
-            $ip   = Helper::sanitizeIp($post['ip'] ?? '');
-            $jail = Helper::sanitizeJail($post['jail'] ?? '');
-
-            if (!$ip || !$jail) {
-                return json_encode(['success' => false, 'error' => 'IP ou jail inválido.']);
-            }
-
-            $client  = $this->router->makeClient();
-            $adminId = Helper::adminId();
-
-            $ok = $client->banIP($jail, $ip);
-            if ($ok) {
-                Database::logEvent($ip, $jail, 'manual_ban', 'Manual via WHMCS', $adminId);
-                return json_encode(['success' => true, 'message' => "IP {$ip} banido no jail {$jail}."]);
-            }
-
-            return json_encode(['success' => false, 'error' => "Falha ao banir {$ip} no jail {$jail}."]);
-        }
-
-        return json_encode(['success' => false, 'error' => 'Ação desconhecida.']);
-    }
-
-    // -----------------------------------------------------------------------
-    // GET — list
-    // -----------------------------------------------------------------------
-
-    private function listIPs(): string
-    {
-        $client        = $this->router->makeClient();
-        $fail2banOnline = false;
-        $bannedIPs     = [];
-        $jails         = [];
-        $error         = null;
-
-        try {
-            $fail2banOnline = $client->ping();
-            if ($fail2banOnline) {
-                $bannedIPs = $client->getBannedIPs();
-                $jails     = $client->getJails();
-            }
-        } catch (\Throwable $e) {
-            $error = $e->getMessage();
-        }
-
-        // Sempre fundir com os jails enabled=true do jail.local para que o dropdown
-        // "Banir IP" exiba todos os jails configurados, mesmo que o fail2ban ainda
-        // não tenha recarregado ou retorne uma lista parcial.
-        try {
-            $config   = $this->router->makeJailConfig();
-            $jailData = $config->readJailLocal();
-            unset($jailData['DEFAULT']);
-            foreach ($jailData as $jailName => $cfg) {
-                $enabled = !isset($cfg['enabled']) || strtolower($cfg['enabled']) !== 'false';
-                if ($enabled && !in_array($jailName, $jails, true)) {
-                    $jails[] = $jailName;
-                }
-            }
-        } catch (\Throwable $e) {
-            // jail.local inacessível — usa apenas o que o fail2ban retornou
-        }
-
-        // Filtros server-side (antes da paginação e do cross-reference com DB)
-        $filterIp   = substr(preg_replace('/[^0-9a-fA-F.:\\/]/', '', $_GET['ip'] ?? ''), 0, 50);
-        $filterJail = Helper::sanitizeJail($_GET['jail'] ?? '');
-
-        if ($filterIp !== '') {
-            $bannedIPs = array_values(array_filter($bannedIPs, fn($r) => str_contains($r['ip'], $filterIp)));
-        }
-        if ($filterJail !== '') {
-            $bannedIPs = array_values(array_filter($bannedIPs, fn($r) => $r['jail'] === $filterJail));
-        }
-        $filters = ['ip' => $filterIp, 'jail' => $filterJail];
-
-        // Cross-reference with DB for ban time / reason
-        $ipList  = array_unique(array_column($bannedIPs, 'ip'));
-        $banInfo = [];
-        try {
-            $banInfo = Database::getBanInfoForIps($ipList);
-        } catch (\Throwable $e) {
-            // DB may not be available
-        }
-
-        // Merge DB data into ban list
-        foreach ($bannedIPs as &$row) {
-            $row['timestamp'] = $banInfo[$row['ip']]['timestamp'] ?? null;
-            $row['reason']    = $banInfo[$row['ip']]['reason']    ?? null;
-        }
-        unset($row);
-
-        // Parâmetros para pré-preencher e abrir o modal "Banir IP" automaticamente
-        // (usado quando o admin vem da tela de Sugestões IA com jail inativável).
-        $banIp        = Helper::sanitizeIp($_GET['ban_ip'] ?? '');
-        $openBanModal = !empty($_GET['open_modal']) && !empty($banIp);
-
-        // Paginação server-side via array_slice (os IPs vêm do fail2ban, não do DB)
-        $perPage   = 10;
-        $totalIPs  = count($bannedIPs);
-        $pages     = $totalIPs > 0 ? (int)ceil($totalIPs / $perPage) : 1;
-        $page      = max(1, min((int)($_GET['page'] ?? 1), $pages));
-        $bannedIPs = array_slice($bannedIPs, ($page - 1) * $perPage, $perPage);
-
-        // GeoIP: lookup apenas dos IPs visíveis na página atual
-        $geoData = [];
-        try {
-            $visibleIps = array_column($bannedIPs, 'ip');
-            $geoData    = GeoIP::bulkLookup($visibleIps);
-        } catch (\Throwable $e) {
-            // GeoIP indisponível — segue sem dados geo
-        }
-
-        return $this->router->render('ips', [
-            'fail2ban_online' => $fail2banOnline,
-            'error'           => $error,
-            'banned_ips'      => $bannedIPs,
-            'jails'           => $jails,
-            'ban_ip'          => $banIp,
-            'open_ban_modal'  => $openBanModal,
-            'page'            => $page,
-            'pages'           => $pages,
-            'total_ips'       => $totalIPs,
-            'filters'         => $filters,
-            'geo_data'        => $geoData,
-        ]);
+        Helper::setFlash($result['success']?(!empty($result['warning'])?'warning':'success'):'danger',
+            $result['message']??$result['error']);
     }
 }

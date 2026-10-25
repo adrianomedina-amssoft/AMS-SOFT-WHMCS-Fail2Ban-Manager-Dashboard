@@ -98,34 +98,48 @@ class Fail2BanClient
         if ($jail === '' || $ip === '') {
             return false;
         }
-        $this->run('set ' . escapeshellarg($jail) . ' unbanip ' . escapeshellarg($ip), $code);
-        return $code === 0;
+        $result = Privileged::run(['unban', $jail, $ip]);
+        return !empty($result['success']);
     }
 
     public function banIP(string $jail, string $ip): bool
     {
         $jail = $this->sanitizeJail($jail);
         $ip   = $this->sanitizeIp($ip);
-        if ($jail === '' || $ip === '') {
+        if ($jail === '' || !Safety::canBan($ip) || Safety::isWhitelisted($ip, AutoBanEngine::loadWhitelist())) {
             return false;
         }
-        $this->run('set ' . escapeshellarg($jail) . ' banip ' . escapeshellarg($ip), $code);
-        return $code === 0;
+        $result = Privileged::run(['ban', $jail, $ip]);
+        if (empty($result['success'])) return false;
+        for ($attempt = 0; $attempt < 10; $attempt++) {
+            if ($this->hasEffectiveBan($jail, $ip)) return true;
+            usleep(100000);
+        }
+        $this->lastOutput = 'Comando aceito pelo fail2ban, mas regra no firewall não confirmada.';
+        return false;
+    }
+
+    public function hasEffectiveBan(string $jail, string $ip): bool
+    {
+        if ($this->sanitizeJail($jail) === '' || $this->sanitizeIp($ip) === '') return false;
+        $result = Privileged::run(['check-ban', $jail, $ip]);
+        return !empty($result['success']) && !empty($result['applied']);
     }
 
     /** Reloads a specific jail, or the entire fail2ban service if $jail is null. */
     public function reload(?string $jail = null): bool
     {
+        $arguments = ['reload'];
         if ($jail !== null) {
             $jail = $this->sanitizeJail($jail);
             if ($jail === '') {
                 return false;
             }
-            $this->run('reload ' . escapeshellarg($jail), $code);
-        } else {
-            $this->run('reload', $code);
+            $arguments[] = $jail;
         }
-        return $code === 0;
+        $result = Privileged::run($arguments);
+        $this->lastOutput = !empty($result['success']) ? '' : ($result['error'] ?? 'Reload não confirmado.');
+        return !empty($result['success']);
     }
 
     /** Returns true when fail2ban responds to ping. */
@@ -145,30 +159,9 @@ class Fail2BanClient
      */
     public function copySudoFile(string $src, string $dest): bool
     {
-        // [SEC-4] Validação estrita de src e dest — previne path traversal e injeção
-        if (!preg_match('/^\/tmp\/amsfb_filter_[a-zA-Z0-9]+$/', $src)) {
-            return false;
-        }
-        if (!preg_match('/^\/etc\/fail2ban\/filter\.d\/amsfb-[a-z0-9-]+\.conf$/', $dest)) {
-            return false;
-        }
-
-        $cpCmd = escapeshellarg($this->sudo)
-               . ' /bin/cp '
-               . escapeshellarg($src) . ' '
-               . escapeshellarg($dest)
-               . ' 2>&1';
-        exec($cpCmd, $output, $code);
-        if ($code !== 0) {
-            return false;
-        }
-
-        $chmodCmd = escapeshellarg($this->sudo)
-                  . ' /bin/chmod 644 '
-                  . escapeshellarg($dest)
-                  . ' 2>&1';
-        exec($chmodCmd, $output2, $code2);
-        return $code2 === 0;
+        // Legacy API intentionally fails closed. FilterManager validates evidence
+        // and installs through the restricted privileged bridge instead.
+        return false;
     }
 
     // -----------------------------------------------------------------------
@@ -195,6 +188,11 @@ class Fail2BanClient
             . ' 2>&1';
 
         $outputArr = [];
+        if(CycleBudget::active()) {
+            $result=Privileged::run(array_merge(['client-read'],preg_split('/\s+/',str_replace("'",'', $cmd))));
+            $code=!empty($result['success'])?0:1;
+            return $this->lastOutput=$result['output']??'';
+        }
         exec($fullCmd, $outputArr, $code);
         $this->lastOutput = implode("\n", $outputArr);
         return $this->lastOutput;

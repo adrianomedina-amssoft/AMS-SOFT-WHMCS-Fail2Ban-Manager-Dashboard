@@ -1,371 +1,53 @@
 <?php
 namespace AMS\Fail2Ban\Controllers;
-
-use AMS\Fail2Ban\Database;
-use AMS\Fail2Ban\GeoIP;
-use AMS\Fail2Ban\Helper;
-use AMS\Fail2Ban\Router;
-use AMS\Fail2Ban\LogViewer;
-use AMS\Fail2Ban\AIAnalyzer;
-use AMS\Fail2Ban\AutoBanEngine;
+use AMS\Fail2Ban\{Helper,Router,LogView,Database,Policy,AIAnalyzer,AutoBanEngine};
 
 class LogViewerController
 {
-    private array  $vars;
-    private Router $router;
-
-    public function __construct(array $vars, Router $router)
+    public function __construct(private array $vars,private Router $router) {}
+    private static function token(): string
     {
-        $this->vars   = $vars;
-        $this->router = $router;
+        $tokens=$_SESSION['amsfb_view_analysis']??[];
+        foreach($tokens as $key=>$at)if(!is_int($at)||time()-$at>=900)unset($tokens[$key]);
+        $tokens=array_slice($tokens,-4,null,true);$token=bin2hex(random_bytes(32));$tokens[$token]=time();$_SESSION['amsfb_view_analysis']=$tokens;return $token;
     }
-
-    // -----------------------------------------------------------------------
-    // Requisição de página (GET)
-    // -----------------------------------------------------------------------
-
     public function handle(string $action): string
     {
-        // Coletar logpaths do jail.local para enriquecer o dropdown
-        $extra = [];
-        try {
-            $jailData = $this->router->makeJailConfig()->readJailLocal();
-            foreach ($jailData as $jail => $cfg) {
-                if ($jail === 'DEFAULT' || empty($cfg['logpath'])) {
-                    continue;
-                }
-                $extra[$cfg['logpath']] = $jail;
-            }
-        } catch (\Throwable $e) {
-            // jail.local inacessível — segue sem extra
-        }
-
-        $viewer        = new LogViewer();
-        $availableLogs = $viewer->getAvailableLogs($extra);
-
-        return $this->router->render('logviewer', [
-            'available_logs' => $availableLogs,
-        ]);
+        Helper::requireAdmin();$view=LogView::catalog($this->router);
+        $view['analysis_token']=self::token();$view['analysis_lines']=Policy::number('ai_log_lines');
+        if(($_SERVER['REQUEST_METHOD']??'GET')!=='GET')$view['warnings'][]='Esta página é somente leitura; nenhuma ação foi executada.';
+        return $this->router->render('logviewer_overview',['view'=>$view]);
     }
-
-    // -----------------------------------------------------------------------
-    // Requisições AJAX
-    // -----------------------------------------------------------------------
-
-    public function handleAjax(string $do, array $post): string
+    public function handleAjax(string $do,array $post): string
     {
-        switch ($do) {
-            case 'fetch_lines':
-                return $this->ajaxFetchLines($post);
-
-            case 'ban_ip':
-                return $this->ajaxBanIp($post);
-
-            case 'analyze':
-                return $this->ajaxAnalyze($post);
-
-            default:
-                return json_encode(['success' => false, 'error' => 'Ação desconhecida.']);
-        }
+        $result=['success'=>false,'error'=>'Ação desconhecida.'];
+        if(Helper::adminId()<=0||($_SERVER['REQUEST_METHOD']??'GET')!=='POST')return json_encode(['success'=>false,'error'=>'Consulta exige sessão administrativa e POST.']);
+        if(!is_string($post['csrf_token']??null)||!Helper::checkCsrf($post['csrf_token']))return json_encode(['success'=>false,'error'=>'Token CSRF inválido.']);
+        try{
+            if($do==='fetch_lines')$result=LogView::fetch($this->router,$post);
+            elseif($do==='ban_ip')$result=['success'=>false,'error'=>'Use Revisar IP na tela de IPs para confirmar o banimento. Nenhuma jail ou ban foi alterado por este endpoint.'];
+            elseif($do==='analyze')$result=$this->analyze($post);
+        }catch(\InvalidArgumentException $e){$result=['success'=>false,'error'=>$e->getMessage()];}
+        catch(\Throwable $e){$result=['success'=>false,'error'=>$do==='analyze'?'Resultado da análise não confirmado. Confira a aba IA antes de repetir; não houve reenvio automático.':'Leitura indisponível ou arquivo alterado. Atualize novamente; isso não confirma arquivo vazio.'];}
+        return json_encode($result,JSON_INVALID_UTF8_SUBSTITUTE);
     }
-
-    // -----------------------------------------------------------------------
-    // AJAX: buscar linhas do log
-    // -----------------------------------------------------------------------
-
-    private function ajaxFetchLines(array $post): string
+    private function analyze(array $post): array
     {
-        $path  = $post['path']  ?? '';
-        $lines = (int)($post['lines'] ?? 100);
-
-        if (empty($path)) {
-            return json_encode(['success' => false, 'error' => 'Path não informado.']);
-        }
-
-        // Verificar se o path está na lista de logs permitidos
-        if (!$this->isPathAllowed($path)) {
-            return json_encode(['success' => false, 'error' => 'Path não autorizado.']);
-        }
-
-        $viewer     = new LogViewer();
-        $rawLines   = $viewer->readLines($path, $lines);
-        $highlighted = $viewer->highlightSuspicious($rawLines);
-
-        // GeoIP: extrair IPs únicos das linhas (máx 20) e lookup
-        $geoData = [];
-        try {
-            $allIps = [];
-            foreach ($highlighted as $item) {
-                foreach (($item['ips'] ?? []) as $ip) {
-                    $allIps[$ip] = ($allIps[$ip] ?? 0) + 1;
-                }
-            }
-            // Ordenar por frequência (mais frequentes primeiro) e limitar a 20
-            arsort($allIps);
-            $topIps   = array_slice(array_keys($allIps), 0, 20);
-            $geoData  = GeoIP::bulkLookup($topIps);
-        } catch (\Throwable $e) {
-            // GeoIP indisponível — segue sem dados geo
-        }
-
-        return json_encode([
-            'success'  => true,
-            'lines'    => $highlighted,
-            'total'    => count($highlighted),
-            'geo_data' => $geoData,
-        ]);
-    }
-
-    // -----------------------------------------------------------------------
-    // AJAX: banir IP inline
-    // -----------------------------------------------------------------------
-
-    private function ajaxBanIp(array $post): string
-    {
-        $ip   = Helper::sanitizeIp($post['ip']   ?? '');
-        $jail = Helper::sanitizeJail($post['jail'] ?? '');
-
-        if (!$ip) {
-            return json_encode(['success' => false, 'error' => 'IP inválido.']);
-        }
-
-        // Verificar whitelist
-        $whitelist = $this->getWhitelist();
-        if (in_array($ip, $whitelist, true)) {
-            return json_encode(['success' => false, 'error' => 'IP está na whitelist da IA.']);
-        }
-
-        $client  = $this->router->makeClient();
-        $adminId = Helper::adminId();
-
-        if (empty($jail)) {
-            $jails = $client->getJails();
-            $jail  = !empty($jails) ? $jails[0] : 'sshd';
-        }
-
-        $ok = $client->banIP($jail, $ip);
-        if ($ok) {
-            Database::logEvent($ip, $jail, 'manual_ban', 'Ban manual via Log Viewer', $adminId);
-        }
-
-        return json_encode([
-            'success' => $ok,
-            'message' => $ok ? "IP {$ip} banido no jail {$jail}." : "Falha ao banir {$ip}.",
-        ]);
-    }
-
-    // -----------------------------------------------------------------------
-    // AJAX: analisar log com IA
-    // NOTA: este endpoint é intencionalmente isolado — lê últimas N linhas
-    // via readLines() (ad-hoc, sem watermark) e NÃO usa LogLock nem sessão
-    // de batch. Não compete com AutoBanEngine/cron pelo mesmo offset.
-    // Dedup por IP em saveSuggestion() previne inflação do gate de ocorrências
-    // em cliques repetidos no mesmo trecho.
-    // -----------------------------------------------------------------------
-
-    private function ajaxAnalyze(array $post): string
-    {
-        $path  = $post['path']  ?? '';
-        $lines = (int)($post['lines'] ?? 100);
-
-        if (empty($path)) {
-            return json_encode(['success' => false, 'error' => 'Path não informado.']);
-        }
-
-        if (!$this->isPathAllowed($path)) {
-            return json_encode(['success' => false, 'error' => 'Path não autorizado.']);
-        }
-
-        // Usar provedor ativo (multi-provider)
-        $aiConfig = AIAnalyzer::getActiveConfig();
-        if (empty($aiConfig['api_key'])) {
-            return json_encode(['success' => false, 'error' => 'Chave API não configurada para o provedor ativo. Configure em IA &gt; Configurações.']);
-        }
-
-        $viewer   = new LogViewer();
-        $rawLines = $viewer->readLines($path, $lines);
-
-        if (empty($rawLines)) {
-            return json_encode(['success' => false, 'error' => 'Nenhuma linha encontrada no log.']);
-        }
-
-        $analyzer    = new AIAnalyzer($aiConfig['provider'], $aiConfig['api_key'], $aiConfig['model'], $aiConfig['base_url'], $aiConfig['protocol'] ?? '');
-        $client      = $this->router->makeClient();
-        $engine      = new AutoBanEngine($analyzer, $client);
-
-        // Auto-retry em caso de truncamento: reduz linhas pela metade.
-        // Mitigação parcial — se todas as tentativas truncarem, retorna
-        // banner de truncamento sem sugestões (limitação: TruncatedResponseException
-        // não carrega resultado parcial).
-        $maxAttempts = 3; // tentativa original + 2 retries (100→50→25)
-        $attempt = 0;
-        $suggestions = [];
-        $truncated = false;
-        $parseFailed = false;
-
-        while ($attempt < $maxAttempts) {
-            $truncated = false;
-            $parseFailed = false;
-
-            try {
-                $suggestions = $analyzer->analyze($rawLines);
-                break; // sucesso — sair do loop
-            } catch (\AMS\Fail2Ban\TruncatedResponseException $e) {
-                $truncated = true;
-                $parseFailed = true;
-                Database::logEvent('', '', 'ai_parse_error',
-                    "Truncated: {$path} (attempt {$attempt}/{$maxAttempts}): "
-                    . $e->getMessage(), null);
-
-                $rawLines = array_slice($rawLines, 0, (int)(count($rawLines) / 2));
-                if (empty($rawLines)) {
-                    Database::logEvent('', '', 'ai_parse_error',
-                        "Retry esgotado: {$path} — conteúdo insuficiente após "
-                        . $attempt . " tentativas", null);
-                    break;
-                }
-                $attempt++;
-                continue;
-            } catch (\AMS\Fail2Ban\InvalidResponseException $e) {
-                $parseFailed = true;
-                Database::logEvent('', '', 'ai_parse_error',
-                    "InvalidJSON: {$path}: " . $e->getMessage(), null);
-                break;
-            } catch (\Throwable $e) {
-                error_log('[AMSFB LogViewer] analyze error: ' . $e->getMessage());
-
-                $errMsg = 'Erro ao chamar a API de análise.';
-                if (stripos($e->getMessage(), 'timed out') !== false
-                    || stripos($e->getMessage(), 'timeout') !== false) {
-                    $errMsg .= ' Timeout — tente novamente em alguns segundos.';
-                } else {
-                    $errMsg .= ' Verifique a configuração do provedor em IA > Configurações.';
-                }
-
-                return json_encode([
-                    'success' => false,
-                    'error'   => $errMsg,
-                ]);
-            }
-        }
-
-        $saved    = 0;
-        $skipped  = 0;
-        $minConf  = (int)Database::getConfig('ai_min_confidence', 75);
-        $whitelist = $this->getWhitelist();
-
-        // Dedup: IPs já banidos ativamente no fail2ban
-        $activeBannedIPs = [];
-        try {
-            if ($client->ping()) {
-                $bannedData      = $client->getBannedIPs();
-                $activeBannedIPs = array_column($bannedData, 'ip');
-            }
-        } catch (\Throwable $e) {
-            // fail2ban offline — fallback baseado no banco
-        }
-        if (empty($activeBannedIPs)) {
-            $bantimeDays     = (int)ceil((int)Database::getConfig('global_bantime', 604800) / 86400);
-            $activeBannedIPs = Database::getKnownIPs($bantimeDays);
-        }
-
-        // Dedup: IPs com sugestão pendente (admin ainda não agiu)
-        $pendingIPs = Database::getPendingIPs();
-        $skipIPs    = array_unique(array_merge($activeBannedIPs, $pendingIPs));
-
-        foreach ($suggestions as $suggestion) {
-            $ip = $suggestion['ip'] ?? '';
-
-            if (in_array($ip, $whitelist, true)) {
-                continue;
-            }
-            if ($suggestion['confidence'] < $minConf) {
-                continue;
-            }
-            if (($suggestion['action'] ?? 'ban') !== 'ban') {
-                continue;
-            }
-            if (in_array($ip, $skipIPs, true)) {
-                $skipped++;
-                continue;
-            }
-
-            $suggestion['source_log'] = $path; // propagar log de origem (Bug 1 fix)
-            $engine->saveSuggestion($suggestion, 'pending');
-            $skipIPs[] = $ip; // dedup em memória para múltiplas ocorrências no mesmo arquivo
-            $saved++;
-        }
-
-        // Atualizar status de ping
-        Database::setConfig('ai_last_ping_ok', '1');
-
-        if ($truncated) {
-            $msg = "⚠ Resposta truncada pela IA (limite de tokens).";
-            if ($saved > 0) $msg .= " {$saved} sugestão(ões) parcial(is) salva(s).";
-        } elseif ($saved > 0) {
-            $msg = "{$saved} sugestão(ões) salva(s). Acesse a aba IA para revisar.";
-        } elseif ($skipped > 0) {
-            $msg = "Nenhuma sugestão nova — {$skipped} IP(s) já pendente(s) ou banido(s).";
-        } else {
-            $msg = "Nenhuma ameaça encontrada no trecho analisado.";
-        }
-
-        return json_encode([
-            'success'      => true,
-            'total_found'  => count($suggestions),
-            'saved'        => $saved,
-            'skipped'      => $skipped,
-            'message'      => $msg,
-            'truncated'    => $truncated,
-            'parse_failed' => $parseFailed,
-        ]);
-    }
-
-    // -----------------------------------------------------------------------
-    // Helpers
-    // -----------------------------------------------------------------------
-
-    private function isPathAllowed(string $path): bool
-    {
-        $extra = [];
-        try {
-            $jailData = $this->router->makeJailConfig()->readJailLocal();
-            foreach ($jailData as $jail => $cfg) {
-                if ($jail === 'DEFAULT' || empty($cfg['logpath'])) {
-                    continue;
-                }
-                $extra[$cfg['logpath']] = $jail;
-            }
-        } catch (\Throwable $e) {}
-
-        $viewer  = new LogViewer();
-        $allowed = array_column($viewer->getAvailableLogs($extra), 'path');
-        return in_array($path, $allowed, true);
-    }
-
-    private function getWhitelist(): array
-    {
-        $raw = Database::getConfig('ai_whitelist_ips', '');
-        if (empty($raw)) {
-            return [];
-        }
-        $lines = preg_split('/[\r\n,]+/', $raw);
-        $valid = [];
-        foreach ($lines as $line) {
-            $ip = trim($line);
-            if (filter_var($ip, FILTER_VALIDATE_IP)) {
-                $valid[] = $ip;
-            }
-        }
-        return $valid;
-    }
-
-    private function decryptApiKey(): string
-    {
-        $encrypted = Database::getConfig('ai_api_key', '');
-        if (empty($encrypted)) {
-            return '';
-        }
-        return Helper::decryptApiKey($encrypted);
+        [$path]=LogView::request($post);
+        if(($post['confirm']??null)!=='1')throw new \InvalidArgumentException('Confirme a análise manual e o possível consumo de tokens.');
+        $token=$post['analysis_token']??null;$tokens=$_SESSION['amsfb_view_analysis']??[];
+        if(!is_string($token)||strlen($token)!==64||!isset($tokens[$token])||!is_int($tokens[$token])||$tokens[$token]>time()||time()-$tokens[$token]>=900)throw new \InvalidArgumentException('Confirmação ausente, usada ou vencida. Atualize a página antes de solicitar outra análise.');
+        unset($_SESSION['amsfb_view_analysis'][$token]);
+        try{
+            $row=LogView::allowed(LogView::catalog($this->router),$path);
+            if(!$row['can_analyze'])throw new \InvalidArgumentException('Log operacional do Fail2Ban é somente visualização.');
+            if((int)Database::getConfig('schema_version','0')<20)throw new \InvalidArgumentException('Atualize o schema antes de usar análise manual com proteção prévia.');
+            $cfg=AIAnalyzer::getActiveConfig();if(empty($cfg['api_key']))throw new \InvalidArgumentException('Configure um provedor na aba IA antes de analisar.');
+            $analyzer=new AIAnalyzer($cfg['provider'],$cfg['api_key'],$cfg['model'],$cfg['base_url'],$cfg['protocol']??'',$cfg['reasoning_effort']??'');
+            // Existing engine owns source validation, cycle lock, whitelist,
+            // protected-IP admission and the final pre-provider recheck.
+            $result=(new AutoBanEngine($analyzer,$this->router->makeClient()))->analyzePathManual($path);
+            return $result+['analysis_token'=>self::token()];
+        }catch(\Throwable $e){throw $e;} // Consumed token stays consumed even if the outcome is uncertain.
     }
 }

@@ -1,0 +1,1563 @@
+#!/usr/bin/python3
+"""Root-owned, narrow bridge. Install outside the document root, never setuid.
+
+No shell commands supplied by the caller; no includes/actions in AI filters.
+All writes are validated, backed up and atomically replaced on the same FS.
+"""
+import configparser
+import contextlib
+import fcntl
+import functools
+import hashlib
+import io
+import ipaddress
+import json
+import logging
+import os
+from pathlib import Path
+import re
+import shlex
+import shutil
+import signal
+import stat
+import subprocess
+import sys
+import tempfile
+import time
+import runpy
+from urllib.parse import unquote
+
+_state_path = (Path(__file__).resolve().parent.parent / 'scripts/firewall_state.py'
+               if Path(__file__).resolve().parent.name == 'setup'
+               else Path('/usr/local/lib/amssoft_fail2ban/firewall_state.py'))
+FIREWALL = runpy.run_path(str(_state_path))
+
+
+class FilterValidationError(ValueError):
+    def __init__(self, code, message):
+        super().__init__(message)
+        self.code = code
+
+ROOT = Path('/etc/fail2ban')
+BACKUPS = Path('/var/backups/amssoft_fail2ban')
+JAIL = re.compile(r'[A-Za-z0-9][A-Za-z0-9_-]{0,63}\Z')
+FILTER = re.compile(r'[a-z0-9][a-z0-9-]{0,49}\Z')
+logging.disable(logging.CRITICAL)
+
+
+def run(args):
+    return subprocess.check_output(args, text=True, stderr=subprocess.DEVNULL, timeout=30)
+
+
+def temporary(path, prefix):
+    p = Path(path)
+    if p.parent != Path('/tmp') or not p.name.startswith(prefix):
+        raise ValueError('Invalid temporary path')
+    fd = os.open(p, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+    with os.fdopen(fd, 'r') as f:
+        info = os.fstat(f.fileno())
+        if not stat.S_ISREG(info.st_mode) or info.st_uid != int(os.environ.get('SUDO_UID', os.getuid())):
+            raise ValueError('Invalid temporary owner/type')
+        if info.st_size > 2 * 1024 * 1024:
+            raise ValueError('Input too large')
+        return f.read()
+
+
+def parse(text):
+    c = configparser.RawConfigParser(strict=False)
+    c.read_string(text)
+    return c
+
+
+NORMAL_PATH_DEFAULTS = ['/', '/clientarea.php', '/robots.txt', '/favicon.ico',
+                        '/retired-page', '/index.php', '/login', '/checkout.php', '/license.php']
+
+
+def validate_normal_paths(payload):
+    if not isinstance(payload, dict) or set(payload) != {'paths'}:
+        raise ValueError('Invalid normal route fields')
+    paths = payload['paths']
+    if not isinstance(paths, list) or len(paths) > 50:
+        raise ValueError('Invalid normal route count')
+    if any(not isinstance(p, str) or len(p) > 200
+           or not re.fullmatch(r'/[A-Za-z0-9_./-]*', p) for p in paths):
+        raise ValueError('Invalid literal normal route')
+    return list(dict.fromkeys(paths))
+
+
+def normal_paths():
+    path = ROOT / 'amsfb-normal-paths.json'
+    if not path.exists():
+        return NORMAL_PATH_DEFAULTS
+    # Root-owned bounded catalogue. Corruption refuses validation, not safety.
+    fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+    with os.fdopen(fd) as stream:
+        info = os.fstat(stream.fileno())
+        if not stat.S_ISREG(info.st_mode) or info.st_uid != 0 or info.st_size > 16384:
+            raise ValueError('Invalid normal route catalogue')
+        return validate_normal_paths(json.load(stream))
+
+
+def sync_normal_paths(payload):
+    paths = validate_normal_paths(payload)
+    dest = ROOT / 'amsfb-normal-paths.json'
+    text = json.dumps({'paths': paths}, ensure_ascii=True) + '\n'
+    if dest.exists() and dest.read_text() == text:
+        return {'success': True, 'changed': False, 'count': len(paths)}
+    atomic_write(dest, text)
+    return {'success': True, 'changed': True, 'count': len(paths)}
+
+
+def legitimate_lines():
+    stamp = time.strftime('%d/%b/%Y:%H:%M:%S %z')
+    paths = ['/clientarea.php', '/cart.php', '/viewinvoice.php?id=100', '/index.php',
+             '/login', '/templates/twenty-one/css/all.min.css', '/favicon.ico',
+             '/viewemail.php?id=1', '/modules/gateways/callback/mercadopago.php']
+    lines = [f'198.51.100.10 - - [{stamp}] "GET {p} HTTP/1.1" 200 1234 "-" "Mozilla/5.0"' for p in paths]
+    lines += [f'198.51.100.10 - - [{stamp}] "POST {p} HTTP/1.1" 200 1234 "-" "Mozilla/5.0"'
+              for p in ['/dologin.php', '/cart.php', '/index.php?rp=/login', '/modules/gateways/callback/mercadopago.php']]
+    lines += [f'198.51.100.10 - - [{stamp}] "POST {p} HTTP/1.1" {status} 1234 "-" "Mozilla/5.0"'
+              for p in ['/dologin.php', '/index.php?rp=/login'] for status in (302, 303)]
+    lines += [f'198.51.100.10 - - [{stamp}] "GET /missing-public-page HTTP/1.1" 404 100 "-" "Mozilla/5.0"',
+              f'{time.strftime("%Y-%m-%d %H:%M:%S")} WHMCS login succeeded from 198.51.100.10 area=client user=test@example.invalid']
+    lines += [f'198.51.100.10 - - [{stamp}] "GET /clientarea.php HTTP/1.1" 200 100 "-" "{agent}"'
+              for agent in ['curl/8.0','Wget/1.21','python-requests/2.31','node','Go-http-client/1.1','Googlebot','scanner']]
+    lines += [f'198.51.100.10 - - [{stamp}] "GET {path} HTTP/1.1" {status} 100 "-" "{agent}"'
+              for path in ('/','/clientarea.php','/robots.txt','/missing-public-page')
+              for status in (200,403,404)
+              for agent in ('Mozilla/5.0 (compatible)','curl/8.0','Googlebot')]
+    # Error-log counterexamples are as important as ordinary access requests.
+    for peer in ('198.51.100.10', '2001:db8::10'):
+        for directory in ('/var/www/html/', '/var/www/html/whmcs/', '/var/www/license-example/', '/var/www/html/public/', '/var/www/html/.env.example/'):
+            lines.append(f'[{time.strftime("%a %b %d %H:%M:%S %Y")}] [autoindex:error] [pid 123:tid 123] [client {peer}:54321] AH01276: Cannot serve directory {directory}: No matching DirectoryIndex (index.html,index.php) found, and server-generated directory index forbidden by Options directive, referer: https://example.invalid/.env')
+    return lines
+
+
+def matches(path, lines, peers=False):
+    from fail2ban.client.fail2banregex import Fail2banRegex, get_opt_parser
+    opts, _ = get_opt_parser().parse_args(['--print-no-missed', '--print-no-ignored', '-r'])
+    runner = Fail2banRegex(opts)
+    with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
+        if not runner.start(['\n'.join(lines), str(path)]):
+            raise FilterValidationError('filter_syntax', 'Invalid fail2ban filter')
+    if peers:
+        return [str(item[1]) for regex in runner._failregex for item in regex.getIPList()]
+    return runner._line_stats.matched
+
+
+def validate_filter(text, evidence):
+    try: cfg = parse(text)
+    except configparser.Error as exc:
+        raise FilterValidationError('filter_syntax','Invalid filter definition') from exc
+    if cfg.defaults() or cfg.sections() != ['Definition']:
+        raise FilterValidationError('filter_definition','Only Definition is allowed')
+    if set(cfg['Definition']) - {'failregex', 'ignoreregex'}:
+        raise FilterValidationError('filter_definition','Filter includes/options are forbidden')
+    patterns = cfg.get('Definition', 'failregex').splitlines()
+    if not patterns or any(p.count('<HOST>') != 1 for p in patterns if p.strip()):
+        raise FilterValidationError('filter_host', 'Each expression needs exactly one HOST')
+    with tempfile.TemporaryDirectory(prefix='amsfb-validate-') as d:
+        p = Path(d) / 'candidate.conf'
+        p.write_text(text)
+        if matches(p, legitimate_lines()):
+            raise FilterValidationError('filter_legitimate', 'Filter matches legitimate traffic')
+        positives = [x for x in evidence if isinstance(x, str) and len(x) < 65536]
+        if not positives or not matches(p, positives):
+            raise FilterValidationError('filter_positive', 'Filter does not match source evidence')
+        matched=[line for line in positives if matches(p,[line])]
+        if any(non_offensive_line(line) for line in matched):
+            raise FilterValidationError('filter_signal','Operational status or user agent signals do not authorize blocking')
+        negatives = []
+        for line in positives:
+            # Counterfactual requests retain status/agent/peer but remove the
+            # suspect target. UA/404 identity alone must not authorize a ban.
+            if (not re.search(r'\(\)\s*\{\s*:;|\$\{jndi:', line, re.I)
+                    and re.search(r'"(GET|POST|HEAD|PUT|DELETE|OPTIONS|PATCH) [^ ]+ HTTP/',line)):
+                for target in ('/','/clientarea.php','/robots.txt'):
+                    negatives.append(re.sub(r'"(GET|POST|HEAD|PUT|DELETE|OPTIONS|PATCH) [^ ]+ (HTTP/[^"]+)"',
+                                            r'"\1 '+target+r' \2"', line))
+        # A root request with scanner UA/status is itself a counterfactual
+        # ordinary target. Do not drop it just because the model cited it.
+        if negatives and matches(p, negatives):
+            raise FilterValidationError('filter_identity', 'Filter depends only on peer, status or user agent')
+        # Every expression must stand on its own; one valid OR branch must not
+        # conceal an unproven second branch. Captured IP must be the real peer.
+        for pattern in patterns:
+            if not pattern.strip():
+                continue
+            p.write_text('[Definition]\nfailregex = ' + pattern.strip() + '\nignoreregex =\n')
+            branch_matches=[line for line in positives if matches(p,[line])]
+            if any(non_offensive_line(line) for line in branch_matches):
+                raise FilterValidationError('filter_signal','Each branch requires offensive evidence')
+            proved = False
+            for line in positives:
+                peer = source_peer(line)
+                captured = matches(p, [line], peers=True)
+                if captured:
+                    try:
+                        correct = peer is not None and all(str(ipaddress.ip_address(ip)) == peer for ip in captured)
+                    except ValueError:
+                        correct = False
+                    if not correct:
+                        raise FilterValidationError('filter_peer', 'Filter captures a different peer')
+                    proved = True
+            if not proved:
+                raise FilterValidationError('filter_branch', 'Each regex needs source evidence')
+            # Untrusted trailing fields cannot choose the peer.
+            for line in positives:
+                if re.search(r'^\S+\s+-\s+', line):
+                    variants=(line + ' 203.0.113.77', re.sub(r'"([^"]*)"$', r'"\1 203.0.113.77"', line))
+                else:
+                    header=re.search(r'^(?:\[[^\]\r\n]*\]\s*)*?\[client [^\]]+\]\s*(.*)$',line)
+                    variants=(line+' [client 203.0.113.77:4444] '+header[1],) if header else ()
+                for variant in variants:
+                    captured = matches(p, [variant], peers=True)
+                    try:
+                        exact = all(str(ipaddress.ip_address(address)) == source_peer(variant) for address in captured)
+                    except ValueError:
+                        exact = False
+                    if not exact:
+                        raise FilterValidationError('filter_peer', 'Forged field changes captured peer')
+
+
+    return {'matched_sha256':[hashlib.sha256(line.encode()).hexdigest() for line in matched]}
+
+
+APPROVED_SOURCES = {
+    '/var/log/whmcs_auth.log','/var/log/auth.log',
+    '/var/log/apache2/access.log','/var/log/apache2/error.log',
+    '/var/log/apache2/access_whmcs.log','/var/log/apache2/error_whmcs.log',
+    '/var/log/apache2/access_license_gateway.log','/var/log/apache2/error_license_gateway.log',
+}
+
+
+def filter_coverage(jail, evidence):
+    state = loaded_filter_state(jail)
+    if state['prefregex'] or state['ignoreregex']:
+        raise FilterValidationError('loaded_filter_context', 'Contextual filter cannot be independently checked')
+    text = '[Definition]\nfailregex = ' + '\n            '.join(p.replace('%', '%%') for p in state['patterns']) + '\nignoreregex =\n'
+    covered = 0
+    with tempfile.TemporaryDirectory(prefix='amsfb-probe-') as directory:
+        path = Path(directory) / 'probe.conf'
+        path.write_text(text)
+        for line in evidence:
+            if not isinstance(line, str) or len(line) > 65535:
+                continue
+            peer = source_peer(line)
+            captured = matches(path, [line], peers=True)
+            if captured:
+                try:
+                    exact = peer is not None and all(str(ipaddress.ip_address(a)) == peer for a in captured)
+                except ValueError:
+                    exact = False
+                if not exact:
+                    raise FilterValidationError('filter_peer', 'Loaded expression captures another peer')
+                covered += 1
+    return {'success': True, 'covered': covered, 'paths': state['paths']}
+
+
+def normalize_evidence_filter(payload):
+    patterns=payload['patterns'];evidence=payload['evidence'];normalized=[]
+    if not isinstance(patterns,list) or len(patterns)>10:raise ValueError('Invalid expression list')
+    for pattern in patterns:
+        value=pattern
+        # Only the literal timestamp header is normalized; never a target,
+        # peer, status, verb or other part of the expression.
+        if pattern.startswith('^<HOST> - ') and evidence and all(re.match(r'^\S+\s+-\s+',line) for line in evidence):
+            left=pattern.find(r'\[')
+            endings=[p for marker in (r'\] "',r'\] \"') if (p:=pattern.find(marker,left+2))>=0]
+            if 0<=left<=35 and endings:value=pattern[:left]+r'\[\s*\]'+pattern[min(endings)+2:]
+        elif pattern.startswith(r'^\[') and evidence and all(re.match(r'^\[',line) for line in evidence):
+            endings=[p for marker in (r'\]\s+',r'\] ') if (p:=pattern.find(marker,3))>=0]
+            if endings:value=r'^\[\s*\]'+pattern[min(endings)+2:]
+        normalized.append(value)
+    text='[Definition]\nfailregex = '+'\n            '.join(p.replace('%','%%') for p in normalized)+'\nignoreregex =\n'
+    fallback = False
+    try:
+        validate_filter(text,evidence)
+    except FilterValidationError as exc:
+        if exc.code != 'filter_positive':
+            raise
+        # Only closed SQL payloads from one peer, complete raw request targets,
+        # every cited event retained, bounded total regex. Never repair a broad
+        # identity/legitimate/peer refusal or silently omit mixed evidence.
+        alternatives=[];peers=set()
+        for line in evidence:
+            m=re.match(r'^\S+ - \S+ \[[^\]\r\n]*\] "([A-Z]{3,12}) ([^ "\r\n]{1,8192}) HTTP/\d(?:\.\d)?" [1-5]\d\d (?:\d+|-)(?: |$)',line)
+            peer=source_peer(line)
+            if not m or not peer or not sql_target(m[2]):
+                raise exc
+            peers.add(peer)
+            alternatives.append(re.escape(m[1]+' '+m[2]))
+        if not alternatives or len(peers)!=1 or len(alternatives)>8:
+            raise exc
+        candidate=r'^<HOST> - \S+ \[\s*\] "(?:'+'|'.join(dict.fromkeys(alternatives))+r') HTTP/\d(?:\.\d)?" [1-5]\d\d (?:\d+|-)(?: |$)'
+        if len(candidate.encode())>1000 or candidate.count('<HOST>')!=1:
+            raise exc
+        normalized=[candidate]
+        text='[Definition]\nfailregex = '+candidate.replace('%','%%')+'\nignoreregex =\n'
+        validate_filter(text,evidence)
+        fallback=True
+    matched=[]
+    with tempfile.TemporaryDirectory(prefix='amsfb-normalize-') as directory:
+        path=Path(directory)/'normalized.conf';path.write_text(text)
+        for line in evidence:
+            if matches(path,[line]):matched.append(hashlib.sha256(line.encode()).hexdigest())
+    return {'success':True,'patterns':normalized,'changed':patterns!=normalized,'matched_sha256':matched,'closed_sql_repair':fallback}
+
+
+def extend_managed_rule(manifest):
+    if int(os.environ.get('SUDO_UID', os.getuid())) != 0:
+        raise ValueError('Managed extension requires root worker')
+    jail, name = manifest['jail'], manifest['filter']
+    if not JAIL.fullmatch(jail) or not jail.startswith('amsfb-') or not JAIL.fullmatch(name) or not name.startswith('amsfb-'):
+        raise ValueError('Managed identity required')
+    cfg = effective_config()
+    if jail not in cfg or cfg[jail].get('filter', '').split('[', 1)[0] != name or cfg[jail].get('enabled','').lower() not in ('true','1','yes','on'):
+        raise ValueError('Active matching managed jail required')
+    state = loaded_filter_state(jail)
+    if state['prefregex'] or state['ignoreregex'] or any('(?!)' in p for p in state['patterns']):
+        raise ValueError('Quarantined or contextual filter cannot be extended')
+    target = ROOT / 'filter.d' / (name + '.conf')
+    if target.is_symlink() or not target.is_file():
+        raise ValueError('Regular managed filter required')
+    old = target.read_text()
+    if hashlib.sha256(old.encode()).hexdigest() != manifest['sha256']:
+        raise ValueError('Filter changed concurrently')
+    patterns = manifest['patterns']
+    if not isinstance(patterns, list) or not 1 <= len(patterns) <= 50 or any(not isinstance(p,str) or '\n' in p or '\r' in p for p in patterns):
+        raise ValueError('Invalid bounded expressions')
+    if not set(state['patterns']).issubset(patterns):
+        raise ValueError('Extension cannot remove loaded expressions')
+    disk = [p.strip().replace('%%','%') for p in parse(old).get('Definition','failregex').splitlines() if p.strip()]
+    if set(disk) != set(state['patterns']):
+        raise ValueError('Disk and loaded filter differ')
+    sources = manifest['sources']
+    if not isinstance(sources,list) or not 1 <= len(sources) <= 8 or any(p not in APPROVED_SOURCES or str(Path(p).resolve()) != p or not Path(p).is_file() for p in sources):
+        raise ValueError('Only approved real log files are allowed')
+    if not set(state['paths']).issubset(sources):
+        raise ValueError('Extension cannot remove monitored files')
+    formats = {'access' if 'access' in Path(p).name else 'error' if 'error' in Path(p).name else 'auth' for p in sources}
+    if len(formats) != 1:
+        raise ValueError('Incompatible log formats')
+    text = '[Definition]\nfailregex = ' + '\n            '.join(p.replace('%','%%') for p in patterns) + '\nignoreregex =\n'
+    validate_filter(text, manifest['evidence'])
+    consumers = sorted(j for j,c in cfg.items() if c.get('filter','').split('[',1)[0] == name and c.get('enabled','').lower() in ('true','1','yes','on'))
+    before = tickets(consumers, native=True)
+    actions = {j:FIREWALL['action_specs'](j,run) for j in consumers}
+    override = ROOT / 'jail.d' / 'zz-amsfb-managed-sources.local'
+    previous = override.read_text() if override.exists() else None
+    overrides = parse(previous or '')
+    if not overrides.has_section(jail):overrides.add_section(jail)
+    overrides.set(jail, 'logpath', '\n'.join(sources));overrides.set(jail, 'usedns', 'no')
+    output=io.StringIO();overrides.write(output)
+    try:
+        atomic_write(target,text);atomic_write(override,output.getvalue())
+        run(['/usr/bin/fail2ban-client','-t'])
+        for consumer in consumers:run(['/usr/bin/fail2ban-client','reload',consumer])
+        verify_preserved_tickets(before)
+        for consumer in consumers:
+            if FIREWALL['action_specs'](consumer,run) != actions[consumer]:raise ValueError('Actions changed during extension')
+            current=tickets([consumer],native=True)
+            coverage=FIREWALL['inspect'](consumer,[t['ip'] for t in current],run)
+            if coverage['no_actions'] or coverage['unsupported_actions'] or coverage['missing_ips']:raise ValueError('Extended rule coverage unconfirmed')
+        loaded=loaded_filter_state(jail)
+        if set(loaded['paths']) != set(sources) or set(loaded['patterns']) != set(patterns):raise ValueError('Loaded rule differs')
+    except BaseException:
+        atomic_write(target,old)
+        if previous is None:
+            if override.exists():override.unlink()
+        else:atomic_write(override,previous)
+        for consumer in consumers:run(['/usr/bin/fail2ban-client','reload',consumer])
+        raise
+    return {'success':True,'jail':jail,'sources':sources,'tickets_checked':len(before)}
+
+
+def source_peer(line):
+    # Resolve the structured connection peer before looking inside messages.
+    # Apache access URL/user-agent fields can contain forged [client ...] text.
+    candidates = [r'^(\S+)\s+-\s+',
+                  r'^\d{4}-\d\d-\d\d[ T]\d\d:\d\d:\d\d\s+WHMCS login failed from (\S+)\s+area=',
+                  r'^(?:\d{4}-\d\d-\d\d[ T]\d\d:\d\d:\d\d\S*|[A-Za-z]{3}\s+\d{1,2}\s+\d\d:\d\d:\d\d)\s+(?:\S+\s+)?sshd(?:\[\d+\])?:.*\sfrom\s+(\S+)\s+port\s+\d+(?:\s|$)']
+    for expression in candidates:
+        found = re.search(expression, line)
+        if found:
+            try:
+                return str(ipaddress.ip_address(found[1].strip('[]')))
+            except ValueError:
+                return None
+    client = re.search(r'^(?:\[[^\]\r\n]*\]\s*)*?\[client ([^\]]+)\]', line)
+    if client:
+        value = client[1]
+        choices = [value.rsplit(':', 1)[0], value] if re.search(r':\d+$', value) else [value]
+        for choice in choices:
+            try:
+                return str(ipaddress.ip_address(choice.strip('[]')))
+            except ValueError:
+                pass
+    return None
+
+
+def replace_existing_filter(name, text, expected, evidence, quarantine=False):
+    """Root operational repair; never restart a jail or recreate a ticket."""
+    if int(os.environ.get('SUDO_UID', os.getuid())) != 0:
+        raise ValueError('Existing native filter repair requires root CLI')
+    if not FILTER.fullmatch(name) or not name.startswith('amsfb-'):
+        raise ValueError('Invalid existing managed filter name')
+    target = ROOT / 'filter.d' / (name + '.conf')
+    if target.is_symlink() or not target.is_file():
+        raise ValueError('Existing regular filter required')
+    old = target.read_text()
+    if hashlib.sha256(old.encode()).hexdigest() != expected:
+        raise ValueError('Filter changed concurrently')
+    if quarantine:
+        text = '[Definition]\nfailregex = ^(?!)<HOST>$\nignoreregex =\n'
+    else:
+        validate_filter(text, evidence)
+    consumers = sorted(j for j, cfg in effective_config().items()
+                       if cfg.get('filter', '').split('[', 1)[0] == name
+                       and cfg.get('enabled', '').lower() in ('true', '1', 'yes', 'on'))
+    before = tickets(consumers, native=True)
+    actions = {j: FIREWALL['action_specs'](j, run) for j in consumers}
+    override = ROOT / 'jail.d' / '97-amsfb-detection.local'
+    previous = override.read_text() if override.exists() else None
+    cfg = parse(previous or '')
+    for jail in consumers:
+        if not cfg.has_section(jail):
+            cfg.add_section(jail)
+        cfg.set(jail, 'usedns', 'no')
+    output = io.StringIO()
+    cfg.write(output)
+    try:
+        atomic_write(target, text)
+        atomic_write(override, output.getvalue())
+        run(['/usr/bin/fail2ban-client', '-t'])
+        for jail in consumers:
+            run(['/usr/bin/fail2ban-client', 'reload', jail])
+        current = {(t['jail'], t['ip']): t['ticket'] for t in tickets(consumers, native=True)}
+        for ticket in before:
+            key = (ticket['jail'], ticket['ip'])
+            expires = time.mktime(time.strptime(ticket['ticket'].rsplit(' = ', 1)[-1], '%Y-%m-%d %H:%M:%S'))
+            if key in current and current[key] != ticket['ticket']:
+                raise ValueError('Filter repair altered ticket lifetime')
+            if expires > time.time()+1 and key not in current:
+                raise ValueError('Filter repair lost a valid ticket')
+        for jail in consumers:
+            if FIREWALL['action_specs'](jail, run) != actions[jail]:
+                raise ValueError('Filter repair changed loaded actions')
+            if native_command(['get', jail, 'usedns']) != 'no':
+                raise ValueError('DNS override not effective')
+            ips = [ip for (j, ip) in current if j == jail]
+            state = FIREWALL['inspect'](jail, ips, run)
+            if state['no_actions'] or state['unsupported_actions'] or state['missing_ips']:
+                raise ValueError('Filter repair coverage unconfirmed')
+    except Exception:
+        atomic_write(target, old)
+        if previous is not None:
+            atomic_write(override, previous)
+        elif override.exists():
+            override.unlink()
+        for jail in consumers:
+            run(['/usr/bin/fail2ban-client', 'reload', jail])
+        raise
+    return {'success': True, 'consumers': consumers, 'quarantined': quarantine,
+            'tickets_checked': len(before), 'sha256': hashlib.sha256(text.encode()).hexdigest()}
+
+
+def atomic_write(dest, text, mode=0o644):
+    BACKUPS.mkdir(mode=0o700, parents=True, exist_ok=True)
+    if dest.exists():
+        backup = BACKUPS / (dest.name + '.' + str(time.time_ns()) + '.bakp')
+        shutil.copy2(dest, backup)
+        os.chmod(backup, 0o600)
+    fd, tmp = tempfile.mkstemp(prefix='.amsfb-', dir=dest.parent)
+    try:
+        with os.fdopen(fd, 'w') as f:
+            f.write(text)
+            f.flush()
+            os.fsync(f.fileno())
+        os.chmod(tmp, mode)
+        os.replace(tmp, dest)
+        dfd = os.open(dest.parent, os.O_DIRECTORY)
+        try:
+            os.fsync(dfd)
+        finally:
+            os.close(dfd)
+    finally:
+        if os.path.exists(tmp):
+            os.unlink(tmp)
+
+
+APPLICATION_TRAPS = {
+    'vmware_probe': ('/developmentserver/metadatauploader',),
+    'druid_probe': ('/druid/index.html',),
+    'odoo_probe': ('/web/database/list', '/xmlrpc/2/common'),
+    'cisco_vpn_probe': ('/+CSCOE+/logon.html',),
+    'sonicwall_probe': ('/sonicui/7/sslvpn-portal/', '/api/sonicos/auth', '/api/sonicos/tfa'),
+    'citrix_probe': ('/vpn/pluginlist.xml', '/logon/LogonPoint/tmindex.html', '/vpn/js/rdx/core/lang/rdx_en.json.gz'),
+    'ivanti_probe': ('/dana-na/nc/nc_gina_ver.txt', '/dana-cached/hc/HostCheckerInstaller.osx', '/dana-na/auth/url_default/welcome.cgi'),
+    'globalprotect_probe': ('/global-protect/prelogin.esp', '/ssl-vpn/prelogin.esp'),
+    'rdweb_probe': ('/RDWeb', '/RDWeb/Pages/en-US/login.aspx'),
+    'exchange_auth_probe': ('/owa/auth/errorFE.aspx', '/ecp/Current/exporttool/microsoft.exchange.ediscovery.exporttool.application', '/owa/auth/logon.aspx'),
+}
+PROBE_GROUPS = ('env', 'git', 'svn', 'wpconfig', 'credentials', 'wordpress', 'cms', 'traversal', 'query_traversal', 'phpunit', 'debug', 'db_admin', 'exchange_probe', 'gpon_probe', 'webshell_probe', 'php_cgi_probe', *APPLICATION_TRAPS)
+SENSITIVE_SOURCES = ('/var/log/apache2/access.log', '/var/log/apache2/access_whmcs.log', '/var/log/apache2/access_license_gateway.log')
+TRAVERSAL_SOURCES = ('/var/log/apache2/error.log', '/var/log/apache2/error_whmcs.log', '/var/log/apache2/error_license_gateway.log')
+TRAVERSAL_DOT = r'(?:\.|%2[eE]|%252[eE]|%%32%65)'
+TRAVERSAL_SLASH = r'(?:/|%2[fF]|%252[fF])'
+
+
+def sql_query_pattern():
+    # Byte-for-byte parity with SqlInjection::queryPattern().
+    s=r'(?:[+ ]|%20|%2520){1,8}';o=r'(?:[+ ]|%20|%2520){0,8}'
+    q=r'(?:[\x22\x27]|%22|%27|%2522|%2527)'
+    lp=r'(?:\(|%28|%2528)';rp=r'(?:\)|%29|%2529)'
+    comma=r'(?:,|%2c|%252c)';eq=r'(?:=|%3d|%253d)';comment=r'(?:-|%2d|%252d){2}'
+    value=r'(?:null|[0-9]{1,12}|'+q+r'[a-z0-9_]{1,128}'+q+r')'
+    union='union'+s+'(?:all'+s+')?select'+s+value+'(?:'+o+comma+o+value+'){0,7}'+o+comment
+    extract='(?:and'+s+')?extractvalue'+o+lp+r'[0-9]{1,12}'+comma+o+'concat'+o+lp+r'0x[0-9a-f]{1,16}'+comma+r'[^"&#\r\n]{1,256}select'+s+r'[^"&#\r\n]{1,512}'+comment
+    order=s+'order'+s+'by'+s+r'[0-9]{1,6}'+o+comment
+    boolean=q+rp+s+'and'+s+lp+q+r'[a-z]{3,32}'+q+eq+q+r'[a-z]{3,32}'+q+q
+    return '(?:'+union+'|'+extract+'|'+order+'|'+boolean+')'
+
+
+def sql_target(target):
+    return (isinstance(target,str) and len(target.encode('utf-8',errors='surrogatepass'))<=8192
+            and target.startswith('/') and not re.search(r'[\x00-\x1f\x7f]',target)
+            and '?' in target and re.search(sql_query_pattern(),target.split('?',1)[1],re.I) is not None)
+
+
+def sql_filter():
+    # Only the two audited WHMCS root scripts, no UA/referrer/path authority.
+    target=r'/(?:cart|index)\.php\?(?=[^ "\r\n]{1,8192} HTTP/\d(?:\.\d)?" [1-5]\d\d (?:\d+|-)(?: |$))[^ "\r\n]*?(?i:'+sql_query_pattern()+r')[^ "\r\n]*'
+    expression=r'^<HOST> - \S+ \[\s*\] "[A-Z]{3,12} '+target+r' HTTP/\d(?:\.\d)?" [1-5]\d\d (?:\d+|-)(?: |$)'
+    return '[Definition]\nfailregex = '+expression.replace('%','%%')+'\nignoreregex =\n'
+
+
+def php_cgi_target_pattern():
+    # Keep in parity with PhpCgiProbe::pattern(); no arbitrary caller regex.
+    flag = r'(?:-|%2d|%252d|%ad|%25ad|%c2%ad|%25c2%25ad|\xAD|\xC2\xAD)d'
+    separator = r'(?:\+|%20|%2520| ){1,8}'
+    equals = r'(?:=|%3d|%253d)'
+    colon = r'(?::|%3a|%253a)'
+    slash = r'(?:/|%2f|%252f)'
+    allow = flag + separator + 'allow_url_include' + equals + '(?:1|on|true)'
+    prepend = flag + separator + 'auto_prepend_file' + equals + 'php' + colon + slash + slash + 'input'
+    return r'/[^ "?#\r\n]{0,8190}\?(?:' + allow + separator + prepend + '|' + prepend + separator + allow + ')'
+
+
+def php_cgi_target(target):
+    return (isinstance(target, str) and len(target.encode('utf-8', errors='surrogatepass')) <= 8192
+            and not re.search(r'[\x00-\x1f\x7f]', target)
+            and re.fullmatch(php_cgi_target_pattern(), target, re.I) is not None)
+
+
+def sensitive_filter(groups, enabled=True):
+    if not isinstance(groups, list) or not groups or any(g not in PROBE_GROUPS for g in groups):
+        raise ValueError('Unknown/empty sensitive group selection')
+    dot = TRAVERSAL_DOT
+    slash = TRAVERSAL_SLASH
+    # Bare repository metadata directories are private too. Do not let the
+    # common optional path-info suffix turn this branch into .git/anything.
+    bare = lambda name: name + r'(?!(?:' + slash + r')[^ "?])'
+    backup = r'(?:'+dot+r'(?:bak|old|save|swp|orig)|~)'
+    patterns = {
+        'env': dot+r'env(?!(?:'+dot+r'(?:example|sample|dist))(?:(?:'+slash+r')|%20|[? "]|$))(?:'+dot+r'[A-Za-z0-9_-]+)*',
+        'git': r'(?:'+bare(dot+r'git')+r'|'+dot+r'git'+slash+r'(?:config|HEAD|index|packed-refs|description|info'+slash+r'refs|logs'+slash+r'HEAD))',
+        'svn': r'(?:'+bare(dot+r'svn')+r'|'+dot+r'svn'+slash+r'(?:wc'+dot+r'db|entries))',
+        'wpconfig': r'wp-config'+dot+r'php(?:'+backup+r')?',
+        'credentials': r'(?:(?:'+dot+r'aws'+slash+r'(?:credentials|config)|'+dot+r'docker'+slash+r'config'+dot+r'json|'+dot+r'ssh'+slash+r'(?:id_rsa|id_ed25519|config|authorized_keys|known_hosts)|'+dot+r'(?:npmrc|netrc|pypirc|boto|git-credentials)|'+dot+r'kube'+slash+r'config|'+dot+r'claude'+slash+dot+r'credentials'+dot+r'json)(?:'+backup+r')?|(?:configuration|config)'+dot+r'php'+backup+r')',
+        'wordpress': r'(?:xmlrpc'+dot+r'php|wp-login'+dot+r'php|wp-admin|wp-includes'+slash+r'wlwmanifest'+dot+r'xml)',
+        'cms': r'(?:administrator'+slash+r'manifests'+slash+r'files'+slash+r'joomla'+dot+r'xml|magento_version|core'+slash+r'install'+dot+r'php)',
+        'traversal': TRAVERSAL_DOT+r'{2}'+TRAVERSAL_SLASH+r'[^ "?]*',
+        'phpunit': r'(?:vendor'+slash+r')?phpunit(?:'+slash+r'phpunit)?(?:'+slash+r'src)?'+slash+r'Util'+slash+r'PHP'+slash+r'(?:Template'+slash+r')?eval-stdin'+dot+r'php(?:'+dot+r'dev)?',
+        'debug': r'(?:phpinfo(?:'+dot+r'php)?|info'+dot+r'php|_profiler'+slash+r'phpinfo|storage'+slash+r'logs'+slash+r'laravel'+dot+r'log|_ignition'+slash+r'execute-solution)',
+        'db_admin': r'(?:phpmyadmin(?:[-_]?[0-9][a-z0-9._-]{0,32})?|php-myadmin|pma|myadmin)',
+    }
+    # Only the structured request target; no arbitrary regex from a caller.
+    path_groups=[g for g in PROBE_GROUPS if g in groups and g not in ('query_traversal','exchange_probe','gpon_probe','webshell_probe','php_cgi_probe') and g not in APPLICATION_TRAPS]
+    targets=[]
+    if path_groups:
+        targets.append(r'/(?:[^ "?]*'+slash+r')?(?i:'+'|'.join(patterns[g] for g in path_groups)+r')(?:'+slash+r'[^ "?]*)?(?:%20){0,2}(?:\?[^ "\r\n]*)?')
+    if 'query_traversal' in groups:
+        # Closed LFI/traversal signatures, not arbitrary parent segments.
+        separator=TRAVERSAL_SLASH
+        parents=r'(?:'+TRAVERSAL_DOT+r'{2}'+separator+r'{1,16}){2,16}'
+        sink=r'(?i:etc'+separator+r'(?:passwd|shadow)|proc'+separator+r'self'+separator+r'environ|dev'+separator+r'cmdb'+separator+r'sslvpn_websession|windows'+separator+r'win\.ini)'
+        query=r'/[^ "?\r\n]*\?(?:[^ "&#\r\n]{0,512}&){0,32}(?i:file|path|page|template|lang|language|include|document|download|resource|url)='+separator+r'{0,16}'+parents+sink+r'(?:&[^ "\r\n]*)?'
+        targets.append(query)
+    if 'exchange_probe' in groups:
+        # Exact root targets only, not generic OWA/Autodiscover or any JS file.
+        # This branch intentionally bypasses the optional directory/path-info
+        # prefix/suffix of the other groups. UA/referrer never select a target.
+        owa=slash+r'owa'+slash+r'auth'+slash+r'x'+dot+r'js(?:\?[^ "\r\n]*)?'
+        discovery=slash+r'autodiscover'+slash+r'autodiscover'+dot+r'json\?@zdi'+slash+r'Powershell'
+        targets.append(r'(?i:'+owa+r'|'+discovery+r')')
+    if 'gpon_probe' in groups:
+        # Audited router probe on this non-router host. Exact root/query and
+        # POST only; never infer an exploit from a generic GPON path or 403.
+        targets.append(r'(?<="POST )(?i:/GponForm/diag_Form\?style/)')
+    if 'webshell_probe' in groups:
+        # Audited exact endpoints on a host without these WordPress/plugin routes.
+        # No arbitrary PHP names, directory prefixes or path-info suffixes.
+        root=slash+r'(?:wp-filemanager1'+dot+r'php|wp-security'+dot+r'php)'
+        plugin=slash+r'wp-content'+slash+r'plugins'+slash+r'hellopress'+slash+r'wp_filemanager'+dot+r'php'
+        targets.append(r'(?i:(?:'+root+r'|'+plugin+r')(?:\?[^ "\r\n]*)?)')
+    if 'php_cgi_probe' in groups:
+        targets.append(r'(?i:'+php_cgi_target_pattern()+')')
+    # Literal root targets for absent applications only; no generic path groups,
+    # normalization, case folding, suffix or UA/referrer authority.
+    for group, paths in APPLICATION_TRAPS.items():
+        if group in groups:
+            targets.append(r'(?:'+'|'.join(re.escape(path) for path in paths)+r')(?:\?[^ "\r\n]*)?')
+    target=r'(?:'+'|'.join(targets)+r')'
+    envelope=r'(?=[A-Z]{3,12} [^ "\r\n]{1,8192} HTTP/\d(?:\.\d)?" [1-5]\d\d (?:\d+|-)(?: |$))'
+    regex=r'^<HOST> - \S+ \[\s*\] "'+envelope+r'[A-Z]{3,12} '+target+r' HTTP/\d(?:\.\d)?" [1-5]\d\d (?:\d+|-)(?: |$)'
+    if not enabled:regex=r'^(?!)<HOST>$'
+    return '[Definition]\nfailregex = '+regex.replace('%','%%')+'\nignoreregex =\n'
+
+
+def traversal_filter(enabled=True):
+    path=r'/(?:[^() "\r\n]*'+TRAVERSAL_SLASH+r')?'+TRAVERSAL_DOT+r'{2}'+TRAVERSAL_SLASH+r'[^() "\r\n]*'
+    envelope=r'(?=[^() "\r\n]{1,8192}\)(?:, referer: [^\r\n]{0,8192})?\s*$)'
+    regex=r'^\[\s*\]\s+\[[^\]\r\n]+\]\s+(?:\[pid [^\]\r\n]+\]\s+)?\[client <HOST>:\d+\]\s+AH10244: invalid URI path \('+envelope+path+r'\)(?:, referer: [^\r\n]{0,8192})?\s*$'
+    if not enabled:regex=r'^(?!)<HOST>$'
+    return '[Definition]\nfailregex = '+regex.replace('%','%%')+'\nignoreregex =\n'
+
+
+def query_probe_route(line):
+    """Behavioral lead only. PHP enforces individual validated repetition."""
+    if len(line) > 65536:
+        return None
+    m = re.fullmatch(r'\S+ - \S+ \[[^\]\r\n]+\] "(?:GET|HEAD) ([^ "\r\n]{1,8192}) HTTP/\d(?:\.\d)?" 5\d\d (?:\d+|-) "[^"\r\n]*" "[^"\r\n]*"', line)
+    if not m or php_cgi_target(m[1]) or sql_target(m[1]) or '?' not in m[1]:
+        return None
+    def decode(value):
+        for _ in range(2):
+            value = unquote(value)
+        return '' if re.search(r'[\x00-\x1f\x7f]', value) else value
+    path, query = m[1].split('?', 1)
+    path = decode(path)
+    if not re.fullmatch(r'/[A-Za-z0-9_./-]*', path):
+        return None
+    for pair in query.split('&'):
+        if '=' not in pair:
+            continue
+        key, value = pair.split('=', 1)
+        value = decode(value)
+        if key and value.startswith('/') and value.endswith("'") and value.count("'") % 2:
+            return path
+    return None
+
+
+def non_offensive_line(line):
+    # Match only the actual request/header, never a URL in UA/referrer text.
+    m=re.match(r'^\S+ - \S+ \[[^\]\r\n]*\] "[A-Z]{3,12} ([^ "\r\n]+) HTTP/[^"]+" (\d{3}) ',line)
+    if m:
+        target=m[1]
+        if php_cgi_target(target) or sql_target(target):return False
+        for _ in range(2):target=unquote(target)
+        offensive=re.search(r'(?:^|/)\.(?:env(?:$|[./])|git/|svn/|ssh/|aws/|docker/|npmrc)|wp-config|xmlrpc\.php|wp-login\.php|wp-admin(?:/|$)|wp-includes/wlwmanifest\.xml|administrator/manifests/files/joomla\.xml|magento_version|core/install\.php|phpmyadmin|(?:^|/)\.\./|/etc/passwd',target.split('?',1)[0],re.I)
+        offensive=offensive or sql_target(target) or re.search(r'\.\./|/etc/passwd|union\s+(?:all\s+)?select|sleep\s*\(|benchmark\s*\(|or\s+1\s*=\s*1|(?:;|\|)\s*(?:wget|curl|sh|bash)\b',target,re.I)
+        if offensive:return False
+        if query_probe_route(line) is not None:return False
+        normal=set(normal_paths())
+        return m[2]=='421' or (not re.search(r'[\x00-\x1f\x7f]',target) and target.split('?',1)[0] in normal)
+    error=re.match(r'^(?:\[[^\]\r\n]*\]\s*)*?\[client [^\]\r\n]+\]\s+AH01630: client denied by server configuration: (/[^\r\n]+)',line)
+    if error:
+        target=error[1].split(', referer: ',1)[0]
+        for _ in range(2):target=unquote(target)
+        return not re.search(r'(?:^|/)\.(?:env(?:$|[./])|git/|svn/|ssh/|aws/|docker/|npmrc)|wp-(?:admin|content|includes|json)(?:/|$)|wp-(?:login|config|load)\.php|xmlrpc\.php|phpmyadmin|(?:^|/)\.\./|/etc/passwd',target,re.I)
+    autoindex=re.match(r'^(?:\[[^\]\r\n]*\]\s*)*?\[client [^\]\r\n]+\]\s+AH01276:',line)
+    if autoindex:
+        directory=re.match(r'^ Cannot serve directory (/[^\r\n]*?): No matching DirectoryIndex \([^\r\n]*\) found, and server-generated directory index forbidden by Options directive(?:, referer: [^\r\n]*)?$',line[autoindex.end():])
+        if directory:
+            target=directory[1]
+            for _ in range(2):target=unquote(target)
+            target=re.sub(r'(?:^|/)\.env\.(?:example|sample|dist)(?=/|$)','/public-example',target,flags=re.I)
+            if re.search(r'(?:^|/)\.(?:env(?:$|[./])|git(?:/|$)|svn/|ssh/|aws/|docker/|npmrc)|wp-(?:admin|content|includes|json)(?:/|$)|wp-(?:login|config|load)\.php|xmlrpc\.php|phpmyadmin|(?:^|/)\.\./|/etc/passwd',target,re.I):return False
+        return True
+    return bool(re.match(r'^(?:\[[^\]\r\n]*\]\s*)*?\[client [^\]\r\n]+\]\s+AH02032:',line))
+
+
+def sync_sensitive_probes(payload):
+    allowed={'enabled','groups','maxretry','findtime','bantime','whitelist'}
+    if not isinstance(payload,dict) or set(payload)!=allowed:raise ValueError('Invalid sensitive policy fields')
+    for key,lo,hi in [('enabled',0,1),('maxretry',1,10),('findtime',60,86400),('bantime',300,31536000)]:
+        if type(payload[key]) is not int or not lo<=payload[key]<=hi:raise ValueError('Invalid sensitive '+key)
+    if not isinstance(payload['whitelist'],list) or len(payload['whitelist'])>1000:raise ValueError('Invalid whitelist')
+    required={str(ipaddress.ip_network(x,strict=False)) for x in payload['whitelist']}
+    cfg=effective_config();jails=('apache-sensitive','apache-traversal','apache-scan')
+    for jail in jails:
+        if cfg.get(jail,{}).get('enabled','').lower() not in ('true','1','yes','on') or cfg[jail].get('filter')!=jail:
+            raise ValueError('Existing active canonical jail required; never create/reactivate implicitly: '+jail)
+        if any(j!=jail and c.get('filter','').split('[',1)[0]==jail and c.get('enabled','').lower() in ('true','1','yes','on') for j,c in cfg.items()):
+            raise ValueError('Unexpected shared canonical filter')
+    override=ROOT/'jail.d/zzzz-amsfb-sensitive.local'
+    texts={'apache-sensitive':sensitive_filter(payload['groups'],bool(payload['enabled'])),
+           'apache-traversal':traversal_filter(bool(payload['enabled']) and 'traversal' in payload['groups']),
+           'apache-scan':'[Definition]\nfailregex = ^(?!)<HOST>$\nignoreregex =\n'}
+    paths={j:ROOT/'filter.d'/(j+'.conf') for j in jails}
+    if override.is_symlink() or any(p.is_symlink() or not p.is_file() for p in paths.values()):raise ValueError('Regular canonical files required')
+    old={j:p.read_text() for j,p in paths.items()};previous=override.read_text() if override.exists() else None
+    sources={'apache-sensitive':list(SENSITIVE_SOURCES),'apache-traversal':list(TRAVERSAL_SOURCES)}
+    if any(not Path(p).is_file() for ps in sources.values() for p in ps):raise ValueError('Canonical source unavailable')
+    before=tickets(list(jails),native=True);actions={j:FIREWALL['action_specs'](j,run) for j in jails}
+    if any(not a for a in actions.values()):raise ValueError('Existing native actions required')
+    body='# AMSFB deterministic request policy; preserve actions/tickets.\n'
+    for jail,logs in sources.items():
+        body+='['+jail+']\nenabled = true\nfilter = '+jail+'\nusedns = no\nlogpath = '+'\n          '.join(logs)+'\n'
+        for key in ('maxretry','findtime','bantime'):body+=key+' = '+str(payload[key])+'\n'
+    changed=any(old[j]!=texts[j] for j in jails) or previous!=body
+    try:
+        if changed:
+            for j,p in paths.items():atomic_write(p,texts[j])
+            atomic_write(override,body)
+            run(['/usr/bin/fail2ban-client','-t'])
+            for jail in jails:run(['/usr/bin/fail2ban-client','reload',jail])
+        for jail in jails:
+            loaded=loaded_filter_state(jail)
+            expected=[p.strip().replace('%%','%') for p in parse(texts[jail]).get('Definition','failregex').splitlines() if p.strip()]
+            if loaded['patterns']!=expected or (jail in sources and set(loaded['paths'])!=set(sources[jail])) or loaded['prefregex'] or loaded['ignoreregex']:
+                raise ValueError('Canonical loaded filter/source mismatch: '+jail)
+            if jail in sources:
+                for key in ('maxretry','findtime','bantime'):
+                    if int(native_command(['get',jail,key]))!=payload[key]:raise ValueError('Canonical parameter shadowed')
+            ignored={str(ipaddress.ip_network(x,strict=False)) for x in native_command(['get',jail,'ignoreip'])}
+            if not required.issubset(ignored):raise ValueError('Canonical whitelist not loaded')
+            if FIREWALL['action_specs'](jail,run)!=actions[jail]:raise ValueError('Canonical actions changed')
+            coverage=FIREWALL['inspect'](jail,[t['ip'] for t in tickets([jail],native=True)],run)
+            if coverage['no_actions'] or coverage['unsupported_actions'] or coverage['missing_ips']:raise ValueError('Canonical coverage unconfirmed')
+        verify_preserved_tickets(before)
+    except BaseException:
+        if changed:
+            for j,p in paths.items():atomic_write(p,old[j])
+            if previous is None:override.unlink(missing_ok=True)
+            else:atomic_write(override,previous)
+            for jail in jails:run(['/usr/bin/fail2ban-client','reload',jail])
+        raise
+    return {'success':True,'jail':'apache-sensitive','jails':list(jails),'changed':changed,'maxretry':payload['maxretry'],'sources':sources,'tickets_checked':len(before)}
+
+
+def validate_jail(old, new):
+    before, after = parse(old), parse(new)
+    if before.defaults() != after.defaults():
+        raise ValueError('Changing DEFAULT is forbidden')
+    allowed = {'enabled', 'filter', 'logpath', 'maxretry', 'findtime', 'bantime', 'ignoreip', 'action'}
+    for section in set(before.sections()) | set(after.sections()):
+        a = dict(before._sections.get(section, {}))
+        b = dict(after._sections.get(section, {}))
+        if a == b:
+            continue
+        if not JAIL.fullmatch(section) or section == 'INCLUDES':
+            raise ValueError('Invalid jail section')
+        if not b:  # Explicit removal is allowed; global sections never are.
+            continue
+        for key in set(a) | set(b):
+            value = b.get(key, '')
+            if a.get(key) == value:
+                continue
+            if key not in allowed or any(ord(c) < 32 for c in value):
+                raise ValueError('Invalid jail field')
+            if key == 'enabled' and value not in ('true', 'false'):
+                raise ValueError('Invalid enabled flag')
+            if key in ('maxretry', 'findtime', 'bantime') and not re.fullmatch(r'-?\d+', value):
+                raise ValueError('Invalid numeric field')
+            if key == 'filter' and (not JAIL.fullmatch(value) or not (ROOT / 'filter.d' / (value + '.conf')).is_file()):
+                raise ValueError('Invalid filter')
+            if key == 'logpath' and (not str(Path(value).resolve()).startswith('/var/log/') or '%' in value or '..' in value):
+                raise ValueError('Invalid log path')
+            if key == 'ignoreip':
+                for token in value.split():
+                    ipaddress.ip_network(token, strict=False)
+            if key == 'action' and not re.fullmatch(r'iptables-multiport\[name=amsfb-[0-9a-f]{16},port="0:65535"\]', value):
+                raise ValueError('Only the module firewall action is allowed')
+    with tempfile.TemporaryDirectory(prefix='amsfb-config-') as d:
+        stage = Path(d)
+        for item in ROOT.iterdir():
+            if item.name != 'jail.local':
+                (stage / item.name).symlink_to(item)
+        (stage / 'jail.local').write_text(new)
+        run(['/usr/bin/fail2ban-client', '-t', '-c', str(stage)])
+
+
+def check_ban(jail, ip):
+    if not JAIL.fullmatch(jail):
+        raise ValueError('Invalid jail')
+    ip = str(ipaddress.ip_address(ip))
+    state = FIREWALL['inspect'](jail, [ip], run)
+    return {'success': True, 'applied': not state['missing_ips'], 'state': state}
+
+
+def ai_jail_health(seconds):
+    jail = 'ai-bans'
+    specs = FIREWALL['action_specs'](jail, run)
+    expected = len(specs) == 1 and specs[0].get('supported') and specs[0].get('protocol') == 'tcp' and specs[0].get('ranges') == [(0, 65535)]
+    duration = run(['/usr/bin/fail2ban-client', 'get', jail, 'bantime']).strip()
+    ignored = run(['/usr/bin/fail2ban-client', 'get', jail, 'ignoreip'])
+    ignores = set()
+    for line in ignored.splitlines():
+        try: ignores.add(str(ipaddress.ip_network(line.split()[-1], strict=False)))
+        except (ValueError, IndexError): pass
+    required = {str(ipaddress.ip_network(x, strict=False)) for x in effective_config().get(jail, {}).get('ignoreip', '').split()}
+    pending = tickets([jail], native=True)
+    missing = [t['ip'] for t in pending if not check_ban(jail, t['ip'])['applied']]
+    cleanup_ready = not pending
+    if expected and pending:
+        states = native_command(['get',jail,'action',specs[0]['action'],'_CommandAction__started'])
+        cleanup_ready = isinstance(states,dict) and all(int(states.get('inet6' if ipaddress.ip_address(t['ip']).version==6 else 'inet4',0)) & 2 for t in pending)
+    return {'success': bool(expected and duration == str(seconds) and required <= ignores and not missing and cleanup_ready),
+            'action_loaded': bool(expected), 'duration': duration, 'whitelist_confirmed': required <= ignores,
+            'missing_ips': missing, 'ticket_count': len(pending), 'native_expiry_ready':cleanup_ready}
+
+
+def verify_preserved_tickets(before):
+    current = {(t['jail'],t['ip']):t['ticket'] for t in tickets(sorted({t['jail'] for t in before}) or ['ai-bans'], native=True)}
+    for ticket in before:
+        key=(ticket['jail'],ticket['ip'])
+        end = ticket['ticket'].rsplit(' = ', 1)[-1]
+        expires = time.mktime(time.strptime(end, '%Y-%m-%d %H:%M:%S'))
+        if key in current and current[key] != ticket['ticket']:
+            raise ValueError('Recovery altered an existing ticket lifetime')
+        if expires > time.time()+1 and key not in current:
+            raise ValueError('Recovery lost a valid ticket')
+
+
+def repair_ai_ticket_rules(before):
+    """Reconcile only still-identical, valid daemon tickets; never call banip.
+
+    Native restart rounds fractional timestamps in SQLite and can extend a
+    ticket by one second. Rebuild the fixed helper-owned action instead.
+    """
+    specs = FIREWALL['action_specs']('ai-bans', run)
+    if not specs:
+        # Native reload can drop the newly added action when the old jail had
+        # no actions. Attach only the fixed installed action, not caller input.
+        from fail2ban.client.actionreader import ActionReader
+        action = ActionReader('iptables-multiport','ai-bans',
+                              {'name':'amsfb-ai-bans','port':'0:65535'},basedir=str(ROOT))
+        if not action.read():
+            raise ValueError('Installed AI firewall action unavailable')
+        action.getOptions({'bantime':effective_config()['ai-bans']['bantime']})
+        for command in action.convert():
+            native_command(command)
+        specs = FIREWALL['action_specs']('ai-bans', run)
+    if len(specs) != 1 or specs[0].get('chain') != 'f2b-amsfb-ai-bans' or specs[0].get('protocol') != 'tcp' or specs[0].get('ranges') != [(0,65535)]:
+        raise ValueError('AI action differs from fixed recovery policy: '+json.dumps(specs))
+    for ticket in before:
+        current = {t['ip']:t['ticket'] for t in tickets(['ai-bans'], native=True)}
+        if current.get(ticket['ip']) != ticket['ticket']:
+            continue
+        expires = time.mktime(time.strptime(ticket['ticket'].rsplit(' = ',1)[-1], '%Y-%m-%d %H:%M:%S'))
+        if expires <= time.time()+2:
+            continue
+        version = ipaddress.ip_address(ticket['ip']).version
+        info = {'ip':ticket['ip'],'family':'inet6' if version == 6 else 'inet4'}
+        # Invoke only the fixed installed action's ban method, NOT jail banip.
+        # This marks the action family as started so native expiry/unban cleans
+        # its rule normally, without modifying the BanManager ticket or SQLite.
+        arguments = {'aInfo':info}
+        if check_ban('ai-bans',ticket['ip'])['applied']:
+            # Existing rule from an orphaned action: adopt native cleanup state
+            # without inserting a duplicate source rule.
+            arguments['cmd'] = '<actioncheck>'
+        native_command(['set','ai-bans','action',specs[0]['action'],'ban',json.dumps(arguments)])
+        # If it expired during reconciliation, remove only this newly inserted
+        # rule; no other jail or historical ban is touched.
+        now = {t['ip']:t['ticket'] for t in tickets(['ai-bans'], native=True)}
+        if now.get(ticket['ip']) != ticket['ticket'] or expires <= time.time():
+            native_command(['set','ai-bans','action',specs[0]['action'],'unban',json.dumps({'aInfo':info})])
+
+
+def sync_policy(entries):
+    if not isinstance(entries, list) or len(entries) > 1000:
+        raise ValueError('Invalid whitelist')
+    networks = {'127.0.0.0/8', '0.0.0.0/8', '::1/128', '::/128'}
+    networks.update(str(ipaddress.ip_network(x, strict=False)) for x in entries)
+    policy_name = 'zz-amsfb-safety.local'
+    paths = [ROOT / 'jail.conf'] + sorted((ROOT / 'jail.d').glob('*.conf')) + [ROOT / 'jail.local']
+    paths += [p for p in sorted((ROOT / 'jail.d').glob('*.local')) if p.name not in (policy_name, '98-amsfb-safety.local')]
+    baseline = configparser.RawConfigParser(strict=False)
+    baseline.read([str(p) for p in paths if p.is_file()])
+    def merged(value):
+        if '%' in value:
+            raise ValueError('Resolve existing ignoreip interpolation before policy sync')
+        return ' '.join(sorted(set(value.split()) | networks))
+    value = merged(baseline.defaults().get('ignoreip', ''))
+    body = '# Managed AMSFB protection policy. No action/filter changes.\n[DEFAULT]\nignoreip = ' + value + '\n'
+    for jail in sorted(baseline.sections()):
+        if JAIL.fullmatch(jail) and jail != 'INCLUDES':
+            body += '\n[' + jail + ']\nignoreip = ' + merged(baseline.get(jail, 'ignoreip', fallback='')) + '\n'
+    with tempfile.TemporaryDirectory(prefix='amsfb-policy-') as d:
+        stage = Path(d)
+        for item in ROOT.iterdir():
+            if item.name != 'jail.d':
+                (stage / item.name).symlink_to(item)
+        (stage / 'jail.d').mkdir()
+        for item in (ROOT / 'jail.d').iterdir():
+            if item.name != policy_name:
+                (stage / 'jail.d' / item.name).symlink_to(item)
+        (stage / 'jail.d' / policy_name).write_text(body)
+        run(['/usr/bin/fail2ban-client', '-t', '-c', str(stage)])
+    dest = ROOT / 'jail.d' / policy_name
+    old = dest.read_text() if dest.exists() else None
+    try:
+        if old != body:
+            atomic_write(dest, body)
+            run(['/usr/bin/fail2ban-client', 'reload'])
+        for section, settings in effective_config().items():
+            effective = {str(ipaddress.ip_network(x, strict=False)) for x in settings.get('ignoreip', '').split()}
+            if not networks.issubset(effective):
+                raise ValueError('A later override shadows the safety whitelist: ' + section)
+    except Exception:
+        if old is None:
+            dest.unlink(missing_ok=True)
+        else:
+            atomic_write(dest, old)
+        run(['/usr/bin/fail2ban-client', 'reload'])
+        raise
+    return {'success': True}
+
+
+def effective_config():
+    from fail2ban.client.jailsreader import JailsReader
+    reader = JailsReader()
+    reader.setBaseDir(str(ROOT))
+    if not reader.read():
+        raise ValueError('Native configuration could not be read')
+    fields = ('enabled', 'filter', 'logpath', 'maxretry', 'findtime', 'bantime', 'ignoreip', 'backend')
+    result = {}
+    for section in reader.sections():
+        if JAIL.fullmatch(section) and section != 'INCLUDES':
+            result[section] = {}
+            for key in fields:
+                try:
+                    result[section][key] = reader.get(section, key)
+                except (configparser.Error, KeyError):
+                    pass
+    return result
+
+
+def ensure_ai_jail(duration):
+    seconds = int(duration)
+    if not 300 <= seconds <= 31536000:
+        raise ValueError('Invalid ban duration')
+    dest = ROOT / 'jail.d' / 'zz-amsfb-ai.local'
+    filter_path = ROOT / 'filter.d' / 'amsfb-ai-manual.conf'
+    text = ('[ai-bans]\nenabled = true\nfilter = amsfb-ai-manual\n'
+            'logpath = /var/log/whmcs_auth.log\nmaxretry = 1\nfindtime = 600\n'
+            f'bantime = {seconds}\naction = iptables-multiport[name=amsfb-ai-bans,port="0:65535"]\n'
+            '\n# Legacy echo filter learned administrative ban commands, not attacks.\n'
+            '[amsfb-ai-bans]\nenabled = false\n')
+    if not Path('/var/log/whmcs_auth.log').is_file():
+        raise ValueError('WHMCS authentication log missing')
+    old = dest.read_text() if dest.exists() else None
+    configured=effective_config().get('ai-bans',{})
+    try:
+        active=tickets(['ai-bans'],native=True)
+    except ValueError:
+        active=[]
+    if active and str(configured.get('bantime',''))!=str(seconds):
+        raise ValueError('Bans ativos na jail da IA: mudar a duração exige prévia de manutenção ou aguardar a expiração; tickets antigos não serão alterados')
+    if not filter_path.exists():
+        atomic_write(filter_path, '[Definition]\nfailregex = ^AMSFB manual ticket from <HOST>$\nignoreregex =\n')
+    if old == text and 'ai-bans' in effective_config():
+        try:
+            health = ai_jail_health(seconds)
+            if health['success']:
+                return health
+        except subprocess.CalledProcessError:
+            pass
+    try:
+        before = active
+        if old != text:
+            atomic_write(dest, text)
+        run(['/usr/bin/fail2ban-client', '-t'])
+        run(['/usr/bin/fail2ban-client', 'reload', 'ai-bans'])
+        health = ai_jail_health(seconds)
+        if not health['success']:
+            if before:
+                repair_ai_ticket_rules(before)
+            else:
+                run(['/usr/bin/fail2ban-client', 'reload', '--restart', 'ai-bans'])
+            for _ in range(20):
+                health = ai_jail_health(seconds)
+                if health['success']:
+                    break
+                time.sleep(.1)
+        verify_preserved_tickets(before)
+        if not health['success']:
+            raise ValueError('AI jail recovery did not confirm its own firewall action/tickets')
+        return dict(health, recovered=True)
+    except Exception:
+        if old is None:
+            dest.unlink(missing_ok=True)
+        else:
+            atomic_write(dest, old)
+        run(['/usr/bin/fail2ban-client', 'reload', 'ai-bans'])
+        raise
+
+
+def native_command(command):
+    # Installed Fail2Ban client protocol, fixed internal commands only. Avoid
+    # spawning a full CLI twice for every ticket in a large maintenance job.
+    from fail2ban.client.csocket import CSocket
+    client = CSocket(timeout=20)
+    try:
+        code, result = client.send(command)
+        if code != 0:
+            raise ValueError('Fail2Ban daemon rejected ticket operation: ' + str(result))
+        return result
+    finally:
+        client.close()
+
+
+def tickets(jails, native=False):
+    result = []
+    for jail in jails:
+        if not JAIL.fullmatch(jail):
+            raise ValueError('Invalid jail')
+        lines = native_command(['get', jail, 'banip', '--with-time']) if native else run(['/usr/bin/fail2ban-client', 'get', jail, 'banip', '--with-time']).splitlines()
+        for line in lines:
+            # Keep the full daemon ticket (start + duration + end). A renewed
+            # ban after preview must never match this identity.
+            match = re.match(r'^\s*([0-9a-fA-F:.]+)\s+(.+)$', line)
+            if match:
+                result.append({'jail':jail, 'ip':str(ipaddress.ip_address(match[1])), 'ticket':match[2].strip()})
+            elif line.strip() and line.strip() not in ('[]',):
+                raise ValueError('Unsupported ban ticket format')
+    return result
+
+
+def ips_snapshot():
+    """Presentation only. Fixed read commands; no shell, writes or ban admission."""
+    observed = int(time.time())
+
+    def pairs(value):
+        if not isinstance(value, (list, tuple)):
+            raise ValueError('Invalid native mapping')
+        result = {}
+        for pair in value:
+            if not isinstance(pair, (list, tuple)) or len(pair) != 2 or not isinstance(pair[0], str) or pair[0] in result:
+                raise ValueError('Invalid native field')
+            result[pair[0]] = pair[1]
+        return result
+
+    def names():
+        data = pairs(native_command(['status']))
+        count, value = data.get('Number of jail'), data.get('Jail list')
+        if type(count) is not int or not 0 <= count <= 200 or not isinstance(value, str):
+            raise ValueError('Invalid inventory')
+        rows = [v.strip() for v in value.split(',')] if value.strip() else []
+        if len(rows) != count or len(set(rows)) != count or any(not JAIL.fullmatch(v) for v in rows):
+            raise ValueError('Inconsistent inventory')
+        return sorted(rows)
+
+    def status(jail):
+        data = pairs(native_command(['status', jail]))
+        filtering, actions = pairs(data.get('Filter')), pairs(data.get('Actions'))
+        result = {}
+        for key, source, label in [('currently_failed', filtering, 'Currently failed'), ('total_failed', filtering, 'Total failed'),
+                                   ('currently_banned', actions, 'Currently banned'), ('total_banned', actions, 'Total banned')]:
+            value = source.get(label)
+            if type(value) is not int or not 0 <= value <= 9007199254740991:
+                raise ValueError('Invalid counter')
+            result[key] = value
+        peers = actions.get('Banned IP list')
+        if not isinstance(peers, (list, tuple)) or len(peers) > 50000 or any(not isinstance(ip, str) for ip in peers):
+            raise ValueError('Invalid peers')
+        peers = [str(ipaddress.ip_address(ip)) for ip in peers]
+        if len(set(peers)) != len(peers) or len(peers) != result['currently_banned']:
+            raise ValueError('Inconsistent peers')
+        result['banned_ip_list'] = sorted(peers)
+        return result
+
+    before = names()
+    statuses, targets, errors = {}, [], []
+    for jail in before:
+        try:
+            first = status(jail)
+            identities = tickets([jail], native=True)
+            if len(identities) + len(targets) > 50000:
+                raise ValueError('Snapshot too large')
+            peers = []
+            for row in identities:
+                identity = row.get('ticket')
+                if row.get('jail') != jail or not isinstance(identity, str) or not 1 <= len(identity) <= 200 or re.search(r'[\x00-\x1f\x7f]', identity):
+                    raise ValueError('Invalid temporal identity')
+                peers.append(row['ip'])
+            last = status(jail)
+            if len(set(peers)) != len(peers) or sorted(peers) != first['banned_ip_list'] or sorted(peers) != last['banned_ip_list']:
+                raise ValueError('Tickets changed during read')
+            repeated = tickets([jail], native=True)
+            identity = lambda rows: sorted((r['ip'], r['ticket']) for r in rows)
+            if identity(identities) != identity(repeated):
+                raise ValueError('Ticket renewed during read')
+            statuses[jail] = last
+            targets.extend(identities)
+        except Exception:
+            statuses[jail] = None
+            errors.append(jail)
+    stable = names() == before
+    return {'success': True, 'snapshot_version': 1, 'observed_at': observed, 'finished_at': int(time.time()),
+            'inventory_stable': stable, 'complete': stable and not errors, 'names': before,
+            'statuses': statuses if stable else {}, 'targets': targets if stable else [],
+            'errors': errors}
+
+
+def archive_part(job, part, path):
+    if not re.fullmatch(r'[a-f0-9]{32}', job) or not re.fullmatch(r'[0-9]{1,4}', part):
+        raise ValueError('Invalid archive identity')
+    body = temporary(path, 'amsfb_archive_')
+    json.loads(body)
+    target = BACKUPS / ('job-' + job)
+    target.mkdir(parents=True, mode=0o700, exist_ok=True)
+    os.chmod(target, 0o700)
+    dest = target / ('part-' + part + '.json.bakp')
+    if dest.exists() and dest.read_text() != body:
+        raise ValueError('Archive part already exists with different content')
+    if not dest.exists():
+        atomic_write(dest, body, 0o600)
+    digest = hashlib.sha256(body.encode()).hexdigest()
+    if hashlib.sha256(dest.read_bytes()).hexdigest() != digest:
+        raise ValueError('Archive verification failed')
+    return {'success': True, 'sha256': digest, 'bytes':dest.stat().st_size, 'part':int(part)}
+
+
+def unban_ticket(jail, ip, identity):
+    ip = str(ipaddress.ip_address(ip))
+    if not any(x['ip'] == ip and x['ticket'] == identity for x in tickets([jail], native=True)):
+        return {'success': True, 'skipped':True}
+    try:
+        native_command(['set', jail, 'unbanip', ip])
+    except Exception:
+        if not any(x['ip']==ip and x['ticket']==identity for x in tickets([jail],native=True)):
+            return {'success':True,'skipped':True}
+        raise
+    return {'success': True, 'skipped':False}
+
+
+def verify_archive(job, manifest):
+    if not re.fullmatch(r'[a-f0-9]{32}',job) or not isinstance(manifest,list) or not 1<=len(manifest)<=10000:
+        raise ValueError('Invalid archive manifest')
+    for part in manifest:
+        if not isinstance(part,dict) or not isinstance(part.get('part'),int) or not 0<=part['part']<=9999:
+            raise ValueError('Invalid archive part')
+        if not re.fullmatch(r'[a-f0-9]{64}',str(part.get('sha256',''))):
+            raise ValueError('Invalid archive digest')
+        path=BACKUPS/('job-'+job)/('part-'+str(part['part'])+'.json.bakp')
+        if path.stat().st_size != part.get('bytes') or hashlib.sha256(path.read_bytes()).hexdigest()!=part['sha256']:
+            raise ValueError('Archive integrity mismatch; recovery refused')
+    return {'success':True,'verified_parts':len(manifest)}
+
+
+def unban_batch(targets):
+    if not isinstance(targets,list) or not 1 <= len(targets) <= 100:
+        raise ValueError('Invalid ticket batch')
+    # Validate the entire shape first; never expose arbitrary daemon commands.
+    for target in targets:
+        if not isinstance(target,dict) or set(target) != {'jail','ip','ticket'}:
+            raise ValueError('Invalid ticket fields')
+        if not isinstance(target['jail'],str) or not JAIL.fullmatch(target['jail']):
+            raise ValueError('Invalid jail')
+        ipaddress.ip_address(target['ip'])
+        if not isinstance(target['ticket'],str) or len(target['ticket'])>200 or '\n' in target['ticket']:
+            raise ValueError('Invalid temporal identity')
+    results=[]
+    for target in targets:
+        try:
+            results.append(unban_ticket(target['jail'],target['ip'],target['ticket']))
+        except Exception as exc:
+            return {'success':True,'results':results,'error':'Partial batch: '+str(exc)}
+    return {'success':True,'results':results}
+
+
+def monitor(job, hours=None, interval=None):
+    if not re.fullmatch(r'[a-f0-9]{32}', job):
+        raise ValueError('Invalid monitor identity')
+    folder = BACKUPS / ('job-' + job)
+    folder.mkdir(mode=0o700, parents=True, exist_ok=True)
+    report = folder / 'monitor.jsonl'
+    unit = 'amsfb-monitor-' + job
+    if hours is not None:
+        if not 1 <= int(hours) <= 168 or not 30 <= int(interval) <= 3600:
+            raise ValueError('Invalid monitor window')
+        if not report.exists():
+            report.touch(mode=0o600)
+            run(['/usr/bin/systemd-run', '--unit=' + unit, '--property=Type=exec',
+                 '--property=StandardOutput=append:' + str(report),
+                 '--property=StandardError=journal', '/usr/bin/python3',
+                 '/usr/local/lib/amssoft_fail2ban/audit.py', '--monitor-hours', str(hours),
+                 '--interval', str(interval)])
+    state = run(['/usr/bin/systemctl', 'show', unit, '--property=ActiveState,Result,ExecMainStatus'])
+    samples = errors = missing = orphan = 0
+    missing_tickets = None
+    no_actions = set()
+    unsupported = set()
+    measured = 0
+    coverage_versions = set()
+    finished = False
+    first = last = None
+    if report.exists():
+        if report.stat().st_size > 50 * 1024 * 1024:
+            raise ValueError('Monitor report exceeds limit')
+        with report.open() as source:
+            for line in source:
+                try:
+                    value = json.loads(line)
+                except ValueError:
+                    continue
+                if value.get('monitor_complete'):
+                    finished = True
+                    continue
+                samples += 1
+                errors += bool(value.get('error'))
+                missing = max(missing, int(value.get('missing_f2b_rules', 0)))
+                orphan = max(orphan, int(value.get('orphan_firewall_ips',0)))
+                if value.get('coverage_version') in (2, 3, 4):
+                    measured += 1
+                    coverage_versions.add(value['coverage_version'])
+                    missing_tickets = max(missing_tickets or 0, int(value.get('missing_jail_tickets',0)))
+                    no_actions.update(value.get('jails_without_actions',[]))
+                    unsupported.update(value.get('jails_unverified',[]))
+                first = first or value
+                last = value
+    active = 'ActiveState=active' in state or 'ActiveState=activating' in state
+    return {'success': True, 'active':active, 'samples':samples, 'errors':errors,
+            'max_missing_rules':missing, 'max_orphan_rules':orphan, 'first':first, 'last':last,
+            'coverage_samples':measured,'coverage_versions_seen':sorted(coverage_versions),'max_missing_jail_tickets':missing_tickets,
+            'jails_without_actions_seen':sorted(no_actions) if measured else None,
+            'jails_unverified_seen':sorted(unsupported) if measured else None,
+            'completed':not active and samples > 0 and (finished or ('Result=success' in state and 'ExecMainStatus=0' in state))}
+
+
+def loaded_filter_state(jail):
+    if not JAIL.fullmatch(jail):
+        raise ValueError('Invalid jail')
+    from fail2ban.server.failregex import FailRegex
+    # get failregex returns expanded native macros. Reverse only an exact,
+    # known HOST expansion, never an arbitrary capture or a guessed regex edit.
+    expansions = sorted({FailRegex('<HOST>', useDns=dns).getRegex() for dns in ('no', 'warn', 'yes')}, key=len, reverse=True)
+    patterns = []
+    for pattern in native_command(['get', jail, 'failregex']):
+        for expansion in expansions:
+            if pattern.count(expansion) == 1:
+                patterns.append(pattern.replace(expansion, '<HOST>'))
+                break
+        else:
+            raise FilterValidationError('loaded_filter_host', 'Loaded expression has no verifiable native HOST expansion')
+    return {'success': True, 'patterns': patterns,
+            'prefregex': native_command(['get', jail, 'prefregex']),
+            'ignoreregex': native_command(['get', jail, 'ignoreregex']),
+            'paths': native_command(['get', jail, 'logpath'])}
+
+
+READ_OPERATIONS = {'health','effective-config','tickets','check-ban','monitor-status',
+                   'audit-snapshot','verify-archive','ai-jail-health','jail-filter-state',
+                   'validate-filter','client-read','ban-coverage','protection-snapshot','prepare-evidence','filter-coverage','normalize-filter','ips-snapshot'}
+READ_OPERATIONS.add('dashboard-protection-snapshot')
+
+
+class ReadBudgetExceeded(BaseException):
+    code = 'cycle_budget'
+
+
+def budget_expired(signum, frame):
+    # Escape native validators' broad Exception handlers without becoming a syntax refusal.
+    raise ReadBudgetExceeded('Read/validation time budget exhausted')
+
+
+def prepare_budget(args):
+    if args and args[0] == '--read-budget':
+        if len(args) < 3 or not re.fullmatch(r'[1-9][0-9]?', args[1]) or not 1 <= int(args[1]) <= 45:
+            raise ValueError('Invalid read budget')
+        args, seconds = args[2:], int(args[1])
+        if args[0] not in READ_OPERATIONS:
+            raise ValueError('Budget is restricted to read/validation operations')
+        signal.signal(signal.SIGALRM, budget_expired)
+        signal.alarm(seconds)
+    return args
+
+
+def native_action_specs(jail):
+    """Same firewall parser, fixed daemon reads instead of one CLI per field."""
+    if not isinstance(jail, str) or not JAIL.fullmatch(jail):
+        raise ValueError('Invalid jail')
+    names = native_command(['get', jail, 'actions'])
+    if (not isinstance(names, list) or len(names) > 100
+            or any(not isinstance(name, str) or not re.fullmatch(r'[A-Za-z0-9][A-Za-z0-9_-]{0,127}', name) for name in names)
+            or len(set(names)) != len(names)):
+        raise ValueError('Invalid native actions')
+
+    def read(command):
+        if command == ['/usr/bin/fail2ban-client', 'get', jail, 'actions']:
+            return 'Actions:\n' + '\n'.join(names)
+        if (len(command) != 6 or command[:4] != ['/usr/bin/fail2ban-client', 'get', jail, 'action']
+                or command[4] not in names or command[5] not in ('actionban', 'protocol', 'port')):
+            raise ValueError('Unexpected action read')
+        value = native_command(command[1:])
+        if not isinstance(value, str) or len(value) > 16384 or '\x00' in value:
+            raise ValueError('Invalid native action property')
+        return value
+
+    return FIREWALL['action_specs'](jail, read)
+
+
+def ban_coverage(ips=None, services=False, native_actions=False):
+    """Read-only, HTTP scope; a daemon ticket alone never proves protection."""
+    observed = int(time.time())
+    # Cache literal CIDR parsing only for this dashboard invocation. Tickets,
+    # rules, action properties and protection decisions are never cached.
+    network_reader = functools.lru_cache(maxsize=4096)(ipaddress.ip_network) if native_actions else None
+    names = dict(native_command(['status'])).get('Jail list', '')
+    jails = [name.strip() for name in names.split(',') if name.strip()]
+    rules = {v: FIREWALL['read_rules'](run, v) for v in (4, 6)}
+    before = tickets(jails, native=True)
+    requirements = {'http': [80, 443]}
+    if services:
+        ssh = set()
+        for jail, cfg in effective_config().items():
+            if jail not in jails or cfg.get('filter', '').split('[', 1)[0] != 'sshd':
+                continue
+            for lo, hi in FIREWALL['ranges'](cfg.get('port', 'ssh'), 'tcp'):
+                if hi-lo > 100: raise ValueError('Ambiguous SSH service ports')
+                ssh.update(range(lo, hi+1))
+        requirements['ssh'] = sorted(ssh)
+    required_ports = set(p for ports in requirements.values() for p in ports)
+    entries, errors = [], []
+    for jail in jails:
+        try:
+            pending = [ticket for ticket in before if ticket['jail'] == jail]
+            if ips is not None:
+                pending = [ticket for ticket in pending if ticket['ip'] in ips]
+            if not pending:
+                continue
+            specs = native_action_specs(jail) if native_actions else FIREWALL['action_specs'](jail, run)
+            if any(not spec.get('supported') for spec in specs):
+                errors.append({'jail': jail, 'error': 'unsupported_action'})
+            for ticket in pending:
+                identity = ticket['ticket']
+                try:
+                    expires = int(time.mktime(time.strptime(identity.rsplit(' = ', 1)[-1], '%Y-%m-%d %H:%M:%S')))
+                except (ValueError, OverflowError):
+                    # Permanent tickets may have no calendar end. Unknown formats
+                    # are not assumed permanent and cannot suppress analysis.
+                    if not re.search(r'\+\s*-1\s*=', identity):
+                        continue
+                    expires = None
+                if expires is not None and expires <= time.time():
+                    continue
+                version = ipaddress.ip_address(ticket['ip']).version
+                ports = set()
+                for spec in specs:
+                    if not spec.get('supported') or spec.get('protocol') != 'tcp':
+                        continue
+                    for port in required_ports:
+                        if any(lo <= port <= hi for lo, hi in spec['ranges']):
+                            scoped = dict(spec, ranges=[(port, port)])
+                            covered = (FIREWALL['covers'](rules[version], scoped, ticket['ip'], network_reader=network_reader)
+                                       if native_actions else FIREWALL['covers'](rules[version], scoped, ticket['ip']))
+                            if covered:
+                                ports.add(port)
+                if ports:
+                    entries.append(dict(ticket, expires_at=expires, protocol='tcp', ports=sorted(ports), effective=True))
+        except Exception as exc:
+            errors.append({'jail': jail, 'error': type(exc).__name__})
+    # A snapshot is observational, never an instruction to ban/unban.
+    after = tickets(jails, native=True)
+    identity = lambda rows: sorted((r['jail'], r['ip'], r['ticket']) for r in rows)
+    stable = identity(before) == identity(after) and rules == {v: FIREWALL['read_rules'](run, v) for v in (4, 6)}
+    stable = stable and names == dict(native_command(['status'])).get('Jail list', '')
+    return {'success': stable and not errors, 'stable': stable, 'observed_at': observed,
+            'entries': entries if stable else [], 'errors': errors, 'requirements': requirements,
+            'scope': 'configured services' if services else 'HTTP TCP 80/443'}
+
+
+def prepare_evidence(lines):
+    if not isinstance(lines, list) or len(lines) > 1000 or any(not isinstance(x, str) or len(x) >= 65536 for x in lines):
+        raise ValueError('Invalid evidence lines')
+    from fail2ban.server.datedetector import DateDetector
+    detector = DateDetector()
+    detector.addDefaultTemplate()
+    prepared = {}
+    for line in lines:
+        match = detector.matchTime(line)[0]
+        prepared[hashlib.sha256(line.encode()).hexdigest()] = line[:match.start(1)] + line[match.end(1):] if match else line
+    return {'success': True, 'lines': prepared}
+
+
+def main(args):
+    if not args:
+        raise ValueError('Missing operation')
+    if args[0] == 'client-read':
+        command = args[1:]
+        if command not in (['status'], ['ping']):
+            if len(command) != 2 or command[0] != 'status' or not JAIL.fullmatch(command[1]):
+                raise ValueError('Invalid read command')
+        return {'success': True, 'output': run(['/usr/bin/fail2ban-client'] + command)}
+    if args == ['health']:
+        return {'success': True, 'version': 30}
+    if args == ['ips-snapshot']:
+        return ips_snapshot()
+    if args == ['dashboard-protection-snapshot']:
+        return ban_coverage(services=True, native_actions=True)
+    if args[0] == 'sync-sensitive-probes' and len(args) == 2:
+        return sync_sensitive_probes(json.loads(temporary(args[1], 'amsfb_probes_')))
+    if args[0] == 'filter-coverage' and len(args) == 3:
+        if not JAIL.fullmatch(args[1]):raise ValueError('Invalid jail')
+        return filter_coverage(args[1], json.loads(temporary(args[2], 'amsfb_evidence_')))
+    if args[0] == 'extend-managed-rule' and len(args) == 2:
+        return extend_managed_rule(json.loads(temporary(args[1], 'amsfb_rule_')))
+    if args[0] == 'normalize-filter' and len(args) == 2:
+        return normalize_evidence_filter(json.loads(temporary(args[1], 'amsfb_evidence_')))
+    if args[0] == 'ban-coverage' and 1 <= len(args) <= 11:
+        return ban_coverage({str(ipaddress.ip_address(ip)) for ip in args[1:]} if len(args)>1 else None)
+    if args[0] == 'prepare-evidence' and len(args) == 2:
+        return prepare_evidence(json.loads(temporary(args[1], 'amsfb_evidence_')))
+    if args[0] == 'protection-snapshot' and 1 <= len(args) <= 11:
+        ips = {str(ipaddress.ip_address(ip)) for ip in args[1:]} if len(args) > 1 else None
+        return ban_coverage(ips, services=True)
+    if args[0] == 'jail-filter-state' and len(args) == 2:
+        return loaded_filter_state(args[1])
+    if args[0] == 'replace-filter' and len(args) == 5:
+        return replace_existing_filter(args[2], temporary(args[1], 'amsfb_filter_'), args[3],
+                                       json.loads(temporary(args[4], 'amsfb_evidence_')))
+    if args[0] == 'quarantine-detection' and len(args) == 3:
+        return replace_existing_filter(args[1], '', args[2], [], quarantine=True)
+    if args[0] == 'reload' and len(args) in (1, 2):
+        if len(args) == 2 and not JAIL.fullmatch(args[1]):
+            raise ValueError('Invalid jail')
+        run(['/usr/bin/fail2ban-client', 'reload'] + args[1:])
+        return {'success': True}
+    if args == ['effective-config']:
+        return {'success': True, 'jails': effective_config()}
+    if args == ['ai-jail-health']:
+        return ai_jail_health(effective_config().get('ai-bans', {}).get('bantime', '3600'))
+    if args[0] == 'ensure-ai-jail' and len(args) == 2:
+        return ensure_ai_jail(args[1])
+    if args[0] == 'tickets' and 2 <= len(args) <= 201:
+        return {'success': True, 'targets':tickets(args[1:])}
+    if args[0] == 'unban-ticket' and len(args) == 4:
+        return unban_ticket(*args[1:])
+    if args[0] == 'unban-tickets' and len(args) == 2:
+        return unban_batch(json.loads(temporary(args[1], 'amsfb_targets_')))
+    if args[0] == 'archive-part' and len(args) == 4:
+        return archive_part(*args[1:])
+    if args[0] == 'verify-archive' and len(args) == 3:
+        return verify_archive(args[1],json.loads(temporary(args[2],'amsfb_manifest_')))
+    if args[0] == 'monitor-start' and len(args) == 4:
+        return monitor(*args[1:])
+    if args[0] == 'monitor-status' and len(args) == 2:
+        return monitor(args[1])
+    if args == ['audit-snapshot']:
+        result = subprocess.run(['/usr/bin/python3', '/usr/local/lib/amssoft_fail2ban/audit.py'],
+                                text=True, capture_output=True, timeout=40)
+        value = json.loads(result.stdout)
+        return {'success':not bool(value.get('error')), 'snapshot':value}
+    if args[0] == 'check-ban' and len(args) == 3:
+        return check_ban(args[1], args[2])
+    if args[0] in ('ban','unban') and len(args) == 3:
+        jail, ip = args[1:]
+        if not JAIL.fullmatch(jail):
+            raise ValueError('Invalid jail')
+        address = ipaddress.ip_address(ip)
+        if args[0] == 'ban':
+            peer = address.ipv4_mapped if address.version == 6 and address.ipv4_mapped else address
+            if peer.is_loopback or peer.is_unspecified or (peer.version == 4 and int(peer) >> 24 == 0):
+                raise ValueError('Protected address')
+            ignores = run(['/usr/bin/fail2ban-client', 'get', jail, 'ignoreip'])
+            for line in ignores.splitlines():
+                try:
+                    network = ipaddress.ip_network(line.split()[-1], strict=False)
+                except (ValueError, IndexError):
+                    continue
+                if address.version == network.version and address in network:
+                    raise ValueError('Whitelisted address')
+        run(['/usr/bin/fail2ban-client', 'set', jail, args[0] + 'ip', str(address)])
+        return {'success': True, 'accepted': True}
+    if args[0] == 'sync-policy' and len(args) == 2:
+        return sync_policy(json.loads(temporary(args[1], 'amsfb_policy_')))
+    if args[0] == 'sync-normal-paths' and len(args) == 2:
+        return sync_normal_paths(json.loads(temporary(args[1], 'amsfb_normal_')))
+    if args[0] == 'validate-filter' and len(args) == 3:
+        text = temporary(args[1], 'amsfb_filter_')
+        evidence = json.loads(temporary(args[2], 'amsfb_evidence_'))
+        if not isinstance(evidence, list):
+            raise ValueError('Invalid evidence')
+        from fail2ban.server.failregex import RegexException
+        try: result=validate_filter(text, evidence)
+        except RegexException as exc:
+            raise FilterValidationError('filter_syntax','Invalid fail2ban expression') from exc
+        return {'success': True,**result}
+    if args[0] == 'install-filter' and len(args) == 4:
+        text = temporary(args[1], 'amsfb_filter_')
+        name = args[2]
+        if not FILTER.fullmatch(name) or name.startswith('amsfb-'):
+            raise ValueError('Invalid filter name')
+        evidence = json.loads(temporary(args[3], 'amsfb_evidence_'))
+        if not isinstance(evidence, list):
+            raise ValueError('Invalid evidence')
+        validate_filter(text, evidence)
+        atomic_write(ROOT / 'filter.d' / ('amsfb-' + name + '.conf'), text)
+        return {'success': True}
+    if args[0] == 'install-jail' and len(args) == 3:
+        text = temporary(args[1], 'amsfb_jail_')
+        current = (ROOT / 'jail.local').read_text()
+        if hashlib.sha256(current.encode()).hexdigest() != args[2]:
+            raise ValueError('Configuration changed concurrently')
+        validate_jail(current, text)
+        before,after=parse(current),parse(text)
+        atomic_write(ROOT / 'jail.local', text)
+        try:
+            run(['/usr/bin/fail2ban-client','reload'])
+            effective=effective_config()
+            for section in after.sections():
+                requested=after._sections[section].get('enabled')
+                previous=before._sections.get(section,{}).get('enabled')
+                if requested is not None and requested!=previous:
+                    state=effective.get(section,{}).get('enabled','false').lower() in ('true','1','yes','on')
+                    if state != (requested=='true'):
+                        raise ValueError('A later override shadows the jail activation state')
+                    if state:
+                        run(['/usr/bin/fail2ban-client','status',section])
+        except Exception:
+            atomic_write(ROOT / 'jail.local',current)
+            run(['/usr/bin/fail2ban-client','reload'])
+            raise
+        return {'success': True}
+    if args[0] == 'quarantine-filter' and len(args) == 2:
+        name=args[1]
+        if not FILTER.fullmatch(name) or name.startswith('amsfb-'):
+            raise ValueError('Invalid filter name')
+        full='amsfb-'+name
+        if any(settings.get('filter','').split('[',1)[0]==full for settings in effective_config().values()):
+            return {'success':False,'error':'Filter still has a configuration consumer'}
+        path=ROOT/'filter.d'/(full+'.conf')
+        if not path.exists():return {'success':True,'absent':True}
+        BACKUPS.mkdir(mode=0o700,parents=True,exist_ok=True)
+        saved=BACKUPS/('unused-'+full+'.'+str(time.time_ns())+'.bakp')
+        shutil.copy2(path,saved);os.chmod(saved,0o600)
+        if hashlib.sha256(saved.read_bytes()).digest()!=hashlib.sha256(path.read_bytes()).digest():
+            raise ValueError('Unused filter backup mismatch')
+        path.unlink()
+        return {'success':True,'quarantined':True}
+    raise ValueError('Unsupported operation')
+
+
+if __name__ == '__main__':
+    try:
+        signal.alarm(45)
+        args = prepare_budget(sys.argv[1:])
+        if args and args[0] in READ_OPERATIONS:
+            # Files are replaced atomically. Observational calls need not wait
+            # behind a large maintenance batch; they never change host state.
+            print(json.dumps(main(args)))
+        else:
+            # Serializes privileged commits; PHP also locks read/modify/write.
+            with open('/run/lock/amsfb-admin.lock', 'a') as lock:
+                fcntl.flock(lock, fcntl.LOCK_EX)
+                print(json.dumps(main(args)))
+    except (Exception, ReadBudgetExceeded) as exc:
+        print(json.dumps({'success': False, 'error': str(exc),
+                          'code': getattr(exc, 'code', 'bridge_error')}))
+        sys.exit(1)

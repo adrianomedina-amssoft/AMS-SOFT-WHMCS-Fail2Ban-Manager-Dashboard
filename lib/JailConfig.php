@@ -9,6 +9,28 @@ class JailConfig
 {
     private string $jailLocalPath;
     private ?Fail2BanClient $client;
+    private string $expectedHash = '';
+    private ?string $uiExpectedHash = null;
+    private bool $preserveActions = false;
+
+    /** UI optimistic guard. The privileged installer also checks the file hash. */
+    public function guardUiWrite(string $hash): void
+    {
+        $this->uiExpectedHash = $hash;
+        $this->preserveActions = true;
+    }
+
+    public function localHash(): string
+    {
+        $hash = @hash_file('sha256', $this->jailLocalPath);
+        if (!is_string($hash)) throw new \RuntimeException('Configuração local indisponível.');
+        return $hash;
+    }
+
+    public function appliesOnWrite(): bool
+    {
+        return $this->jailLocalPath === '/etc/fail2ban/jail.local';
+    }
 
     public function __construct(string $jailLocalPath, ?Fail2BanClient $client = null)
     {
@@ -36,6 +58,13 @@ class JailConfig
         return $this->parseIni($content);
     }
 
+    public function readEffective(): array
+    {
+        $result=Privileged::run(['effective-config']);
+        if(empty($result['success'])) throw new \RuntimeException('Leitura nativa de configuração indisponível.');
+        return $result['jails'];
+    }
+
     /**
      * Returns a human-readable permission problem, or null if the file is
      * accessible for both reading and writing by the current process.
@@ -50,6 +79,10 @@ class JailConfig
         if (!is_readable($path)) {
             return "Sem permissão de leitura em {$path} — execute: chown root:www-data {$path} && chmod 0664 {$path}";
         }
+        if ($path === '/etc/fail2ban/jail.local') {
+            return !empty(Privileged::run(['health'])['success']) ? null
+                : 'Helper privilegiado indisponível. Instale setup/amsfb-admin como root e atualize o sudoers.';
+        }
         if (!is_writable($path)) {
             return "Sem permissão de escrita em {$path} — execute: chown root:www-data {$path} && chmod 0664 {$path}";
         }
@@ -62,25 +95,7 @@ class JailConfig
      */
     public function saveJail(string $jail, array $params): bool
     {
-        $data = $this->readJailLocal();
-
-        if (!isset($data[$jail])) {
-            $data[$jail] = [];
-        }
-
-        $allowed = ['enabled', 'maxretry', 'findtime', 'bantime', 'logpath', 'filter', 'action', 'ignoreip'];
-        foreach ($params as $key => $value) {
-            if (in_array($key, $allowed, true)) {
-                // [SEC-2] Strip control characters (newlines, null bytes, etc.) to prevent
-                // INI injection: a logpath like "/var/log/x\n[DEFAULT]\nenabled=false" would
-                // otherwise inject fake sections into jail.local.
-                $safe = preg_replace('/[\x00-\x1F\x7F]/', '', (string)$value);
-                $data[$jail][$key] = $safe;
-            }
-        }
-
-        $this->backup();
-        return $this->writeFile($data);
+        return $this->change($jail, $params, 'save');
     }
 
     public function enableJail(string $jail): bool
@@ -98,11 +113,7 @@ class JailConfig
      */
     public function addJail(string $jail, array $params): bool
     {
-        $data = $this->readJailLocal();
-        if (isset($data[$jail])) {
-            return false; // already exists
-        }
-        return $this->saveJail($jail, $params);
+        return $this->change($jail, $params, 'add');
     }
 
     /**
@@ -111,13 +122,44 @@ class JailConfig
      */
     public function removeJail(string $jail): bool
     {
-        $data = $this->readJailLocal();
-        if (!isset($data[$jail])) {
-            return false;
+        return $this->change($jail, [], 'remove');
+    }
+
+    private function change(string $jail, array $params, string $operation): bool
+    {
+        if (Helper::sanitizeJail($jail) === '' || in_array($jail, ['DEFAULT', 'INCLUDES'], true)) return false;
+        $lock = LogLock::acquire('jail-config:' . $this->jailLocalPath);
+        if ($lock['fp'] === null) return false;
+        try {
+            $original = is_file($this->jailLocalPath) ? file_get_contents($this->jailLocalPath) : '';
+            if ($original === false) return false;
+            $this->expectedHash = hash('sha256', $original);
+            if ($this->uiExpectedHash !== null && !hash_equals($this->uiExpectedHash, $this->expectedHash)) return false;
+            $data = $this->parseIni($original);
+            if ($operation === 'add' && isset($data[$jail])) return false;
+            if ($operation === 'remove') {
+                if (!isset($data[$jail])) return false;
+                unset($data[$jail]);
+            } else {
+                $isNew = !isset($data[$jail]);
+                $data[$jail] = $data[$jail] ?? [];
+                foreach ($params as $key => $value) {
+                    if (in_array($key, ['enabled','maxretry','findtime','bantime','logpath','filter','action','ignoreip'], true)) {
+                        $data[$jail][$key] = preg_replace('/[\x00-\x1F\x7F]/', '', (string)$value);
+                    }
+                }
+                $nativeExisting=false;
+                if($isNew&&$this->jailLocalPath==='/etc/fail2ban/jail.local') {
+                    try {$nativeExisting=isset($this->readEffective()[$jail]);}catch(CycleBudgetExceeded $e){throw $e;}catch(\Throwable $e){return false;}
+                }
+                if (($isNew&&!$nativeExisting) || (!$this->preserveActions && (str_starts_with($jail, 'amsfb-') || strlen('f2b-' . $jail) > 28))) {
+                    $data[$jail]['action'] = 'iptables-multiport[name=' . Safety::actionName($jail) . ',port="0:65535"]';
+                }
+            }
+            return $this->writeFile($data);
+        } finally {
+            LogLock::release($lock['fp']);
         }
-        unset($data[$jail]);
-        $this->backup();
-        return $this->writeFile($data);
     }
 
     /** Reloads the jail via fail2ban-client (requires injected client). */
@@ -152,6 +194,8 @@ class JailConfig
     {
         $result  = [];
         $section = null;
+        $lastKey = null;
+        $lastIndent = 0;
 
         foreach (explode("\n", $content) as $rawLine) {
             $line    = rtrim($rawLine);
@@ -163,6 +207,7 @@ class JailConfig
 
             // Section header
             if (preg_match('/^\[([^\]]+)\]/', $trimmed, $m)) {
+                $lastKey = null;
                 $section = trim($m[1]);
                 if (!isset($result[$section])) {
                     $result[$section] = [];
@@ -170,12 +215,19 @@ class JailConfig
                 continue;
             }
 
-            // key = value  (strip inline comments)
+            $indent = strlen($line) - strlen(ltrim($line));
+            if ($section !== null && $lastKey !== null && $indent > $lastIndent) {
+                $result[$section][$lastKey] .= "\n" . $trimmed;
+                continue;
+            }
+            // Preserve literal semicolons and interpolation in existing values.
             if ($section !== null && strpos($trimmed, '=') !== false) {
                 [$k, $v]            = explode('=', $trimmed, 2);
                 $k                  = trim($k);
-                $v                  = trim(preg_replace('/\s*[#;].*$/', '', $v));
+                $v                  = trim($v);
                 $result[$section][$k] = $v;
+                $lastKey = $k;
+                $lastIndent = $indent;
             }
         }
 
@@ -199,6 +251,7 @@ class JailConfig
         foreach ($data as $section => $values) {
             $body .= "[{$section}]\n";
             foreach ($values as $key => $value) {
+                $value = str_replace("\n", "\n            ", $value);
                 $body .= "{$key} = {$value}\n";
             }
             $body .= "\n";
@@ -215,7 +268,21 @@ class JailConfig
             @unlink($tmp);
             return false;
         }
-        $ok = copy($tmp, $this->jailLocalPath);
+        if ($this->jailLocalPath === '/etc/fail2ban/jail.local') {
+            $result = Privileged::run(['install-jail', $tmp, $this->expectedHash]);
+            $ok = !empty($result['success']);
+        } else {
+            $local = tempnam(dirname($this->jailLocalPath), '.amsfb-');
+            $ok = $local !== false && file_put_contents($local, $header . $body, LOCK_EX) !== false;
+            if ($ok) {
+                if (is_file($this->jailLocalPath) && $this->backup() === '') $ok = false;
+                if ($ok) {
+                    @chmod($local, is_file($this->jailLocalPath) ? (fileperms($this->jailLocalPath) & 0777) : 0640);
+                    $ok = rename($local, $this->jailLocalPath);
+                }
+            }
+            if ($local !== false && is_file($local)) @unlink($local);
+        }
         @unlink($tmp);
         return $ok;
     }
@@ -251,7 +318,6 @@ class JailConfig
         $dst    = is_writable($dir)
             ? $this->jailLocalPath . $suffix
             : sys_get_temp_dir() . '/amsfb_jail_bak' . $suffix;
-        copy($this->jailLocalPath, $dst);
-        return $dst;
+        return copy($this->jailLocalPath, $dst) ? $dst : '';
     }
 }

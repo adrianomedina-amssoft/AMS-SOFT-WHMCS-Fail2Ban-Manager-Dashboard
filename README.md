@@ -1,346 +1,90 @@
-# AMS SOFT – Fail2Ban Manager para WHMCS
+# AMS SOFT — Fail2Ban Manager para WHMCS
 
-> **Leve o fail2ban a outro nível — integrado ao WHMCS, com dashboard visual, IA multi-provider (Anthropic Claude, MiMo/Xiaomi) para análise de ataques, criação automática de filtros, relatórios e muito mais. Tudo sem precisar de linha de comando ou terminal.**
+Painel administrativo para Fail2Ban, com proteção nativa, análise assistida por IA, evidências por IP e controles de automação. Versão pública: **2.2.54**.
 
----
+Este projeto altera regras de segurança quando configurado para isso. Teste em homologação e mantenha acesso de recuperação antes de instalar ou atualizar. Não é uma garantia de detecção de todos os ataques.
 
-## O que é este módulo?
+## Como funciona
 
-O **AMS SOFT Fail2Ban Manager** transforma o fail2ban em uma ferramenta visual e inteligente dentro do próprio WHMCS. Em vez de gerenciar segurança via SSH, você tem um painel completo com gráficos em tempo real, controle de IPs e jails por botão, análise de logs por Inteligência Artificial e relatórios exportáveis — tudo acessível pelo admin do WHMCS, sem instalar nada extra no navegador.
+O Fail2Ban atende primeiro os vetores cobertos pelas regras nativas. A IA complementa essa proteção com análise de comportamentos e propostas fundamentadas em evidências individuais. O cron do WHMCS executa a automação; não é necessário manter o painel aberto.
 
-A IA integrada suporta **múltiplos provedores** — Anthropic (Claude), MiMo (Xiaomi) e qualquer provedor OpenAI-compatible. Você escolhe qual usar na tela de configurações. A IA não apenas sugere banir um IP suspeito: ela lê as linhas de log, identifica o **padrão** do ataque e cria automaticamente um filtro fail2ban (`failregex`) para que qualquer futuro IP que use o mesmo vetor seja bloqueado de forma autônoma — sem intervenção humana.
+- **Sondagem nativa:** catálogo de assinaturas específicas, incluindo `.env`, Git, traversal e grupos opcionais de aplicações. Tentativas, janela e duração do ban são ajustáveis. Habilite apenas grupos incompatíveis com o uso legítimo dos sites monitorados.
+- **IA:** provedores Anthropic, OpenAI e MiMo, com modos, confirmação de automação, confiança mínima, limites de consumo e orçamento de ciclo. Receber uma sugestão não significa que o IP foi bloqueado.
+- **Validação:** a decisão precisa cumprir política, whitelist, recência, origem e prova individual. Cobertura de firewall é diferente de existir um ticket de ban.
+- **Economia de tokens:** IPs com cobertura comprovada e whitelist são retirados dos candidatos; há rechecagem antes do envio ao provedor. Cobertura desconhecida não é tratada como proteção confirmada.
+- **Aprendizado:** propostas de filtros passam por critérios próprios e validação nativa. Não é criado um filtro automaticamente apenas porque vários IPs acessaram a mesma URL.
+- **Painel:** dashboard, IPs, jails, caminhos de logs, relatórios, visualizador, decisões da IA, configurações e proteção adaptativa.
 
-## Capturas de Tela
+O ban nativo é assíncrono: a requisição que gera o log pode receber resposta antes do bloqueio. Um `404`, User-Agent automatizado ou rota legítima, isoladamente, não comprova ataque. Uma rota legítima também não torna um payload ofensivo inofensivo.
 
-**Dashboard**
+## Requisitos e limites de implantação
 
-![Dashboard](docs/screenshots/01.png)
-![Dashboard — alertas da IA](docs/screenshots/02.png)
+- WHMCS 8+, PHP 8.1+ e suas dependências usuais.
+- Linux com Fail2Ban, Python 3, sudo e acesso administrativo ao servidor.
+- Os exemplos usam Debian/Ubuntu, Apache, `www-data` e `/var/www/html/whmcs`. Adapte-os ao ambiente.
+- A verificação de cobertura depende das ações e do backend de firewall suportados pelo código; configurações não reconhecidas devem permanecer como desconhecidas.
+- Os caminhos de logs permitidos e alguns pares de access/error log são explícitos no código e na ponte. Uma implantação com nomes diferentes exige adaptação e testes, não apenas cadastro no visualizador.
+- Reverse proxy/CDN requer configuração correta e confiável do IP de origem. Não confie indiscriminadamente em cabeçalhos fornecidos pelo cliente.
 
-**IPs Banidos**
+Este repositório distribui código, esquema de referência, testes e exemplos. Não contém banco WHMCS, chaves de API, configuração do servidor, logs reais, listas de ban, backups ou relatórios internos. Exemplos específicos foram substituídos por endereços fictícios; não são configurações prontas para o seu servidor.
 
-| Lista de IPs | Ban manual |
-|---|---|
-| ![IPs Banidos](docs/screenshots/03.png) | ![Banir IP](docs/screenshots/04.png) |
+## Instalação e atualização
 
-**Jails**
+Faça backup **privado** do banco, módulo e configuração Fail2Ban. Planeje atualização em janela controlada; não sobrescreva `jail.local`, whitelist ou regras existentes com exemplos deste repositório.
 
-| Lista de Jails | Criar novo Jail |
-|---|---|
-| ![Jails](docs/screenshots/05.png) | ![Novo Jail](docs/screenshots/06.png) |
-
-**Log Paths · Relatórios · Log Viewer**
-
-| Log Paths | Relatórios | Log Viewer |
-|---|---|---|
-| ![Log Paths](docs/screenshots/07.png) | ![Relatórios](docs/screenshots/08.png) | ![Log Viewer](docs/screenshots/09.png) |
-
-**IA — Análise e Sugestões (Multi-Provider)**
-
-![Sugestões aguardando aprovação](docs/screenshots/10.png)
-![Histórico de sugestões](docs/screenshots/11.png)
-
-| Configurações da IA | Prompt personalizado |
-|---|---|
-| ![Configurações IA](docs/screenshots/12.png) | ![Prompt](docs/screenshots/13.png) |
-
----
-
-## ⚠️ Aviso — Módulo em Construção
-
-Este módulo ainda está sendo desenvolvido e pode conter falhas ou precisar de ajustes. Ele está aberto ao público no GitHub para que a comunidade possa contribuir e ajudá-lo a melhorar cada vez mais. Pull requests, issues e sugestões são muito bem-vindos!
-
-## Funcionalidades
-
-- **Dashboard** com 4 KPIs em tempo real: IPs banidos agora, bans nas últimas 24h, jails ativos e último ban
-- **Gráficos interativos** Chart.js: linha (evolução dos últimos 7 dias) + barra horizontal (Top 10 IPs mais bloqueados)
-- **IPs Banidos** — lista ao vivo com ban/unban por botão, sem terminal
-- **Gerenciamento de Jails** — habilitar/desabilitar e editar parâmetros (maxretry, findtime, bantime) pelo painel
-- **Log Paths** — mapeamento de logs por jail com validação AJAX inline (✓/✗)
-- **Log Viewer** — visualização dos logs de ataque direto no painel, com auto-descoberta de arquivos
-- **Relatórios** — paginados com filtros e exportação CSV (UTF-8 BOM, compatível com Excel)
-- **Hook automático** — captura falhas de login de clientes e admins no WHMCS e alimenta o fail2ban automaticamente
-- **IA Multi-Provider (Anthropic, MiMo/Xiaomi):**
-  - Múltiplos provedores de IA com seletor na interface — escolha Anthropic (Claude) ou MiMo (Xiaomi)
-  - Analisa linhas de log e identifica ameaças com nível de severidade e confiança
-  - Sugere banimento de IPs suspeitos com um clique
-  - Gera `failregex` (padrão de ataque) e cria filtro + jail no fail2ban automaticamente
-  - Para sugestões antigas sem `failregex`, a IA gera o filtro on-demand a partir das evidências armazenadas
-  - Tudo sem acessar o terminal
-
-## Requisitos
-
-- WHMCS 8+
-- PHP 8.1+
-- Debian/Ubuntu (testado; outros distros podem precisar de ajuste de paths)
-- fail2ban instalado
-- sudo instalado
-- Usuário do servidor web: `www-data` (padrão Nginx/Apache no Debian/Ubuntu)
-
----
-
-## Instalação Completa (Passo a Passo)
-
-> ⚠️ **Importante:** copie o módulo para o servidor **antes** de executar os passos de configuração do sistema — os arquivos de setup estão dentro da pasta do módulo.
-
-### Passo 1 — Instalar fail2ban e sudo
+1. Copie o conteúdo para `modules/addons/amssoft_fail2ban` dentro do WHMCS, sem `.git` e sem artefatos locais. Mantenha o código sob controle administrativo; permita escrita web somente onde o funcionamento exigir, como os locks de runtime.
+2. Bloqueie acesso HTTP aos diretórios internos. Há `.htaccess` e um exemplo de configuração de servidor em `setup/apache/amssoft_fail2ban.conf`. Com `AllowOverride None` ou Nginx, a proteção precisa ser configurada no servidor. Confira também a negação a dotfiles, backups, testes e scripts.
+3. Instale a ponte privilegiada e suas dependências, como root, antes de ativar os consumidores desta versão. Para o caminho de exemplo:
 
 ```bash
-apt-get update
-apt-get install -y fail2ban sudo
+install -d -o root -g root -m 0755 /usr/local/lib/amssoft_fail2ban
+install -o root -g root -m 0755 /var/www/html/whmcs/modules/addons/amssoft_fail2ban/scripts/audit.py /usr/local/lib/amssoft_fail2ban/audit.py
+install -o root -g root -m 0644 /var/www/html/whmcs/modules/addons/amssoft_fail2ban/scripts/firewall_state.py /usr/local/lib/amssoft_fail2ban/firewall_state.py
+install -o root -g root -m 0755 /var/www/html/whmcs/modules/addons/amssoft_fail2ban/setup/amsfb-admin /usr/local/sbin/amsfb-admin
 ```
 
-> Em muitas imagens de VPS e containers o **sudo** e o **fail2ban** não estão instalados por padrão.
+4. Revise `setup/sudoers/amssoft_fail2ban`, ajuste o usuário web se necessário e valide com `visudo -cf` antes de instalar uma cópia root:root, modo `0440`, em `/etc/sudoers.d/amssoft_fail2ban`. Execute `visudo -c` após a instalação. Não conceda escrita web em `/etc/fail2ban` nem comandos sudo genéricos de cópia, shell ou alteração de permissões.
+5. Revise `setup/fail2ban/filter.d/whmcs.conf` e `setup/fail2ban/jail.whmcs.conf` antes de incorporar a configuração ao Fail2Ban. Prepare o log de autenticação com permissões adequadas. Valide com `fail2ban-client -t`; qualquer reload deve preservar as regras e bans existentes.
+6. Ative o addon e configure o acesso administrativo no WHMCS. Na atualização, execute as migrações pelo fluxo suportado; o comando administrativo é `php modules/addons/amssoft_fail2ban/scripts/runtime.php migrate`, a partir da raiz do WHMCS, como root. Migrações alteram o banco: não são um teste de leitura. O esquema SQL de referência não substitui as migrações.
+7. Confira o cron do WHMCS, permissões de leitura/coleta, fontes e estado da ponte. A tela de Log Paths não ativa coleta ou jails por si só. Verifique também os logs dos redirecionamentos HTTP, não apenas HTTPS.
+8. Configure provedor e chave pela UI, revise whitelist e políticas e só então confirme a automação desejada. Instalar este repositório não transfere as configurações nem habilita automaticamente a operação de outra instalação.
 
-### Passo 2 — Copiar o módulo para a pasta correta
+Os arquivos em `setup/rsyslog` são exemplos opcionais. O destino `graylog.example.invalid` é fictício e deve ser substituído antes de qualquer uso. Não habilite envio de logs a terceiros sem revisar destino e conteúdo.
+
+## Ajustes pela interface
+
+Em **Proteção**, revise grupos de sondagem, critérios comportamentais, recência, limites de fila/ciclo, aprendizado e manutenção. Em **Configurações da IA**, configure provedor, credenciais, whitelist e prompt. A prévia local do prompt não chama o provedor; o teste de conexão pode consumir tokens e exige confirmação.
+
+Na análise de manipulação de query, a janela de repetição é separada da idade máxima da evidência. Os padrões são três eventos em cinco minutos e prazo de decisão de trinta minutos, limitado pela atividade recente global. Esses limites não substituem a classificação ofensiva e a validação individual. Intervalo, orçamento, coleta e fila podem fazer uma evidência vencer antes da decisão.
+
+Limpeza, desbloqueio e monitoramento são ações administrativas explícitas. Não execute manutenção apenas para zerar indicadores. Histórico de decisões e contadores de eventos não equivalem a bans ativos.
+
+## Testes
+
+Exemplos de suítes locais sem bootstrap do WHMCS, banco ou chamadas ao provedor:
 
 ```bash
-cp -r amssoft_fail2ban /var/www/html/modules/addons/
+php tests/query_probe.php
+php tests/policy.php
+php tests/protection_view.php
+php tests/ai_settings.php
+node tests/protection_ui.js
+node tests/ai_settings_ui.js
+PYTHONDONTWRITEBYTECODE=1 python3 -m unittest discover -s tests -p 'test_*.py'
 ```
 
-### Passo 3 — Ajustar permissões da pasta do módulo
+Os testes Python precisam dos módulos Python do Fail2Ban. Use o interpretador compatível com a instalação da distribuição. Os testes JavaScript precisam de Node.js; ele não é necessário para servir o módulo.
 
-```bash
-chown -R www-data:www-data /var/www/html/modules/addons/amssoft_fail2ban/
-find /var/www/html/modules/addons/amssoft_fail2ban/ -type d -exec chmod 755 {} \;
-find /var/www/html/modules/addons/amssoft_fail2ban/ -type f -exec chmod 644 {} \;
-```
+**Não execute todos os arquivos de `tests/` ou `scripts/` indiscriminadamente em produção.** Há testes de integração que acessam banco, namespaces/firewall ou HTTP e comandos de manutenção que alteram estado. Use ambiente descartável e revise cada entrada. Scripts legados de reparo não fazem parte da instalação normal; a seleção de IDs auditados de uma instalação foi removida da distribuição pública e exige preparação local explícita.
 
-> **Nota sobre `data/locks/`:** O módulo usa um diretório `data/locks/` para lock files de concorrência (cron vs. painel). Ele é criado automaticamente ao ativar o módulo com permissão `2770` (setgid). **Não é necessário `chown root:www-data`** — o mecanismo de setgid funciona mesmo com `www-data:www-data`. Se o seu cron roda como o mesmo usuário do site (comum em hospedagem compartilhada), nenhum ajuste extra é necessário.
+## Segurança e publicação
 
-### Passo 4 — Configurar o sudoers (permite www-data chamar fail2ban-client sem senha)
+Consulte [SECURITY.md](SECURITY.md) antes de compartilhar diagnósticos, screenshots ou dumps. O `.gitignore` é uma proteção auxiliar, não uma garantia contra publicação de segredos já rastreados.
 
-```bash
-cp /var/www/html/modules/addons/amssoft_fail2ban/setup/sudoers/amssoft_fail2ban \
-   /etc/sudoers.d/amssoft_fail2ban
-chmod 0440 /etc/sudoers.d/amssoft_fail2ban
-visudo -c   # valida a sintaxe antes de aplicar
-```
+O resumo público das mudanças está em [CHANGELOG.md](CHANGELOG.md). PRDs operacionais e evidências reais ficam fora desta distribuição.
 
-> O arquivo concede `NOPASSWD` apenas para os subcomandos necessários do `fail2ban-client` e inclui `Defaults:www-data !requiretty`, necessário para execução via servidor web.
->
-> Verifique se `/etc/sudoers` contém a linha `@includedir /etc/sudoers.d` (presente por padrão no Debian/Ubuntu).
+## Contribuições e licença
 
-### Passo 5 — Instalar o filtro fail2ban para WHMCS
+Abra issues com reprodução mínima e dados fictícios, sem credenciais ou registros de clientes. Para problemas que revelem dados sensíveis, não use uma issue pública.
 
-```bash
-cp /var/www/html/modules/addons/amssoft_fail2ban/setup/fail2ban/filter.d/whmcs.conf \
-   /etc/fail2ban/filter.d/whmcs.conf
-```
-
-### Passo 6 — Configurar o jail.local
-
-Crie ou substitua o `/etc/fail2ban/jail.local` com o conteúdo abaixo.
-
-> ⚠️ Em Debian 12+ o `/var/log/auth.log` não existe (o sistema usa journald). O jail `[sshd]` padrão falha ao iniciar caso não seja desabilitado explicitamente.
-
-```bash
-cat > /etc/fail2ban/jail.local << 'EOF'
-# Desabilita o jail sshd padrão (sem /var/log/auth.log no Debian 12+/journald)
-[sshd]
-enabled = false
-
-# Jail para falhas de login no WHMCS
-[whmcs]
-enabled  = true
-filter   = whmcs
-logpath  = /var/log/whmcs_auth.log
-maxretry = 5
-findtime = 600
-bantime  = 3600
-EOF
-```
-
-### Passo 7 — Ajustar permissões do jail.local
-
-O painel do WHMCS (processo `www-data`) precisa ter permissão de **escrita** no `jail.local` para criar, editar e remover jails pela interface gráfica.
-
-```bash
-# fail2ban — www-data precisa ler e escrever o jail.local
-chown root:www-data /etc/fail2ban/jail.local
-chmod 664 /etc/fail2ban/jail.local
-chown root:www-data /etc/fail2ban
-chmod 750 /etc/fail2ban
-
-# diretório apache2
-chown root:www-data /var/log/apache2
-chmod 750 /var/log/apache2
-
-# logs do sistema — mantém padrão, www-data não precisa
-chown root:adm /var/log/apache2/*.log
-chmod 640 /var/log/apache2/*.log
-
-# logs whmcs — www-data precisa ler
-chown root:www-data /var/log/apache2/*whmcs*.log
-chmod 640 /var/log/apache2/*whmcs*.log
-
-# alguns logs apache2
-chown root:www-data /var/log/apache2/access.log
-chown root:www-data /var/log/apache2/error.log
-chmod 640 /var/log/apache2/access.log
-chmod 640 /var/log/apache2/error.log
-
-# log de auth do módulo — www-data precisa escrever e ler
-touch /var/log/whmcs_auth.log
-chown www-data:www-data /var/log/whmcs_auth.log
-chmod 640 /var/log/whmcs_auth.log
-```
-
-> ⚠️ Sem este passo, todas as operações de escrita (criar jail, editar parâmetros, remover jail) falharão com a mensagem "Erro ao criar jail".
-
-### Passo 8 — Criar o arquivo de log do WHMCS
-
-```bash
-touch /var/log/whmcs_auth.log
-chown www-data:www-data /var/log/whmcs_auth.log
-chmod 664 /var/log/whmcs_auth.log
-```
-
-### Passo 9 — Reiniciar o fail2ban e verificar
-
-```bash
-systemctl restart fail2ban
-systemctl status fail2ban
-fail2ban-client status whmcs   # deve mostrar o jail ativo com 0 IPs banidos
-```
-
----
-
-## Atualização de versão anterior
-
-Se você já tinha o módulo instalado, re-aplique o arquivo de sudoers para garantir que todas as regras estejam presentes (a v3 adicionou permissões para criação de filtros pela IA):
-
-```bash
-cp /var/www/html/modules/addons/amssoft_fail2ban/setup/sudoers/amssoft_fail2ban \
-   /etc/sudoers.d/amssoft_fail2ban
-chmod 0440 /etc/sudoers.d/amssoft_fail2ban
-visudo -c
-```
-
-> O módulo exibe um aviso no topo de todas as páginas caso o sudo não esteja funcionando corretamente.
-
----
-
-## Ativar o módulo no painel do WHMCS
-
-### Passo 10 — Ativar e configurar
-
-- Acesse **Admin → Configurações → Módulos Addon**
-- Localize **AMS SOFT Fail2Ban Manager** e clique em **Ativar**
-- Em **Configurar**, preencha:
-
-| Campo | Valor padrão |
-|---|---|
-| Caminho do sudo | `/usr/bin/sudo` |
-| Caminho do fail2ban-client | `/usr/bin/fail2ban-client` |
-| Caminho do jail.local | `/etc/fail2ban/jail.local` |
-| Caminho do log WHMCS | `/var/log/whmcs_auth.log` |
-| Ativar hooks de login | Sim (recomendado) |
-
-### Passo 11 — Acessar o módulo
-
-```
-https://seu-whmcs.com/admin/addonmodules.php?module=amssoft_fail2ban
-```
-
----
-
-## Proteção do diretório `data/`
-
-O módulo usa `data/` para armazenar lock files de concorrência. Esse diretório **não deve ser acessível via HTTP**.
-
-### Apache (padrão)
-
-O módulo cria automaticamente `data/.htaccess` com `Deny from all` durante a ativação. Se o `.htaccess` não funcionar (AllowOverride desativado), adicione no vhost:
-
-```apache
-<Directory "/var/www/html/modules/addons/amssoft_fail2ban/data">
-    Require all denied
-</Directory>
-```
-
-### Nginx
-
-O Nginx **não lê `.htaccess`**. Adicione este bloco no `server {}` do seu vhost, **antes** do `location ~ \.php$`:
-
-```nginx
-location ~* /modules/addons/amssoft_fail2ban/data/ {
-    deny all;
-    return 404;
-}
-```
-
-> Em hospedagem compartilhada com cPanel/Plesk, o acesso a `data/` geralmente já é bloqueado pelo servidor web da plataforma. Verifique com seu provedor se tem dúvida.
-
----
-
-## Hospedagem compartilhada (cron como o mesmo usuário do site)
-
-Em muitas hospedagens compartilhadas, o cron roda como o **mesmo usuário** do site (não como `root`). Nesse caso, **nenhum ajuste de permissão é necessário** — o lock file é criado e lido pelo mesmo usuário, sem conflito.
-
-O problema de permissão de lock só ocorre quando:
-- O cron roda como **root** (VPS/dedicado com crontab em root)
-- O site roda como **www-data** (Apache padrão)
-
-Nessa configuração, o módulo usa `setgid` no diretório `data/locks/` para garantir que ambos os processos consigam acessar os lock files. O `activate()` configura isso automaticamente.
-
----
-
-## Problemas Conhecidos e Soluções
-
-| Problema | Solução |
-|---|---|
-| `sudo` não instalado | `apt-get install -y sudo` |
-| `fail2ban` não instalado | `apt-get install -y fail2ban` |
-| fail2ban não inicia (jail sshd sem log) | Adicionar `[sshd]` com `enabled = false` ao `jail.local` |
-| www-data não consegue usar sudo | Verificar `/etc/sudoers.d/amssoft_fail2ban`: `chmod 0440` e `visudo -c` |
-| Arquivo de log WHMCS não existe | `touch /var/log/whmcs_auth.log && chown www-data:www-data /var/log/whmcs_auth.log` |
-| fail2ban aparece offline no dashboard | Conferir os paths em **Configurar** no painel do WHMCS |
-| "Erro ao criar/editar/remover jail" | Executar: `chown root:www-data /etc/fail2ban/jail.local && chmod 664 /etc/fail2ban/jail.local` |
-| "Falha ao criar arquivo de filtro" (botão Criar Filtro da IA) | Sudoers desatualizado — re-aplicar conforme seção **Atualização de versão anterior** |
-| Aviso amarelo "sudoers desatualizado" no painel | Idem acima — o módulo detectou automaticamente que faltam regras de `cp`/`chmod` |
-
----
-
-## Estrutura de Arquivos
-
-```
-amssoft_fail2ban/
-├── amssoft_fail2ban.php      # Entry point WHMCS (5 funções obrigatórias)
-├── hooks.php                  # Hook de captura de falhas de login
-├── lib/                       # Núcleo: Router, Fail2BanClient, JailConfig, Database, Helper, LogParser
-│   ├── AIAnalyzer.php         # Integração multi-provider IA (Anthropic, MiMo) — análise de logs e geração de failregex
-│   └── FilterManager.php      # Criação de filtros e jails fail2ban gerados pela IA
-├── controllers/               # Controllers MVC
-├── templates/                 # Templates PHP (sem Smarty)
-├── assets/                    # CSS, JS e Chart.js embutido (sem CDN externo)
-├── setup/                     # Configs prontas: sudoers + filtro e jail do fail2ban
-└── sql/                       # install.sql / uninstall.sql (referência; execução via activate())
-```
-
----
-
-## Comunidade e Contribuições
-
-Este módulo foi recém-lançado e pode conter falhas ou comportamentos inesperados. Se você encontrar algum problema, erro ou tiver uma sugestão de melhoria, por favor abra uma **Issue** aqui no GitHub descrevendo o que aconteceu.
-
-O módulo está aberto ao público justamente para que a comunidade WHMCS possa colaborar, testar em diferentes ambientes e ajudar a aperfeiçoá-lo. Toda contribuição — seja um relatório de bug, uma correção ou uma nova funcionalidade — é muito bem-vinda!
-
----
-
-## Licença
-
-MIT — use, modifique e distribua livremente. Pedimos apenas que mantenha os créditos: **AMS SOFT** — [www.amssoft.com.br](https://www.amssoft.com.br)
-
----
-
-## Apoie o Projeto ☕
-
-Este módulo é gratuito e de código aberto. Se ele te ajudou a economizar tempo ou proteger melhor o seu servidor, considere fazer uma doação de qualquer valor para ajudar a manter o projeto vivo, financiar melhorias e novas funcionalidades.
-
-Toda contribuição, por menor que seja, faz diferença. Muito obrigado! 🙏
-
-| Método | Link |
-|---|---|
-| Mercado Pago | [Clique aqui para doar via Mercado Pago](https://www.mercadopago.com.br/subscriptions/checkout?preapproval_plan_id=95add4219a6b47f286b1405a51a39b7b) |
-| PayPal | [Clique aqui para doar via PayPal](https://www.paypal.com/ncp/payment/UZQBBQ4BQ89UQ) |
+Licença MIT, conforme a declaração já existente no projeto. Mantenha os créditos **AMS SOFT** — [www.amssoft.com.br](https://www.amssoft.com.br).

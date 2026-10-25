@@ -1,156 +1,32 @@
 <?php
 namespace AMS\Fail2Ban\Controllers;
-
-use AMS\Fail2Ban\Database;
-use AMS\Fail2Ban\GeoIP;
-use AMS\Fail2Ban\Helper;
-use AMS\Fail2Ban\Router;
-
+use AMS\Fail2Ban\{Helper,ReportHistory,Router};
 class ReportsController
 {
-    private array  $vars;
-    private Router $router;
-
-    public function __construct(array $vars, Router $router)
-    {
-        $this->vars   = $vars;
-        $this->router = $router;
-    }
-
+    public function __construct(private array $vars,private Router $router) {}
     public function handle(string $action): string
     {
-        $do = $_GET['do'] ?? '';
-
-        if ($do === 'export_csv') {
-            $this->exportCsv();
-            return ''; // unreachable
+        Helper::requireAdmin();$error=null;$do=$_GET['do']??'';
+        if(($_SERVER['REQUEST_METHOD']??'GET')!=='GET')$error='Relatórios aceitam somente consultas GET; nenhuma alteração foi feita.';
+        elseif(!is_string($do)||!in_array($do,['','export_csv'],true))$error='Ação de relatório desconhecida.';
+        elseif($do==='export_csv'){
+            try{$csv=ReportHistory::csv($_GET);return $this->download($csv);}
+            catch(\InvalidArgumentException $e){$error=$e->getMessage();}
+            catch(\Throwable $e){$error='Exportação não concluída. Verifique a disponibilidade do histórico e tente novamente; nenhum CSV parcial foi enviado.';}
         }
-
-        return $this->showReports();
+        $view=ReportHistory::read($_GET);
+        if($error){$view['errors'][]=$error;$view['exportable']=false;}
+        return $this->router->render('reports_overview',['view'=>$view]);
     }
-
-    // -----------------------------------------------------------------------
-    // CSV export — outputs directly and exits
-    // -----------------------------------------------------------------------
-
-    private function exportCsv(): void
+    protected function download(array $csv): string
     {
-        $filters = $this->collectFilters();
-        $rows    = Database::searchHistory($filters)->all();
-
-        // GeoIP: lookup de todos os IPs do CSV (sem paginação)
-        $geoData = [];
-        try {
-            $allIps = array_unique(array_column($rows, 'ip'));
-            $geoData = GeoIP::bulkLookup($allIps);
-        } catch (\Throwable $e) {
-            // GeoIP indisponível — segue sem dados geo
-        }
-
-        // Clear any buffered WHMCS output
-        while (ob_get_level() > 0) {
-            ob_end_clean();
-        }
-
+        if(headers_sent()){fclose($csv['stream']);throw new \RuntimeException('Headers already sent');}
+        while(ob_get_level()>0){if(!ob_end_clean()){fclose($csv['stream']);throw new \RuntimeException('Output buffer unavailable');}}
         header('Content-Type: text/csv; charset=UTF-8');
-        header('Content-Disposition: attachment; filename="fail2ban_report_' . date('Ymd_His') . '.csv"');
-        header('Pragma: no-cache');
-        header('Expires: 0');
-
-        $fh = fopen('php://output', 'w');
-        if ($fh === false) {
-            exit;
-        }
-
-        // UTF-8 BOM (for Excel compatibility)
-        fputs($fh, "\xEF\xBB\xBF");
-
-        // Header row
-        fputcsv($fh, ['timestamp', 'ip', 'jail', 'action', 'reason', 'admin_id', 'country', 'region', 'isp', 'asn']);
-
-        foreach ($rows as $row) {
-            $ip  = $row['ip'] ?? '';
-            $geo = $geoData[$ip] ?? null;
-            fputcsv($fh, [
-                $row['timestamp']       ?? '',
-                $ip,
-                $row['jail']            ?? '',
-                $row['action']          ?? '',
-                $row['reason']          ?? '',
-                $row['admin_id']        ?? '',
-                $geo['country']         ?? '',
-                $geo['region']          ?? '',
-                $geo['isp']             ?? '',
-                $geo['asn']             ?? '',
-            ]);
-        }
-
-        fclose($fh);
-        exit;
-    }
-
-    // -----------------------------------------------------------------------
-    // Show reports page
-    // -----------------------------------------------------------------------
-
-    private function showReports(): string
-    {
-        $filters   = $this->collectFilters();
-        $page      = max(1, (int)($_GET['page'] ?? 1));
-        $result    = [];
-        $jailsList = [];
-
-        try {
-            $result    = Database::searchHistoryPaged($filters, $page, 10);
-            $jailsList = Database::getKnownJails();
-        } catch (\Throwable $e) {
-            $result = ['data' => [], 'total' => 0, 'pages' => 0, 'page' => 1];
-        }
-
-        // GeoIP: lookup apenas dos IPs visíveis na página atual
-        $geoData = [];
-        try {
-            $visibleIps = array_column($result['data'], 'ip');
-            $geoData    = GeoIP::bulkLookup($visibleIps);
-        } catch (\Throwable $e) {
-            // GeoIP indisponível — segue sem dados geo
-        }
-
-        return $this->router->render('reports', [
-            'rows'      => $result['data'],
-            'total'     => $result['total'],
-            'pages'     => $result['pages'],
-            'page'      => $result['page'],
-            'filters'   => $filters,
-            'jails'     => $jailsList,
-            'actions'   => ['ban', 'unban', 'manual_ban', 'manual_unban'],
-            'geo_data'  => $geoData,
-        ]);
-    }
-
-    // -----------------------------------------------------------------------
-    // Helpers
-    // -----------------------------------------------------------------------
-
-    private function collectFilters(): array
-    {
-        return [
-            'date_from' => $this->sanitizeDate($_GET['date_from'] ?? ''),
-            'date_to'   => $this->sanitizeDate($_GET['date_to']   ?? ''),
-            'ip'        => Helper::sanitizeIp($_GET['ip'] ?? '') ?? '',
-            'jail'      => Helper::sanitizeJail($_GET['jail'] ?? ''),
-            'action'    => $this->sanitizeAction($_GET['action_filter'] ?? ''),
-        ];
-    }
-
-    private function sanitizeDate(string $d): string
-    {
-        return preg_match('/^\d{4}-\d{2}-\d{2}$/', $d) ? $d : '';
-    }
-
-    private function sanitizeAction(string $a): string
-    {
-        $valid = ['ban', 'unban', 'manual_ban', 'manual_unban'];
-        return in_array($a, $valid, true) ? $a : '';
+        header('Content-Disposition: attachment; filename="fail2ban_report_'.date('Ymd_His').'.csv"');
+        header('Cache-Control: private, no-store, max-age=0');header('Pragma: no-cache');header('X-Content-Type-Options: nosniff');
+        header('X-Report-Rows: '.$csv['rows']);header('X-GeoIP-Source: local-cache-only');
+        if(session_status()===PHP_SESSION_ACTIVE)session_write_close();
+        fpassthru($csv['stream']);fclose($csv['stream']);exit;
     }
 }

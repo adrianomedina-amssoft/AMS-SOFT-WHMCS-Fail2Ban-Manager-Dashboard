@@ -1,0 +1,12 @@
+Synthetic legacy migration fixture; not instructions for a real provider.
+Legacy escaped marker: &amp;amp;lt;HOST&amp;amp;gt;
+Literal sample routes:
+/clientarea.php
+/index.php?rp=/login
+/graylog
+/retired-page
+/example-service
+/example-service
+/admin-custom/clientsservices.php
+LOGS:
+{logs}

@@ -1,11 +1,14 @@
 <?php
 namespace AMS\Fail2Ban;
+require_once __DIR__.'/DecisionProtection.php';
+require_once __DIR__.'/AnalysisPrompt.php';
+require_once __DIR__.'/RequestEvidence.php';
 
 /**
  * AIAnalyzer — integração multi-provider com APIs de IA para análise de logs.
  *
- * Providers suportados: Anthropic (Claude), MiMo (Xiaomi) e qualquer
- * provedor OpenAI-compatible futuro.
+ * Providers suportados: Anthropic (Claude), MiMo (Xiaomi), OpenAI oficial
+ * via Responses API e qualquer provedor OpenAI-compatible futuro.
  *
  * Segurança:
  * - Chave API nunca é logada ou impressa em HTML
@@ -15,10 +18,55 @@ namespace AMS\Fail2Ban;
  */
 class AIAnalyzer
 {
+    // Change only when a corrective prompt/analyser release warrants another bounded round.
+    public const RECOVERY_GENERATION = 'regex-v229-1';
+    private int $requestTimeout=90;
+    private bool $budgetLimitedRequest=false;
+    private array $lastUsage=[];
+    private ?\Closure $requestStart=null;
+    private array $admissionLines=[];
+
+    public function setRequestStart(?\Closure $callback): void { $this->requestStart=$callback; }
+    protected function requestStarting(): void
+    {
+        if(DecisionProtection::enabled()&&$this->admissionLines)DecisionProtection::assertLines($this->admissionLines);
+        $callback=$this->requestStart;$this->requestStart=null;
+        if($callback)$callback();
+    }
+
+    public function setRequestTimeout(int $seconds): void { $this->requestTimeout=max(1,min(90,$seconds)); }
+    public function usage(): array { return $this->lastUsage; }
+
+    public function analyzeSubjects(array $lines,array $context): array
+    {
+        $this->lastUsage=[];
+        if(DecisionProtection::enabled()){
+            $lines=DecisionProtection::filterLines($lines);
+            $context=array_intersect_key($context,array_fill_keys(array_filter(array_map(fn($l)=>Safety::sourceIp($l),$lines)),true));
+            $this->admissionLines=$lines;if(!$lines)return [];
+        }
+        $this->lastUsage=[];
+        $parts=$this->buildPrompt($lines);
+        if((int)Database::getConfig('schema_version','0')>=20 && $lines) {
+            $file=tempnam('/tmp','amsfb_evidence_');
+            try {
+                if($file===false||file_put_contents($file,json_encode(array_values($lines),JSON_INVALID_UTF8_SUBSTITUTE))===false)
+                    throw new \RuntimeException('Preparação de evidência indisponível.');
+                $prepared=Privileged::run(['prepare-evidence',$file]);
+                if(empty($prepared['success']))throw new \RuntimeException('Preparação nativa da evidência recusada.');
+                $parts['user'].="\nContexto de regex não citável, por SHA256 da linha original: ".json_encode($prepared['lines'],JSON_INVALID_UTF8_SUBSTITUTE);
+            } finally {if($file!==false)@unlink($file);}
+        }
+        $parts['user'].="\nContexto agregado não confiável: ".json_encode($context,JSON_INVALID_UTF8_SUBSTITUTE);
+        $response=$this->callApi($parts['user'],$parts['system'],'analysis');
+        if($response===null) throw new \RuntimeException('Provedor não retornou análise válida.');
+        return $this->parseResponse($response);
+    }
     private string $provider;
     private string $apiKey;
     private string $model;
     private string $baseUrl;
+    private string $reasoningEffort;
 
     // -----------------------------------------------------------------------
     // Registry de provedores — dispatch por protocolo, não por nome
@@ -27,7 +75,7 @@ class AIAnalyzer
     /**
      * Cada provedor define:
      *   label           — nome amigável
-     *   protocol        — 'anthropic' ou 'openai' (determina o formato da chamada)
+     *   protocol        — 'anthropic', 'openai' ou 'openai_responses'
      *   default_base_url— endpoint padrão
      *   default_model   — modelo padrão
      *   models          — modelos disponíveis
@@ -63,72 +111,33 @@ class AIAnalyzer
             'max_tokens'       => 4096,  // MiMo: manter 4096 até confirmar suporte a 8192
             'disable_thinking' => true,  // desativar deep thinking (consome tokens sem resposta útil)
         ],
+        'openai' => [
+            'label'                    => 'OpenAI',
+            'protocol'                 => 'openai_responses',
+            'default_base_url'         => 'https://api.openai.com/v1/responses',
+            'default_model'            => 'gpt-5.6-luna',
+            'models'                   => [
+                'gpt-5.6-luna'  => 'GPT-5.6 Luna (econômico)',
+                'gpt-5.6-terra' => 'GPT-5.6 Terra (equilíbrio)',
+                'gpt-5.6-sol'   => 'GPT-5.6 Sol (máximo desempenho)',
+            ],
+            'needs_base_url'           => false,
+            'max_tokens'               => 16384,
+            'reasoning_efforts'        => [
+                'none'   => 'Sem raciocínio adicional',
+                'low'    => 'Leve',
+                'medium' => 'Equilibrado',
+                'high'   => 'Profundo',
+                'xhigh'  => 'Muito profundo',
+                'max'    => 'Máximo',
+            ],
+            'default_reasoning_effort' => 'low',
+        ],
     ];
 
-    /** Prompt padrão. Pode ser sobrescrito pelo banco. */
-    private const DEFAULT_PROMPT = 'Você é um especialista em segurança de servidores Linux.
-Analise as seguintes linhas de log do Apache/fail2ban e identifique ameaças.
-
-Para cada ameaça encontrada, retorne APENAS um JSON array com os campos:
-ip, threat, severity (low|medium|high|critical), confidence (0-100),
-evidence (array de linhas relevantes), action (ban|monitor|whitelist),
-jail, bantime (segundos), reason (em português), suggested_rule (jail.local entry),
-filter_name (string curto [a-z0-9-] max 50 chars — NOME DO TIPO de ataque, nao do IP),
-failregex (regex fail2ban usando <HOST> no lugar do IP, compativel com Python re module,
-           ex: "^.* \\[client <HOST>:\\d+\\] AH01630:.*wp-.*\\.php").
-           Para multiplos padroes, separe com \\n. NUNCA junte padroes com | quando cada um tem <HOST>.
-
-Regras para filter_name e failregex:
-- filter_name: apenas letras minusculas, numeros e hifens
-- filter_name deve descrever o TIPO de ataque, nao o IP. Exemplos:
-  - "apache-scan" para qualquer scanning de paths (wp-admin, phpmyadmin, .env, etc.)
-  - "wordpress-probe" para deteccao de WordPress (wp-includes, wp-content, wlwmanifest)
-  - "rce-injection" para tentativas de Remote Code Execution (wget, curl, chmod via CGI)
-  - "brute-force-login" para multiplas tentativas de senha
-  - "sql-injection" para tentativas de SQL injection
-  - "cart-injection" para injecao em carrinho/checkout
-  - "git-probe" para deteccao de .git exposto
-  - "sensitive-files" para acesso a arquivos sensiveis (.env, .git, backup)
-  - "api-abuse" para abuso de endpoints API
-  - "mercadopago-abuse" para abuso de webhooks Mercado Pago
-- NAO crie nomes diferentes para o mesmo tipo de ataque. Se 5 IPs fazem scanning,
-  todos devem ter o MESMO filter_name "apache-scan"
-- Se um filtro existente ja cobre o ataque, REUSE o mesmo filter_name
-- failregex: use <HOST> exatamente onde o IP aparece no log
-- <HOST> e uma MACRO do fail2ban — NUNCA escape como \\<HOST> ou \\<HOST\\>. Use <HOST> literal, sem backslash.
-- Multiplos padroes: use \\n entre eles, NUNCA | entre padroes contendo <HOST> (causa erro fatal no Python re)
-- O regex deve capturar o PADRAO do ataque, nao apenas o IP especifico
-- Evite .* excessivo para minimizar falsos positivos
-
-CONTEXTO DO SERVIDOR — WHMCS (sistema de hospedagem/faturamento):
-- Clientes acessam faturas, pagam via Mercado Pago/Pix, resetam senha — isso é NORMAL
-- O Mercado Pago envia webhooks (POST para /callback/mercadopagopix.php com topic=payment)
-  de IPs do Google Cloud (35.x.x.x) — NÃO é ataque, é notificação de pagamento
-- Bots de redes sociais (facebookexternalhit, Facebot, Twitterbot, LinkPreviewBot)
-  acessam páginas para gerar previews — NÃO é ataque
-- O ChatGPT-User é um crawler legítimo da OpenAI — NÃO é ataque
-- Acesso repetido a /viewemail.php, /clientarea.php com session autenticada
-  por IP brasileiro provavelmente é cliente navegando — NÃO é ataque
-
-NÃO classifique como ameaça:
-- Webhooks de pagamento (POST para callback/* com topic=payment)
-- Crawlers de redes sociais (facebookexternalhit, Twitterbot, LinkPreviewBot)
-- Clientes acessando próprias faturas ou resetando senha
-- Bots legítimos (Googlebot, ChatGPT-User, Bingbot)
-
-CLASSIFIQUE como ameaça APENAS quando houver evidência clara de:
-- Brute force de login (múltiplas tentativas de senha)
-- Enumeração de IDs/email em massa (dezenas de requests sequenciais)
-- User-agent de ferramenta de ataque (sqlmap, nikto, nmap, etc.)
-- Acesso a paths de exploração conhecidos (/wp-admin, /phpmyadmin, /etc/passwd)
-- Scraping agressivo (100+ requests em poucos minutos com padrão de enumeração)
-
-Não inclua texto fora do JSON.
-
-LOGS:
-{logs}';
-
+    private const DEFAULT_PROMPT = AnalysisPrompt::DEFAULT_TEMPLATE;
     private string $protocol; // protocolo efetivo (pode diferir do default do provider)
+    private int $lastCurlCode = 0;
     private int $lastHttpCode = 0; // HTTP code da última chamada à API
 
     /** Retorna o HTTP code da última chamada httpPost(). */
@@ -142,7 +151,8 @@ LOGS:
         string $apiKey,
         string $model = '',
         string $baseUrl = '',
-        string $protocol = ''
+        string $protocol = '',
+        string $reasoningEffort = ''
     ) {
         if (!isset(self::PROVIDERS[$provider])) {
             throw new \InvalidArgumentException("Provedor de IA inválido: {$provider}");
@@ -153,7 +163,12 @@ LOGS:
         $this->apiKey   = $apiKey;
         $this->protocol = $protocol ?: $def['protocol'];
         $this->model    = $model ?: $def['default_model'];
-        $this->baseUrl  = $baseUrl ?: $def['default_base_url'];
+        $this->baseUrl  = !empty($def['needs_base_url']) ? ($baseUrl ?: $def['default_base_url']) : $def['default_base_url'];
+        $validEfforts = $def['reasoning_efforts'] ?? [];
+        $defaultEffort = $def['default_reasoning_effort'] ?? '';
+        $this->reasoningEffort = isset($validEfforts[$reasoningEffort])
+            ? $reasoningEffort
+            : $defaultEffort;
     }
 
     // -----------------------------------------------------------------------
@@ -190,13 +205,25 @@ LOGS:
         }
 
         $def = self::PROVIDERS[$provider];
+        $model = Database::getConfig("ai_provider_{$provider}_model", $def['default_model']);
+        if (!isset($def['models'][$model])) {
+            $model = $def['default_model'];
+        }
+        $reasoningEffort = Database::getConfig(
+            "ai_provider_{$provider}_reasoning_effort",
+            $def['default_reasoning_effort'] ?? ''
+        );
+        if (!empty($def['reasoning_efforts']) && !isset($def['reasoning_efforts'][$reasoningEffort])) {
+            $reasoningEffort = $def['default_reasoning_effort'];
+        }
 
         return [
             'provider' => $provider,
             'protocol' => $def['protocol'],
             'api_key'  => Helper::decryptApiKey(Database::getConfig("ai_provider_{$provider}_api_key", '')),
-            'model'    => Database::getConfig("ai_provider_{$provider}_model", $def['default_model']),
-            'base_url' => Database::getConfig("ai_provider_{$provider}_base_url", $def['default_base_url']),
+            'model'    => $model,
+            'base_url' => !empty($def['needs_base_url']) ? Database::getConfig("ai_provider_{$provider}_base_url", $def['default_base_url']) : $def['default_base_url'],
+            'reasoning_effort' => $reasoningEffort,
         ];
     }
 
@@ -215,6 +242,8 @@ LOGS:
      */
     public function analyze(array $logLines): array
     {
+        $this->lastUsage=[];
+        if(DecisionProtection::enabled()){$logLines=DecisionProtection::filterLines($logLines);$this->admissionLines=$logLines;if(!$logLines)return [];}
         if (empty($logLines)) {
             return [];
         }
@@ -223,7 +252,7 @@ LOGS:
         $logLines = array_slice($logLines, -$logLimit);
 
         $parts    = $this->buildPrompt($logLines);
-        $response = $this->callApi($parts['user'], $parts['system']);
+        $response = $this->callApi($parts['user'], $parts['system'], 'analysis');
 
         if ($response === null) {
             return [];
@@ -240,16 +269,15 @@ LOGS:
      */
     public function buildPrompt(array $logLines): array
     {
-        $fullTemplate = Database::getConfig('ai_prompt', self::DEFAULT_PROMPT);
-
-        $systemPart = strpos($fullTemplate, '{logs}') !== false
-            ? trim(explode('{logs}', $fullTemplate, 2)[0])
-            : trim($fullTemplate);
+        $fullTemplate = AnalysisPrompt::template();
+        $systemPart = AnalysisPrompt::instructions($fullTemplate);
 
         // Cap de ameaças: garante que a resposta cabe dentro do budget de max_tokens,
         // mesmo com logs densos. Aplicado a TODOS os prompts (default e customizado).
         $systemInstructions = $systemPart . "\n\n"
-            . "Retorne no máximo 10 ameaças, priorizando as de maior severidade e confiança.\n\n";
+            . "Classifique cada IP apresentado exatamente uma vez, inclusive benignos com action=monitor. Máximo dez IPs por chamada.\n\n";
+        $systemInstructions .= "HTTP 421, AH02032/SNI, User-Agent ou status isolados não provam ataque. Sem payload ou alvo ofensivo individual, retorne monitor; não crie regra de ban para esses sinais.\n";
+        $systemInstructions .= AnalysisPrompt::rules().self::routeInstructions();
 
         // Injetar filtros existentes para reuso
         $existingFilters = self::getExistingFilterNames();
@@ -277,6 +305,24 @@ LOGS:
         return ['system' => $systemInstructions, 'user' => $userContent];
     }
 
+    private static function routeInstructions(): string
+    {
+        $paths=Database::getConfig('ai_non_offensive_paths',RequestEvidence::NORMAL_PATHS);
+        return "\nRotas normais configuradas (correspondência LITERAL, não de prefixo):\n".$paths
+            ."\nUm caminho normal sozinho não autoriza ban; isso não libera filhos sensíveis como /graylog/.git/config nem payload ofensivo na query. Não conceda whitelist ao IP. Os critérios de bloqueio são os configurados e a validação nativa, não mínimos inventados no texto.\n";
+    }
+
+    /** Local preview: no constructor, credentials, HTTP call or real log data. */
+    public static function promptPreview(): array
+    {
+        $instance=(new \ReflectionClass(self::class))->newInstanceWithoutConstructor();
+        $parts=$instance->buildPrompt([]);
+        $contract=AnalysisPrompt::contract();
+        if($contract['protocol']==='openai_responses')
+            $parts['system'].="\n\nFORMATO OPENAI: siga o JSON Schema fornecido e retorne o array no campo raiz suggestions.";
+        return ['system'=>$parts['system'],'contract'=>$contract];
+    }
+
     /**
      * Coleta nomes de filtros existentes (banco + disco) para injetar no prompt.
      * Retorna array de nomes únicos, limitado a 30 para não poluir o contexto.
@@ -287,6 +333,19 @@ LOGS:
      */
     public static function getExistingFilterNames(): array
     {
+        if((int)Database::getConfig('schema_version','0')>=15) {
+            $config=Privileged::run(['effective-config']);
+            if(empty($config['success']))return [];
+            $active=(new Fail2BanClient('/usr/bin/sudo','/usr/bin/fail2ban-client'))->getJails();
+            $names=[];
+            foreach($config['jails'] as $jail=>$settings) {
+                $filter=explode('[',$settings['filter']??'',2)[0];
+                if(in_array($jail,$active,true)&&str_starts_with($filter,'amsfb-')&&$filter!=='amsfb-ai-manual')
+                    $names[]=Safety::filterName($filter);
+            }
+            $names=array_values(array_unique(array_filter($names)));sort($names);
+            return array_slice($names,0,30);
+        }
         $names = [];
 
         // Fonte 1: banco de dados
@@ -323,14 +382,35 @@ LOGS:
      */
     public function ping(): bool
     {
+        $this->admissionLines=[]; // Connectivity probe has no IP evidence.
+        if ($this->protocol === 'openai_responses') {
+            $body = json_encode([
+                'model'             => $this->model,
+                'input'             => 'Responda apenas: pong',
+                'reasoning'         => ['effort' => 'none'],
+                'max_output_tokens' => 32,
+                'store'             => false,
+            ]);
+
+            $raw = $this->httpPost($body, $this->protocol, false);
+            if ($raw === false || $this->lastHttpCode < 200 || $this->lastHttpCode >= 300) {
+                return false;
+            }
+
+            $data = json_decode($raw, true);
+            return is_array($data)
+                && !empty($data['id'])
+                && in_array($data['status'] ?? '', ['completed', 'in_progress'], true);
+        }
+
         $body = json_encode([
             'model'      => $this->model,
             'max_tokens' => 10,
             'messages'   => [['role' => 'user', 'content' => 'ping']],
         ]);
 
-        $raw = $this->httpPost($body, $this->protocol);
-        if ($raw === false) {
+        $raw = $this->httpPost($body, $this->protocol, false);
+        if ($raw === false || $this->lastHttpCode < 200 || $this->lastHttpCode >= 300) {
             return false;
         }
 
@@ -346,6 +426,8 @@ LOGS:
      */
     public function generateFilterRegex(array $evidenceLines): ?array
     {
+        $this->lastUsage=[];
+        if(DecisionProtection::enabled()){$evidenceLines=DecisionProtection::filterLines($evidenceLines);$this->admissionLines=$evidenceLines;if(!$evidenceLines)return null;}
         if (empty($evidenceLines)) {
             return null;
         }
@@ -378,6 +460,10 @@ LOGS:
                 . "- Evite .* excessivo para minimizar falsos positivos\n"
                 . "- Nao inclua texto fora do JSON\n\n";
 
+        // Same evidence invariants, but this endpoint returns a filter object.
+        $systemPrompt.=AnalysisPrompt::rules().self::routeInstructions()
+            ."\nNesta operação retorne somente filter_name e failregex, não um array de decisões. Se não houver prova ofensiva, retorne ambos vazios; action=monitor nas instruções significa não gerar regra.\n";
+
         // Delimitador aleatório por requisição (mesma técnica do buildPrompt)
         $token   = bin2hex(random_bytes(8));
         $openTag = "<log_data_{$token}>";
@@ -388,7 +474,7 @@ LOGS:
 
         $userContent = "{$openTag}\n" . $logsText . "\n{$closeTag}";
 
-        $response = $this->callApi($userContent, $systemPrompt);
+        $response = $this->callApi($userContent, $systemPrompt, 'filter');
         if ($response === null) {
             return null;
         }
@@ -402,27 +488,41 @@ LOGS:
 
     /**
      * Chama a API do provedor com o prompt montado.
-     * Dispatch por protocolo (anthropic / openai), não por nome de provedor.
+     * Dispatch por protocolo (anthropic / openai / openai_responses), não por nome.
      */
-    private function callApi(string $userContent, string $systemPrompt = ''): ?string
+    private function callApi(
+        string $userContent,
+        string $systemPrompt = '',
+        string $outputType = 'analysis'
+    ): ?string
     {
         $protocol = $this->protocol;
 
         if ($protocol === 'anthropic') {
             $body = $this->buildAnthropicBody($userContent, $systemPrompt);
+        } elseif ($protocol === 'openai_responses') {
+            $body = $this->buildOpenAIResponsesBody($userContent, $systemPrompt, $outputType);
         } else {
             // openai-compatible (mimo, openrouter, etc.)
             $body = $this->buildOpenAIBody($userContent, $systemPrompt);
         }
 
+        $this->lastUsage=[];$this->budgetLimitedRequest=false;
         $raw = $this->httpPost($body, $protocol);
         if ($raw === false) {
-            return null;
+            throw new \RuntimeException('Falha de transporte ao chamar o provedor de IA.',$this->lastCurlCode);
+        }
+        if ($this->lastHttpCode < 200 || $this->lastHttpCode >= 300) {
+            throw new \RuntimeException('O provedor de IA retornou erro HTTP.',$this->lastHttpCode);
         }
 
         $data = json_decode($raw, true);
         if (!is_array($data)) {
-            return null;
+            throw new InvalidResponseException('Resposta do provedor não é JSON válido.');
+        }
+
+        if ($protocol === 'openai_responses') {
+            return $this->extractOpenAIResponsesText($data);
         }
 
         // Extrair texto e stop_reason conforme protocolo
@@ -446,7 +546,151 @@ LOGS:
             );
         }
 
+        if (!is_string($text) || trim($text) === '') {
+            throw new InvalidResponseException('Resposta do provedor sem conteúdo analisável.');
+        }
         return $text;
+    }
+
+    /** Monta o body da OpenAI Responses API com Structured Outputs. */
+    private function buildOpenAIResponsesBody(
+        string $userContent,
+        string $systemPrompt,
+        string $outputType
+    ): string {
+        $def = self::PROVIDERS[$this->provider] ?? [];
+        $format = $outputType === 'filter'
+            ? $this->getFilterResponseFormat()
+            : $this->getAnalysisResponseFormat();
+
+        // O prompt compartilhado historicamente pede um array raiz para
+        // Anthropic/MiMo. Na OpenAI, o schema estrito usa um wrapper objeto.
+        if ($outputType === 'analysis') {
+            $systemPrompt .= "\n\nFORMATO OPENAI: siga o JSON Schema fornecido e retorne o array no campo raiz suggestions.";
+        }
+
+        $body = [
+            'model'             => $this->model,
+            'input'             => $userContent,
+            'reasoning'         => ['effort' => $this->reasoningEffort ?: 'low'],
+            'max_output_tokens' => $def['max_tokens'] ?? 16384,
+            'store'             => false,
+            'text'              => ['format' => $format],
+        ];
+        if ($systemPrompt !== '') {
+            $body['instructions'] = $systemPrompt;
+        }
+
+        return json_encode($body);
+    }
+
+    /** JSON Schema estrito para a análise de ameaças. */
+    private function getAnalysisResponseFormat(): array
+    {
+        $suggestionProperties = [
+            'ip'             => ['type' => 'string'],
+            'threat'         => ['type' => 'string'],
+            'severity'       => ['type' => 'string', 'enum' => ['low', 'medium', 'high', 'critical']],
+            'confidence'     => ['type' => 'integer', 'minimum' => 0, 'maximum' => 100],
+            'evidence'       => ['type' => 'array', 'items' => ['type' => 'string']],
+            'action'         => ['type' => 'string', 'enum' => ['ban', 'monitor', 'whitelist']],
+            'jail'           => ['type' => 'string'],
+            'bantime'        => ['type' => 'integer', 'minimum' => 60, 'maximum' => 31536000],
+            'reason'         => ['type' => 'string'],
+            'suggested_rule' => ['type' => 'string'],
+            'filter_name'    => ['type' => 'string'],
+            'failregex'      => ['type' => 'string'],
+        ];
+
+        return [
+            'type'   => 'json_schema',
+            'name'   => 'fail2ban_threat_analysis',
+            'strict' => true,
+            'schema' => [
+                'type'                 => 'object',
+                'properties'           => [
+                    'suggestions' => [
+                        'type'     => 'array',
+                        'maxItems' => 10,
+                        'items'    => [
+                            'type'                 => 'object',
+                            'properties'           => $suggestionProperties,
+                            'required'             => array_keys($suggestionProperties),
+                            'additionalProperties' => false,
+                        ],
+                    ],
+                ],
+                'required'             => ['suggestions'],
+                'additionalProperties' => false,
+            ],
+        ];
+    }
+
+    /** JSON Schema estrito para geração de filtro fail2ban. */
+    private function getFilterResponseFormat(): array
+    {
+        return [
+            'type'   => 'json_schema',
+            'name'   => 'fail2ban_filter',
+            'strict' => true,
+            'schema' => [
+                'type'       => 'object',
+                'properties' => [
+                    'filter_name' => ['type' => 'string'],
+                    'failregex'   => ['type' => 'string'],
+                ],
+                'required'             => ['filter_name', 'failregex'],
+                'additionalProperties' => false,
+            ],
+        ];
+    }
+
+    /** Extrai output_text da Responses API e classifica falhas/incompletude. */
+    private function extractOpenAIResponsesText(array $data): string
+    {
+        $status = $data['status'] ?? '';
+        $reason = $data['incomplete_details']['reason'] ?? '';
+
+        if ($status === 'incomplete' && $reason === 'max_output_tokens') {
+            throw new TruncatedResponseException(
+                'Resposta truncada pela OpenAI Responses API (max_output_tokens).'
+            );
+        }
+        if ($this->lastHttpCode < 200 || $this->lastHttpCode >= 300
+            || $status === 'failed'
+            || !empty($data['error'])
+        ) {
+            throw new \RuntimeException('Falha retornada pela OpenAI Responses API.');
+        }
+        if ($status !== 'completed') {
+            throw new InvalidResponseException('Resposta OpenAI não foi concluída.');
+        }
+
+        $texts = [];
+        $refusal = false;
+        foreach (($data['output'] ?? []) as $item) {
+            if (!is_array($item)) {
+                continue;
+            }
+            foreach (($item['content'] ?? []) as $content) {
+                if (!is_array($content)) {
+                    continue;
+                }
+                if (($content['type'] ?? '') === 'output_text' && isset($content['text'])) {
+                    $texts[] = (string)$content['text'];
+                } elseif (($content['type'] ?? '') === 'refusal') {
+                    $refusal = true;
+                }
+            }
+        }
+
+        if (empty($texts)) {
+            throw new InvalidResponseException(
+                $refusal ? 'A OpenAI recusou a resposta estruturada.' : 'Resposta OpenAI sem output_text.'
+            );
+        }
+
+        return implode("\n", $texts);
     }
 
     /** Monta o body no formato Anthropic. */
@@ -499,6 +743,13 @@ LOGS:
     {
         $base = rtrim($this->baseUrl, '/');
 
+        if ($protocol === 'openai_responses') {
+            if (str_ends_with($base, '/v1/responses') || str_ends_with($base, '/responses')) {
+                return $base;
+            }
+            return $base . '/responses';
+        }
+
         if ($protocol === 'anthropic') {
             // Se já termina com /v1/messages, usar direto
             if (str_ends_with($base, '/v1/messages')) {
@@ -520,7 +771,7 @@ LOGS:
      * Headers variam conforme protocolo.
      * Monta a URL final a partir da base URL + path do protocolo.
      */
-    private function httpPost(string $body, string $protocol): string|false
+    private function httpPost(string $body, string $protocol, bool $recordTransport = true): string|false
     {
         if (!function_exists('curl_init')) {
             return false;
@@ -533,7 +784,8 @@ LOGS:
             CURLOPT_RETURNTRANSFER => true,
             CURLOPT_POST           => true,
             CURLOPT_POSTFIELDS     => $body,
-            CURLOPT_TIMEOUT        => 90,
+            CURLOPT_TIMEOUT        => $this->requestTimeout,
+            CURLOPT_CONNECTTIMEOUT => min(10,$this->requestTimeout),
         ]);
 
         if ($protocol === 'anthropic') {
@@ -550,15 +802,42 @@ LOGS:
             ]);
         }
 
-        $response = curl_exec($ch);
+        try {
+            $this->requestStarting();
+            if(CycleBudget::active()) {
+                $allowed=CycleBudget::timeout(90,CycleBudget::providerReserve());
+                $this->budgetLimitedRequest=$allowed<$this->requestTimeout;
+                $this->setRequestTimeout(min($this->requestTimeout,$allowed));
+            }
+            curl_setopt($ch, CURLOPT_TIMEOUT, $this->requestTimeout);
+            curl_setopt($ch, CURLOPT_CONNECTTIMEOUT, min(10,$this->requestTimeout));
+            $response = curl_exec($ch);
+        } catch (\Throwable $e) {
+            curl_close($ch);
+            throw $e;
+        }
         $error    = curl_error($ch);
+        $this->lastCurlCode=curl_errno($ch);
         $this->lastHttpCode = (int) curl_getinfo($ch, CURLINFO_HTTP_CODE);
+        $info=curl_getinfo($ch);
+        $kind=$this->lastCurlCode===CURLE_OPERATION_TIMEDOUT
+            ?($this->budgetLimitedRequest?'cycle_reserve':(($info['connect_time']??0)<=0?'connect_timeout':'provider_timeout'))
+            :($this->lastCurlCode?'transport_error':($this->lastHttpCode>=400?'http_error':'completed'));
+        // Synthetic connectivity tests must not overwrite operational diagnostics.
+        if($recordTransport)Database::setConfig('ai_last_transport',json_encode(['at'=>time(),'kind'=>$kind,'curl_code'=>$this->lastCurlCode,'http_code'=>$this->lastHttpCode,
+            'dns_seconds'=>$info['namelookup_time']??null,'connect_seconds'=>$info['connect_time']??null,
+            'first_byte_seconds'=>$info['starttransfer_time']??null,'total_seconds'=>$info['total_time']??null,
+            'timeout_seconds'=>$this->requestTimeout,'budget_remaining'=>CycleBudget::active()?round(CycleBudget::remaining(),3):null]));
         curl_close($ch);
 
+        if($this->lastCurlCode===CURLE_OPERATION_TIMEDOUT&&$this->budgetLimitedRequest&&CycleBudget::active())
+            throw new CycleBudgetExceeded('Janela reservada da API esgotada; tarefa preservada.');
         if ($error || $response === false) {
             return false;
         }
 
+        $decoded=json_decode($response,true);
+        $this->lastUsage=is_array($decoded['usage']??null)?$decoded['usage']:[];
         return (string) $response;
     }
 
@@ -573,23 +852,18 @@ LOGS:
      */
     private function parseResponse(string $response): array
     {
-        if (preg_match('/\[[\s\S]*\]/s', $response, $matches)) {
-            $decoded = json_decode($matches[0], true);
-            if (is_array($decoded)) {
+        $response = trim(preg_replace('/^\x60\x60\x60(?:json)?\\s*|\\s*\x60\x60\x60$/i', '', trim($response)));
+        $decoded = json_decode($response, true);
+        if (json_last_error() === JSON_ERROR_NONE && is_array($decoded)) {
+            if (str_starts_with($response, '{') && isset($decoded['suggestions'])
+                && is_array($decoded['suggestions']) && array_is_list($decoded['suggestions'])) {
+                return $this->sanitizeSuggestions($decoded['suggestions']);
+            }
+            if (str_starts_with($response, '[') && array_is_list($decoded)) {
                 return $this->sanitizeSuggestions($decoded);
             }
         }
-
-        $decoded = json_decode($response, true);
-        if (is_array($decoded)) {
-            return $this->sanitizeSuggestions($decoded);
-        }
-
-        // JSON inválido — não é array, não é parseable.
-        // Lançar exception para o controller sinalizar ao admin.
-        throw new InvalidResponseException(
-            'Resposta da API não é JSON válido: ' . substr($response, 0, 200)
-        );
+        throw new InvalidResponseException('Resposta da API deve conter uma lista JSON válida de sugestões.');
     }
 
     /** Faz parse da resposta JSON (filtro failregex). */
@@ -633,8 +907,8 @@ LOGS:
             return null;
         }
 
-        $failregex = substr((string) $data['failregex'], 0, 1000);
-        $failregex = preg_replace('/[\x00-\x08\x0B\x0C\x0E-\x1F\x7F]/', '', $failregex);
+        $failregex = self::responseRegex($data['failregex']);
+        if ($failregex === '') return null;
 
         return [
             'filter_name' => $this->sanitizeFilterName($data['filter_name']),
@@ -665,7 +939,7 @@ LOGS:
 
             $action = in_array($item['action'] ?? '', $actions, true)
                 ? $item['action']
-                : 'ban';
+                : 'monitor';
 
             $confidence = max(0, min(100, (int) ($item['confidence'] ?? 0)));
             $bantime    = max(60, min(31536000, (int) ($item['bantime'] ?? 3600)));
@@ -673,36 +947,48 @@ LOGS:
             $evidence = [];
             if (isset($item['evidence']) && is_array($item['evidence'])) {
                 foreach ($item['evidence'] as $ev) {
-                    $evidence[] = substr((string) $ev, 0, 500);
+                    $evidence[] = mb_strcut((string) $ev, 0, 65536, 'UTF-8');
                 }
             }
 
             $valid[] = [
                 'ip'             => $ip,
-                'threat'         => substr(strip_tags($item['threat'] ?? 'Ameaça desconhecida'), 0, 128),
+                'threat'         => self::responseText($item['threat'] ?? 'Ameaça desconhecida', 128),
                 'severity'       => $severity,
                 'confidence'     => $confidence,
                 'evidence'       => $evidence,
                 'action'         => $action,
                 'jail'           => substr(preg_replace('/[^a-zA-Z0-9_-]/', '', $item['jail'] ?? ''), 0, 64),
                 'bantime'        => $bantime,
-                'reason'         => substr(strip_tags($item['reason'] ?? ''), 0, 1000),
-                'suggested_rule' => substr(strip_tags($item['suggested_rule'] ?? ''), 0, 4000),
+                'reason'         => self::responseText($item['reason'] ?? '', 1000),
+                'suggested_rule' => self::responseText($item['suggested_rule'] ?? '', 4000),
                 'filter_name'    => $this->sanitizeFilterName($item['filter_name'] ?? ''),
-                'failregex'      => substr(preg_replace('/[\x00-\x08\x0B\x0C\x0E-\x1F\x7F]/', '', $item['failregex'] ?? ''), 0, 1000),
+                'failregex'      => self::responseRegex($item['failregex'] ?? ''),
             ];
         }
 
         return $valid;
     }
 
+    /** Byte limits must not create malformed UTF-8 after a paid response. */
+    private static function responseText($value, int $bytes): string
+    {
+        if (!is_scalar($value)) return '';
+        $text = strip_tags((string) $value);
+        return mb_check_encoding($text, 'UTF-8') ? mb_strcut($text, 0, $bytes, 'UTF-8') : '';
+    }
+
+    /** Never turn an oversized expression into a different, truncated rule. */
+    private static function responseRegex($value): string
+    {
+        if (!is_string($value) || !mb_check_encoding($value, 'UTF-8')) return '';
+        $regex = preg_replace('/[\x00-\x08\x0B\x0C\x0E-\x1F\x7F]/', '', $value);
+        return strlen($regex) <= 1000 ? $regex : '';
+    }
+
     /** Sanitiza o nome do filtro: apenas [a-z0-9-], max 50 chars. */
     private function sanitizeFilterName(string $name): string
     {
-        $name = strtolower($name);
-        $name = preg_replace('/[^a-z0-9-]/', '', $name);
-        $name = preg_replace('/-+/', '-', $name);
-        $name = trim($name, '-');
-        return substr($name, 0, 50);
+        return Safety::filterName($name);
     }
 }

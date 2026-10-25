@@ -51,6 +51,7 @@ class Router
         'logviewer'   => Controllers\LogViewerController::class,
         'ai'          => Controllers\AIController::class,
         'ai_settings' => Controllers\AIController::class,
+        'protection'  => Controllers\PolicyController::class,
     ];
 
     public function __construct(array $vars)
@@ -85,8 +86,9 @@ class Router
         // A verificação condicional anterior permitia bypass com body vazio
         // (Content-Length: 0) para ações não listadas como run_now e ping_api.
         $token = $post['csrf_token'] ?? '';
-        if (!Helper::checkCsrf($token)) {
-            return json_encode(['success' => false, 'error' => 'Invalid CSRF token']);
+        if (!is_string($token) || !Helper::checkCsrf($token)) {
+            return json_encode(['success' => false, 'error' => 'Invalid CSRF token',
+                'csrf_token' => Helper::csrfToken()]);
         }
 
         $controllerClass = self::CONTROLLER_MAP[$action] ?? null;
@@ -99,7 +101,12 @@ class Router
             return json_encode(['success' => false, 'error' => 'Action not AJAX-capable']);
         }
 
-        $result = $controller->handleAjax($do, $post);
+        try {
+            $result = $controller->handleAjax($do, $post);
+        } catch (\Throwable $e) {
+            error_log('[AMSFB] AJAX operation failed: ' . get_class($e));
+            $result = json_encode(['success' => false, 'error' => 'Operação não concluída. Verifique configuração, permissões e logs do módulo.']);
+        }
 
         // [SEC-7] Inject the (possibly rotated) CSRF token into every JSON response so
         // the JS helper (window.AMSFB.csrfToken) stays in sync after token rotation.
@@ -164,28 +171,58 @@ class Router
                 'level'   => 'danger',
                 'message' => 'Arquivo de sudoers não encontrado: <code>' . $sudoersFile . '</code>. '
                            . 'O módulo não conseguirá executar comandos do fail2ban.',
-                'fix'     => 'cp ' . escapeshellarg(dirname(__DIR__) . '/setup/sudoers/amssoft_fail2ban')
+                'fix'     => 'install -o root -g root -m 0440 '
+                           . escapeshellarg(dirname(__DIR__) . '/setup/sudoers/amssoft_fail2ban')
                            . ' ' . escapeshellarg($sudoersFile)
-                           . ' &amp;&amp; chmod 0440 ' . escapeshellarg($sudoersFile),
+                           . ' &amp;&amp; visudo -c',
             ];
             return $warnings;
         }
 
-        // Verificar se as regras sudo estão funcionando (teste funcional)
-        $sudoPath        = '/usr/bin/sudo';
-        $fail2banClient  = '/usr/bin/fail2ban-client';
-        $pingOutput      = shell_exec($sudoPath . ' ' . $fail2banClient . ' ping 2>&1');
-        $sudoWorks       = ($pingOutput !== null && str_contains($pingOutput, 'pong'));
+        // Verificar se as regras sudo estão funcionando (teste funcional).
+        // Os caminhos vêm da configuração do addon e são sempre escapados.
+        // O -n impede que uma requisição web fique aguardando senha.
+        $sudoPath       = trim((string)($this->vars['sudo_path'] ?? '')) ?: '/usr/bin/sudo';
+        $fail2banClient = trim((string)($this->vars['fail2ban_client'] ?? '')) ?: '/usr/bin/fail2ban-client';
+        $pingLines      = [];
+        $pingCode       = 1;
+        $pathsValid     = is_executable($sudoPath) && is_executable($fail2banClient);
+
+        if ($pathsValid) {
+            $pingCommand = escapeshellarg($sudoPath)
+                . ' -n ' . escapeshellarg($fail2banClient) . ' ping 2>&1';
+            exec($pingCommand, $pingLines, $pingCode);
+        }
+
+        $pingOutput = implode("\n", $pingLines);
+        $sudoWorks  = ($pingCode === 0 && str_contains($pingOutput, 'pong'));
 
         if (!$sudoWorks) {
+            $outputLower = strtolower($pingOutput);
+
+            if (!$pathsValid) {
+                $warningMessage = 'O caminho configurado para sudo ou fail2ban-client não existe ou não é executável.';
+                $warningFix     = 'ls -l ' . escapeshellarg($sudoPath) . ' ' . escapeshellarg($fail2banClient);
+            } elseif (preg_match('/sudo:.*(?:password is required|not allowed|permission denied)/i', $pingOutput)) {
+                $warningMessage = 'O usuário do processo web não está autorizado pelo sudoers a executar fail2ban-client.';
+                $warningFix     = 'install -o root -g root -m 0440 '
+                    . escapeshellarg(dirname(__DIR__) . '/setup/sudoers/amssoft_fail2ban')
+                    . ' ' . escapeshellarg($sudoersFile)
+                    . ' &amp;&amp; visudo -c';
+            } elseif (str_contains($outputLower, 'failed to access socket')
+                || str_contains($outputLower, 'is fail2ban running')
+                || str_contains($outputLower, 'connection refused')) {
+                $warningMessage = 'O sudo conseguiu executar fail2ban-client, mas o serviço fail2ban está offline ou sem socket.';
+                $warningFix     = 'systemctl --no-pager --full status fail2ban &amp;&amp; fail2ban-server --test';
+            } else {
+                $warningMessage = 'O teste funcional do fail2ban falhou. Verifique sudoers, o serviço fail2ban e o socket de comunicação.';
+                $warningFix     = 'systemctl --no-pager --full status fail2ban &amp;&amp; fail2ban-client ping';
+            }
+
             $warnings[] = [
                 'level'   => 'warning',
-                'message' => 'O arquivo <code>' . $sudoersFile . '</code> existe, mas o sudo não está funcionando corretamente. '
-                           . 'Verifique se as regras estão atualizadas e válidas.',
-                'fix'     => 'cp ' . escapeshellarg(dirname(__DIR__) . '/setup/sudoers/amssoft_fail2ban')
-                           . ' ' . escapeshellarg($sudoersFile)
-                           . ' &amp;&amp; chmod 0440 ' . escapeshellarg($sudoersFile)
-                           . ' &amp;&amp; visudo -c',
+                'message' => $warningMessage,
+                'fix'     => $warningFix,
             ];
         }
 
@@ -197,8 +234,9 @@ class Router
             $warnings[] = [
                 'level'   => 'danger',
                 'message' => htmlspecialchars($permError, ENT_QUOTES, 'UTF-8'),
-                'fix'     => 'chown root:www-data ' . escapeshellarg($jailLocalPath)
-                           . ' &amp;&amp; chmod 0664 ' . escapeshellarg($jailLocalPath),
+                'fix'     => 'install -o root -g root -m 0755 '
+                           . escapeshellarg(dirname(__DIR__) . '/setup/amsfb-admin')
+                           . ' /usr/local/sbin/amsfb-admin',
             ];
         }
 

@@ -117,7 +117,7 @@
                 <div style="font-size:36px; font-weight:bold; color:<?= ($ai_pending_count > 0) ? '#e74c3c' : '#27ae60' ?>;">
                     <?= (int)$ai_pending_count ?>
                 </div>
-                <div class="text-muted">Sugestões pendentes</div>
+                <div class="text-muted">Decisões acionáveis</div>
                 <?php if ($ai_pending_count > 0): ?>
                 <a href="<?= $e($modulelink . '&action=ai') ?>" class="btn btn-xs btn-danger" style="margin-top:6px;">
                     Revisar agora
@@ -203,7 +203,7 @@
 <?php endif; ?>
 
 <script>
-(function () {
+document.addEventListener('DOMContentLoaded', function () {
     if (typeof Chart === 'undefined') return;
 
     // Line chart — bans series
@@ -252,5 +252,5 @@
             }
         });
     }
-})();
+});
 </script>

@@ -1,5 +1,6 @@
 <?php
 namespace AMS\Fail2Ban;
+require_once __DIR__.'/DecisionProtection.php';
 
 use WHMCS\Database\Capsule;
 use Illuminate\Support\Collection;
@@ -15,7 +16,7 @@ class Database
         string  $jail,
         string  $action,
         ?string $reason,
-        ?int    $adminId
+        ?int    $adminId = null
     ): void {
         Capsule::table('mod_amssoft_fail2ban_logs')->insert([
             'ip'        => $ip,
@@ -191,16 +192,31 @@ class Database
     // Key-value config store
     // -----------------------------------------------------------------------
 
+    private static ?array $presentationConfigCache=null;
+
+    /** Explicit read-model scope only; never enabled by cron or ban admission. */
+    public static function withPresentationConfigCache(callable $read)
+    {
+        if(self::$presentationConfigCache!==null)return $read();
+        self::$presentationConfigCache=[];
+        try{return $read();}finally{self::$presentationConfigCache=null;}
+    }
+
     public static function getConfig(string $key, $default = null)
     {
+        if(self::$presentationConfigCache!==null&&array_key_exists($key,self::$presentationConfigCache)){
+            $entry=self::$presentationConfigCache[$key];return $entry['exists']?$entry['value']:$default;
+        }
         $row = Capsule::table('mod_amssoft_fail2ban_config')
             ->where('key', $key)
             ->first();
+        if(self::$presentationConfigCache!==null)self::$presentationConfigCache[$key]=['exists'=>$row!==null,'value'=>$row?->value];
         return $row ? $row->value : $default;
     }
 
     public static function setConfig(string $key, $value): void
     {
+        if(self::$presentationConfigCache!==null)self::$presentationConfigCache=[];
         Capsule::table('mod_amssoft_fail2ban_config')
             ->updateOrInsert(['key' => $key], ['value' => $value]);
     }
@@ -212,21 +228,23 @@ class Database
      *
      * Usado para contadores onde read-then-write causaria perda em concorrência.
      */
-    public static function incrementConfig(string $key): int
+    public static function incrementConfig(string $key,int $delta=1): int
     {
+        if(self::$presentationConfigCache!==null)self::$presentationConfigCache=[];
+        if($delta<1)throw new \InvalidArgumentException('Incremento deve ser positivo');
         $exists = Capsule::table('mod_amssoft_fail2ban_config')
             ->where('key', $key)
             ->exists();
 
         if (!$exists) {
             Capsule::table('mod_amssoft_fail2ban_config')
-                ->insert(['key' => $key, 'value' => '1']);
-            return 1;
+                ->insert(['key' => $key, 'value' => (string)$delta]);
+            return $delta;
         }
 
         Capsule::table('mod_amssoft_fail2ban_config')
             ->where('key', $key)
-            ->update(['value' => Capsule::raw('CAST(`value` AS UNSIGNED) + 1')]);
+            ->update(['value' => Capsule::raw('CAST(`value` AS UNSIGNED) + '.(int)$delta)]);
 
         return (int) self::getConfig($key, '1');
     }
@@ -273,6 +291,7 @@ class Database
      */
     public static function clearBatchSession(string $logPath): void
     {
+        if(self::$presentationConfigCache!==null)self::$presentationConfigCache=[];
         $key = 'ai_batch_session_' . md5($logPath);
         Capsule::table('mod_amssoft_fail2ban_config')
             ->where('key', $key)
@@ -319,19 +338,43 @@ class Database
     /** Salva uma nova sugestão da IA e retorna o ID inserido. */
     public static function saveSuggestion(array $data): int
     {
-        // Upsert: se já existe sugestão pending para o mesmo IP, não duplica
-        // Match por IP (não IP+jail) — consistente com autoDismissDuplicates()
-        // que dispensa por IP ao aprovar. Mesmo IP em jails diferentes = mesmo atacante.
-        $existing = Capsule::table('mod_amssoft_fail2ban_ai_suggestions')
+        if((int)self::getConfig('schema_version','0')>=21)$data['family_key']=AttackFamily::forSuggestion($data);
+        // Keep evidence and decisions isolated by subject/source/filter/pattern.
+        // A benign task must not overwrite a pending attack from another pattern.
+        $query = Capsule::table('mod_amssoft_fail2ban_ai_suggestions')
             ->where('ip',     $data['ip'] ?? '')
-            ->where('status', 'pending')
-            ->first();
+            ->where('source_log', $data['source_log']??null)
+            ->where('filter_name', !empty($data['filter_name'])?Safety::filterName($data['filter_name']):null)
+            ->where('status', 'pending');
+        if((int)self::getConfig('schema_version','0')>=15) $query->where('pattern',$data['_pattern']??null);
+        $scoped=(int)self::getConfig('schema_version','0')>=18 && !empty($data['_analysis_key']);
+        if($scoped) $query=Capsule::table('mod_amssoft_fail2ban_ai_suggestions')->where('analysis_key',$data['_analysis_key'])->where('status','pending');
+        elseif((int)self::getConfig('schema_version','0')>=18) $query->whereNull('analysis_key');
+        $existing=$query->first();
 
         if ($existing) {
+            $updates=[];
+            foreach(['threat','reason','severity','confidence','bantime','failregex'] as $key) if(array_key_exists($key,$data)) $updates[$key]=$data[$key];
+            if($scoped)$updates['filter_name']=!empty($data['filter_name'])?Safety::filterName($data['filter_name']):null;
+            if((int)self::getConfig('schema_version','0')>=21)foreach(['family_key','decision_code','executed_jail','promotion_result'] as $key)if(array_key_exists($key,$data))$updates[$key]=$data[$key];
+            if(isset($data['evidence'])) $updates['evidence']=json_encode($data['evidence'],JSON_INVALID_UTF8_SUBSTITUTE);
+            if((int)self::getConfig('schema_version','0')>=15) {
+                $updates['classification']=$data['action']??'ban';
+                $updates['pattern']=$data['_pattern']??null;
+                $updates['updated_at']=date('Y-m-d H:i:s');
+            }
+            if(DashboardMetadata::enabled())$updates+=DashboardMetadata::values(array_replace((array)$existing,$updates));
+            if($updates) Capsule::table('mod_amssoft_fail2ban_ai_suggestions')->where('id',$existing->id)->update($updates);
             return (int)$existing->id;
         }
 
-        return (int) Capsule::table('mod_amssoft_fail2ban_ai_suggestions')->insertGetId([
+        $metadata=(int)self::getConfig('schema_version','0')>=15?['classification'=>$data['action']??'ban','pattern'=>$data['_pattern']??null]:[];
+        if((int)self::getConfig('schema_version','0')>=21)$metadata+=array_intersect_key($data,array_flip(['family_key','decision_code','executed_jail','promotion_result']));
+        if($scoped)$metadata+=['analysis_key'=>$data['_analysis_key'],'task_id'=>$data['_task_id']??null];
+        if(DashboardMetadata::enabled())$metadata+=DashboardMetadata::values([
+            'ip'=>$data['ip']??'','evidence'=>isset($data['evidence'])?json_encode($data['evidence']):null,
+            'promotion_result'=>$metadata['promotion_result']??null]);
+        return (int) Capsule::table('mod_amssoft_fail2ban_ai_suggestions')->insertGetId($metadata+[
             'ip'             => $data['ip']             ?? '',
             'jail'           => $data['jail']           ?? '',
             'threat'         => $data['threat']         ?? '',
@@ -347,7 +390,7 @@ class Database
             'created_at'     => Capsule::raw('NOW()'),
             // v3: filtro fail2ban gerado pela IA
             'filter_name'    => isset($data['filter_name']) && $data['filter_name'] !== ''
-                                    ? substr(preg_replace('/[^a-z0-9-]/', '', strtolower($data['filter_name'])), 0, 64)
+                                    ? Safety::filterName($data['filter_name'])
                                     : null,
             'failregex'      => isset($data['failregex']) && $data['failregex'] !== ''
                                     ? substr($data['failregex'], 0, 1000)
@@ -363,6 +406,8 @@ class Database
     {
         return Capsule::table('mod_amssoft_fail2ban_ai_suggestions')
             ->where('status', 'pending')
+            ->where('classification','ban')
+            ->when(DecisionProtection::enabled(),fn($q)=>$q->whereIn('id',DecisionProtection::ids()))
             ->orderBy('created_at', 'desc')
             ->get()
             ->map(fn ($r) => (array)$r)
@@ -370,10 +415,12 @@ class Database
     }
 
     /** Retorna sugestões 'pending' paginadas. */
-    public static function getPendingSuggestionsPaged(int $page = 1, int $perPage = 10): array
+    public static function getPendingSuggestionsPaged(int $page = 1, int $perPage = 10,string $view='actionable'): array
     {
         $q = Capsule::table('mod_amssoft_fail2ban_ai_suggestions')
             ->where('status', 'pending')
+            ->where('classification','ban')
+            ->when(DecisionProtection::enabled(),fn($q)=>$q->whereIn('id',DecisionProtection::ids($view)))
             ->orderBy('created_at', 'desc');
 
         $total  = $q->count();
@@ -417,6 +464,7 @@ class Database
     {
         $q = Capsule::table('mod_amssoft_fail2ban_ai_suggestions')
             ->orderBy('created_at', 'desc');
+        if(($filters['classification']??'')==='observations')$q->whereIn('classification',['monitor','whitelist']);
 
         if (!empty($filters['status'])) {
             $q->where('status', $filters['status']);
@@ -450,6 +498,8 @@ class Database
     {
         return (int) Capsule::table('mod_amssoft_fail2ban_ai_suggestions')
             ->where('status', 'pending')
+            ->where('classification','ban')
+            ->when(DecisionProtection::enabled(),fn($q)=>$q->whereIn('id',DecisionProtection::ids()))
             ->count();
     }
 
@@ -478,23 +528,8 @@ class Database
      */
     public static function autoDismissDuplicates(string $ip, int $excludeId, int $adminId): array
     {
-        $ids = Capsule::table('mod_amssoft_fail2ban_ai_suggestions')
-            ->where('ip', $ip)
-            ->where('status', 'pending')
-            ->where('id', '!=', $excludeId)
-            ->pluck('id')
-            ->toArray();
-
-        if (!empty($ids)) {
-            Capsule::table('mod_amssoft_fail2ban_ai_suggestions')
-                ->whereIn('id', $ids)
-                ->update([
-                    'status'      => 'approved',
-                    'resolved_at' => Capsule::raw('NOW()'),
-                    'resolved_by' => $adminId,
-                ]);
-        }
-        return array_map('intval', $ids);
+        // A shared IP does not authorize rewriting another decision.
+        return [];
     }
 
     /** Atualiza o status de uma sugestão. */
@@ -505,9 +540,23 @@ class Database
         if (!in_array($status, $allowed, true)) {
             return false;
         }
+        if($status==='rejected'&&(int)self::getConfig('schema_version','0')>=21){
+            $serialize=(int)self::getConfig('schema_version','0')>=23;
+            if($serialize&&(int)Capsule::selectOne("SELECT GET_LOCK('amsfb_policy',5) AS acquired")->acquired!==1)return false;
+            try {return Capsule::connection()->transaction(function()use($id,$resolvedBy){
+                $s=Capsule::table('mod_amssoft_fail2ban_ai_suggestions')->where('id',$id)->lockForUpdate()->first();
+                if(!$s||$s->status!=='pending')return false;
+                Capsule::table('mod_amssoft_fail2ban_ai_suggestions')->where('id',$id)->update(['status'=>'rejected','resolved_at'=>date('Y-m-d H:i:s'),'resolved_by'=>$resolvedBy]);
+                $lines=Safety::evidence(json_decode($s->evidence??'[]',true)?:[],$s->ip);
+                if($lines)Capsule::table('mod_amssoft_fail2ban_detections')->where('ip',$s->ip)->where('source_log',$s->source_log)->whereIn('evidence',$lines)
+                    ->update(['validation_state'=>'rejected']);
+                return true;
+            });}finally{if($serialize)Capsule::selectOne("SELECT RELEASE_LOCK('amsfb_policy')");}
+        }
 
         $affected = Capsule::table('mod_amssoft_fail2ban_ai_suggestions')
             ->where('id', $id)
+            ->when((int)self::getConfig('schema_version','0')>=23,fn($q)=>$q->where('status','!=','rejected'))
             ->update([
                 'status'      => $status,
                 'resolved_at' => Capsule::raw('NOW()'),
@@ -567,6 +616,8 @@ class Database
                 Capsule::raw('COUNT(*) as ip_count')
             )
             ->where('s.status', 'pending')
+            ->where('s.classification','ban')
+            ->when(DecisionProtection::enabled(),fn($q)=>$q->whereIn('s.id',DecisionProtection::ids()))
             ->groupBy(Capsule::raw("COALESCE(g.country_code, '')"), Capsule::raw("COALESCE(NULLIF(g.country, ''), 'Desconhecido')"))
             ->orderByRaw('COUNT(*) DESC')
             ->get()
@@ -589,7 +640,8 @@ class Database
     {
         $q = Capsule::table('mod_amssoft_fail2ban_ai_suggestions as s')
             ->leftJoin('mod_amssoft_fail2ban_geo_cache as g', 's.ip', '=', 'g.ip')
-            ->where('s.status', 'pending');
+            ->where('s.status', 'pending')->where('s.classification','ban');
+        if(DecisionProtection::enabled())$q->whereIn('s.id',DecisionProtection::ids());
 
         if ($countryCode !== '') {
             $q->where('g.country_code', $countryCode);
@@ -610,15 +662,78 @@ class Database
      * Conta detecções de um IP nas últimas X minutos (para modo threshold).
      * Considera sugestões com status pending ou auto_executed.
      */
-    public static function countRecentDetections(string $ip, int $minutes): int
+    public static function countRecentDetections(string $ip, int $minutes, ?string $pattern=null,?string $source=null,?string $family=null): int
     {
+        if(RecentActivity::enabled())return DecisionEligibility::thresholdCount($ip,$minutes,$pattern,$source,$family);
+        if(EvidenceLinks::enabled()){
+            $q=EvidenceLinks::eligible(Capsule::table('mod_amssoft_fail2ban_detections as d'),'d',Policy::number('ai_auto_min_confidence'),null,['pending','auto_executed'])
+                ->where('d.ip',$ip)->whereRaw('d.detected_at >= DATE_SUB(NOW(), INTERVAL ? MINUTE)',[max(1,$minutes)]);
+            if($source!==null)$q->where('d.source_log',$source);
+            if($family!==null)$q->where('d.family_key',$family);elseif($pattern!==null)$q->where('d.pattern',$pattern);
+            return (int)$q->count();
+        }
         // [SEC-14] Evitar Capsule::raw() com variável interpolada.
-        $since = date('Y-m-d H:i:s', time() - $minutes * 60);
-        return (int) Capsule::table('mod_amssoft_fail2ban_ai_suggestions')
-            ->where('ip', $ip)
-            ->whereIn('status', ['pending', 'auto_executed'])
-            ->where('created_at', '>=', $since)
-            ->count();
+        $query=Capsule::table('mod_amssoft_fail2ban_detections as d')
+            ->join('mod_amssoft_fail2ban_ai_suggestions as s', 's.id', '=', 'd.suggestion_id')
+            ->where('d.ip', $ip)
+            ->whereIn('s.status', ['pending', 'auto_executed'])
+            ->whereRaw('d.detected_at >= DATE_SUB(NOW(), INTERVAL ? MINUTE)', [max(1, $minutes)]);
+        if((int)self::getConfig('schema_version','0')>=15) {
+            if($family!==null&&(int)self::getConfig('schema_version','0')>=21)$query->where('d.family_key',$family);
+            elseif($pattern!==null)$query->where('d.pattern',$pattern);
+            $query->whereRaw('CAST(d.confidence AS UNSIGNED) >= ?',[Policy::number('ai_auto_min_confidence')]);
+        }
+        if((int)self::getConfig('schema_version','0')>=21)$query->where('d.validation_state','valid')->where('s.classification','ban')->where('s.confidence','>=',Policy::number('ai_auto_min_confidence'));
+        if($source!==null)$query->where('d.source_log',$source);
+        return (int)$query->count();
+    }
+
+    public static function recordDetections(int $suggestionId, array $suggestion): void
+    {
+        if((int)self::getConfig('schema_version','0')>=27&&RequestEvidence::nonOffensiveOnly($suggestion))return;
+        $v21=(int)self::getConfig('schema_version','0')>=21;
+        if($v21&&(($suggestion['action']??$suggestion['classification']??'')!=='ban'||empty($suggestion['_native_validated'])||empty($suggestion['_evidence_validated'])))return;
+        $ip = $suggestion['ip'] ?? '';
+        $evidence = $suggestion['evidence'] ?? [];
+        if (is_string($evidence)) $evidence = json_decode($evidence, true) ?: [];
+        foreach (Safety::evidence($evidence, $ip) as $line) {
+            if($v21&&isset($suggestion['_native_matched_hashes'])&&!in_array(hash('sha256',$line),$suggestion['_native_matched_hashes'],true))continue;
+            $matching=array_values(array_filter($suggestion['_events']??[],fn($e)=>$e['line']===$line));
+            foreach($matching?:[null] as $sourceEvent) {
+            $metadata=[]; $time=null;
+            if($v21)$metadata=['family_key'=>AttackFamily::forSuggestion($suggestion),'validation_state'=>'valid','validated_at'=>date('Y-m-d H:i:s'),'validation_generation'=>AIAnalyzer::RECOVERY_GENERATION];
+            if($v21&&!$sourceEvent){
+                $originalTime=BehaviorStore::eventTime($line);
+                if(!$originalTime||$originalTime>time()+300)continue;
+                $time=date('Y-m-d H:i:s',$originalTime);
+            }
+            if((int)self::getConfig('schema_version','0')>=15) {
+                if($sourceEvent) {
+                    $metadata+=['event_id'=>$sourceEvent['id'],'pattern'=>$sourceEvent['pattern']]; $time=date('Y-m-d H:i:s',$sourceEvent['time']);
+                }
+                $metadata+=['pattern'=>$suggestion['_pattern']??null,'filter_name'=>$suggestion['filter_name']??null,'confidence'=>(string)($suggestion['confidence']??0)];
+            }
+            $fingerprint=$metadata['event_id']??hash('sha256', $ip . "\0" . ($suggestion['source_log'] ?? '') . "\0" . $line);
+            if($v21){
+                $prior=Capsule::table('mod_amssoft_fail2ban_detections')->where('fingerprint',$fingerprint)->first();
+                if($prior&&($prior->validation_state==='rejected'||(self::getSuggestion((int)$prior->suggestion_id)['status']??'')==='rejected'))continue;
+            }
+            Capsule::table('mod_amssoft_fail2ban_detections')->insertOrIgnore([
+                'fingerprint' => $fingerprint,
+                'ip' => $ip,
+                'suggestion_id' => $suggestionId,
+                'source_log' => $suggestion['source_log'] ?? null,
+                'evidence' => mb_strcut($line, 0, 65535, 'UTF-8'),
+                'detected_at' => $time??Capsule::raw('NOW()'),
+            ]+$metadata);
+            if(EvidenceLinks::enabled()){
+                EvidenceLinks::link($fingerprint,$suggestionId,$suggestion);
+                Capsule::table('mod_amssoft_fail2ban_detections')->where('fingerprint',$fingerprint)->where('validation_state','!=','rejected')
+                    ->update(['family_key'=>$metadata['family_key'],'confidence'=>$metadata['confidence'],'validation_state'=>'valid','validated_at'=>$metadata['validated_at'],'validation_generation'=>$metadata['validation_generation']]);
+            }elseif($v21)Capsule::table('mod_amssoft_fail2ban_detections')->where('fingerprint',$fingerprint)->where('ip',$ip)->where('source_log',$suggestion['source_log']??null)
+                ->update(['suggestion_id'=>$suggestionId,'family_key'=>$metadata['family_key'],'confidence'=>$metadata['confidence'],'validation_state'=>'valid','validated_at'=>$metadata['validated_at'],'validation_generation'=>$metadata['validation_generation'],'detected_at'=>$time]);
+            }
+        }
     }
 
     // -----------------------------------------------------------------------
@@ -670,15 +785,19 @@ class Database
      * - Retorna todos os failregex distintos (top 5) para filtro multi-padrão
      * - Retorna source_log da ocorrência que forneceu o best_failregex
      */
-    public static function analyzeFilterNameOccurrences(string $filterName, int $windowDays = 30): array
+    public static function analyzeFilterNameOccurrences(string $filterName, int $windowDays = 30, ?string $sourceLog = null, ?string $pattern=null): array
     {
         $since = date('Y-m-d H:i:s', time() - $windowDays * 86400);
 
-        $rows = Capsule::table('mod_amssoft_fail2ban_ai_suggestions')
+        $query = Capsule::table('mod_amssoft_fail2ban_ai_suggestions')
             ->where('filter_name', $filterName)
             ->where('created_at', '>=', $since)
             ->where('status', '!=', 'rejected')
-            ->orderBy('created_at', 'desc') // determinístico: mais recentes primeiro
+            ->orderBy('created_at', 'desc');
+        if((int)self::getConfig('schema_version','0')>=21)$query->where('classification','ban')->where('confidence','>=',Policy::number('ai_filter_min_confidence'));
+        if ($sourceLog !== null) $query->where('source_log', $sourceLog);
+        if($pattern!==null&&(int)self::getConfig('schema_version','0')>=15)$query->where('pattern',$pattern);
+        $rows = $query
             ->get()
             ->map(fn ($r) => (array)$r)
             ->all();
@@ -686,6 +805,17 @@ class Database
         $occurrences = count($rows);
         $ips = array_unique(array_column($rows, 'ip'));
         $distinctIps = count($ips);
+        if((int)self::getConfig('schema_version','0')>=15) {
+            $events=Capsule::table('mod_amssoft_fail2ban_detections as d')
+                ->join('mod_amssoft_fail2ban_ai_suggestions as s','s.id','=','d.suggestion_id')
+                ->where('d.filter_name',$filterName)->where('d.detected_at','>=',$since)
+                ->where('s.status','!=','rejected')->whereRaw('CAST(d.confidence AS UNSIGNED) >= ?',[Policy::number('ai_filter_min_confidence')]);
+            if((int)self::getConfig('schema_version','0')>=21)$events->where('d.validation_state','valid')->where('s.classification','ban')->where('s.confidence','>=',Policy::number('ai_filter_min_confidence'));
+            if($sourceLog!==null)$events->where('d.source_log',$sourceLog);
+            if($pattern!==null)$events->where('d.pattern',$pattern);
+            $occurrences=(clone $events)->count();
+            $distinctIps=(clone $events)->distinct()->count('d.ip');
+        }
 
         // Failregex por frequência (top 5, determinístico via ordenação prévia)
         $regexCounts = [];
@@ -716,6 +846,55 @@ class Database
             'best_source_log' => $bestSourceLog,
             'window_days'     => $windowDays,
         ];
+    }
+
+    public static function familyStats(string $family,string $source,int $seconds,int $confidence): array
+    {
+        if(RecentActivity::enabled()){
+            $events=array_values(array_filter(DecisionEligibility::events(null,$source,(int)ceil($seconds/60),null,null,false,$confidence),fn($e)=>$e['family_key']===$family));
+            return ['occurrences'=>count($events),'distinct_ips'=>count(array_unique(array_column($events,'ip')))];
+        }
+        if(EvidenceLinks::enabled()){
+            $q=EvidenceLinks::eligible(Capsule::table('mod_amssoft_fail2ban_detections as d'),'d',$confidence)
+                ->where('d.family_key',$family)->where('d.source_log',$source)->where('d.detected_at','>=',date('Y-m-d H:i:s',time()-$seconds));
+            return ['occurrences'=>(clone $q)->count(),'distinct_ips'=>(clone $q)->distinct()->count('d.ip')];
+        }
+        $q=Capsule::table('mod_amssoft_fail2ban_detections as d')->join('mod_amssoft_fail2ban_ai_suggestions as s','s.id','=','d.suggestion_id')
+            ->where('d.family_key',$family)->where('d.source_log',$source)->where('d.validation_state','valid')->where('s.classification','ban')->where('s.status','!=','rejected')->where('s.confidence','>=',$confidence)
+            ->where('d.detected_at','>=',date('Y-m-d H:i:s',time()-$seconds))->whereRaw('CAST(d.confidence AS UNSIGNED) >= ?',[$confidence]);
+        return ['occurrences'=>(clone $q)->count(),'distinct_ips'=>(clone $q)->distinct()->count('d.ip')];
+    }
+
+    public static function hasUnrejectedProof(array $s): bool
+    {
+        if(RecentActivity::enabled())return (bool)DecisionEligibility::own($s);
+        $lines=$s['evidence']??[];if(is_string($lines))$lines=json_decode($lines,true)?:[];
+        $lines=Safety::evidence($lines,$s['ip']??'');
+        if(isset($s['_native_matched_hashes']))$lines=array_values(array_filter($lines,fn($l)=>in_array(hash('sha256',$l),$s['_native_matched_hashes'],true)));
+        if(!$lines)return false;
+        if(EvidenceLinks::enabled()){
+            $q=EvidenceLinks::eligible(Capsule::table('mod_amssoft_fail2ban_detections as d'),'d',Policy::number('ai_auto_min_confidence'),(int)($s['_suggestion_id']??$s['id']??0))
+                ->where('d.ip',$s['ip'])->where('d.source_log',$s['source_log']??null)->whereIn('d.evidence',$lines)
+                ->where('d.detected_at','>=',date('Y-m-d H:i:s',time()-Policy::number('ai_behavior_hours')*3600));
+            if(!empty($s['_events']))$q->whereIn('d.fingerprint',array_column($s['_events'],'id'));
+            return $q->exists();
+        }
+        $q=Capsule::table('mod_amssoft_fail2ban_detections as d')->join('mod_amssoft_fail2ban_ai_suggestions as s','s.id','=','d.suggestion_id')
+            ->where('d.ip',$s['ip'])->where('d.source_log',$s['source_log']??null)->where('d.validation_state','valid')->whereIn('d.evidence',$lines)
+            ->where('d.detected_at','>=',date('Y-m-d H:i:s',time()-Policy::number('ai_behavior_hours')*3600))->where('s.classification','ban')->where('s.status','!=','rejected');
+        if(!empty($s['_events']))$q->whereIn('d.fingerprint',array_column($s['_events'],'id'));
+        else $q->where('d.suggestion_id',(int)($s['_suggestion_id']??$s['id']??0));
+        return $q->exists();
+    }
+
+    public static function decision(int $id,string $code,?array $promotion=null,?string $jail=null): void
+    {
+        if((int)self::getConfig('schema_version','0')<21)return;
+        $fields=['decision_code'=>$code];
+        if($promotion!==null)$fields['promotion_result']=json_encode($promotion,JSON_INVALID_UTF8_SUBSTITUTE);
+        if($promotion!==null&&DashboardMetadata::enabled())$fields['dashboard_learning']=AIDashboard::learningGroup(['id'=>$id,'promotion_result'=>$promotion],[]);
+        if($jail!==null)$fields['executed_jail']=$jail;
+        Capsule::table('mod_amssoft_fail2ban_ai_suggestions')->where('id',$id)->update($fields);
     }
 
     /** Returns ban-time cross-reference for a list of IPs from the DB log. */

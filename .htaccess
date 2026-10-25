@@ -1,0 +1,8 @@
+Options -Indexes
+<IfModule mod_rewrite.c>
+    RewriteEngine On
+    RewriteRule ^(?:(?:[^/]+/)*\.[^/]+|tests|scripts|setup|sql|docs|data|lib|controllers|templates)(?:/|$) - [F,L]
+</IfModule>
+<FilesMatch "(?i)(?:^\.|\.bakp?(?:\.|$)|^(?:CLAUDE|AGENTS)\.md$)">
+    Require all denied
+</FilesMatch>

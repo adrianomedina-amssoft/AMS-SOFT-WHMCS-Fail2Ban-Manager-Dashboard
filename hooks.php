@@ -12,6 +12,35 @@ use WHMCS\Database\Capsule;
 
 require_once __DIR__ . '/lib/Router.php'; // registra o autoloader de namespace
 
+// Runs after the existing collection/analysis hooks. Local observation has no ban authority.
+add_hook('AfterCronJob', 2, function (): void {
+    try { \AMS\Fail2Ban\ProbeSimulation::capture(); }
+    catch (\Throwable $e) { error_log('[AMSFB] '.date('c').' phase=simulation kind='.get_class($e)); }
+});
+
+// Presentation maintenance only; bounded, no provider/native operations or GET writes.
+add_hook('AfterCronJob', 3, function (): void {
+    try { \AMS\Fail2Ban\DashboardMetadata::refresh(); }
+    catch (\Throwable $e) { error_log('[AMSFB] '.date('c').' phase=dashboard_index kind='.get_class($e)); }
+});
+
+// Documented WHMCS activity hook; legacy failure hooks below are not emitted
+// by all WHMCS versions. Match only anchored, native authentication messages.
+// https://developers.whmcs.com/hooks-reference/everything-else/#logactivity
+add_hook('LogActivity', 1, function (array $vars): void {
+    $description = $vars['description'] ?? '';
+    if (!preg_match('/^Failed (?:(Admin|Client|User) )?Login Attempt(?:\s|:|-|$)/i', $description, $m)) return;
+    try {
+        $enabled = Capsule::table('tbladdonmodules')->where('module', 'amssoft_fail2ban')
+            ->where('setting', 'enable_hooks')->value('value');
+        if ($enabled !== 'on') return;
+        $area = strtolower($m[1] ?? '') === 'admin' ? 'admin' : 'client';
+        amssoft_fail2ban_write_auth_log($area, '', $vars['ipaddress'] ?? '');
+    } catch (\Throwable $e) {
+        error_log('[AMSFB] Falha ao registrar evento de autenticação.');
+    }
+});
+
 add_hook('ClientLoginFailed', 1, function (array $vars): void {
     // Only act when the module hook setting is enabled
     $row = Capsule::table('tbladdonmodules')
@@ -39,6 +68,19 @@ add_hook('AdminUserLoginFailed', 1, function (array $vars): void {
 // Hook periódico de análise de IA via cron WHMCS
 // -----------------------------------------------------------------------
 
+add_hook('AfterCronJob', 0, function (): void {
+    try {
+        \AMS\Fail2Ban\Migrations::run();
+        $client=new \AMS\Fail2Ban\Fail2BanClient('/usr/bin/sudo','/usr/bin/fail2ban-client');
+        \AMS\Fail2Ban\Maintenance::tick($client);
+        // Local collection is independent of provider health and auto-ban mode.
+        \AMS\Fail2Ban\AutoBanEngine::collectLocal();
+    } catch(\Throwable $e) {
+        error_log('[AMSFB] '.date('c').' phase=collector_maintenance kind='.get_class($e));
+        try { \AMS\Fail2Ban\Database::setConfig('ai_collector_error','Falha local: '.get_class($e)); } catch(\Throwable $ignored) {}
+    }
+});
+
 add_hook('AfterCronJob', 1, function (): void {
     // Verificar se o módulo tem tabelas criadas (evita erros antes do activate)
     try {
@@ -52,14 +94,8 @@ add_hook('AfterCronJob', 1, function (): void {
         return;
     }
 
-    $interval = (int)\AMS\Fail2Ban\Database::getConfig('ai_interval_minutes', 30);
-    $lastRun  = (int)\AMS\Fail2Ban\Database::getConfig('ai_last_run', 0);
-
-    if ((time() - $lastRun) < ($interval * 60)) {
-        return; // Ainda não é hora de rodar
-    }
-
     try {
+        if (!\AMS\Fail2Ban\CycleSchedule::due()) return;
         // Usar provedor ativo (multi-provider)
         $config = \AMS\Fail2Ban\AIAnalyzer::getActiveConfig();
         if (empty($config['api_key'])) {
@@ -71,7 +107,8 @@ add_hook('AfterCronJob', 1, function (): void {
             $config['api_key'],
             $config['model'],
             $config['base_url'],
-            $config['protocol'] ?? ''
+            $config['protocol'] ?? '',
+            $config['reasoning_effort'] ?? ''
         );
 
         $row = Capsule::table('tbladdonmodules')
@@ -94,10 +131,10 @@ add_hook('AfterCronJob', 1, function (): void {
         // esperar ai_interval_minutes (default 30min).
         if (!isset($result['_locked_out'])) {
             \AMS\Fail2Ban\Database::setConfig('ai_last_run', (string)time());
-            \AMS\Fail2Ban\Database::setConfig("ai_provider_{$config['provider']}_last_ping", '1');
         }
     } catch (\Throwable $e) {
-        // Falha silenciosa — não interrompe o cron do WHMCS
+        error_log('[AMSFB] '.date('c').' phase=ai_cycle kind='.get_class($e));
+        try { \AMS\Fail2Ban\Database::setConfig('ai_last_error','Falha no ciclo: '.get_class($e)); } catch(\Throwable $ignored) {}
     }
 });
 
@@ -112,15 +149,16 @@ add_hook('AfterCronJob', 1, function (): void {
 function amssoft_fail2ban_write_auth_log(string $area, string $user, string $ip): void
 {
     // Validate IP before logging
-    if ($ip !== '' && filter_var($ip, FILTER_VALIDATE_IP) === false) {
-        $ip = '0.0.0.0';
-    }
+    if (filter_var($ip, FILTER_VALIDATE_IP) === false) return;
 
     $row  = Capsule::table('tbladdonmodules')
         ->where('module', 'amssoft_fail2ban')
         ->where('setting', 'whmcs_log_path')
         ->first();
     $path = $row->value ?? '/var/log/whmcs_auth.log';
+    static $written = [];
+    $eventKey = $path . '|' . $area . '|' . $ip;
+    if (isset($written[$eventKey])) return;
 
     // [SEC-1] Validate path: must be under /var/log/, no traversal, .log or .txt extension only.
     // Prevents an admin-configured path from pointing to a web-accessible PHP file,
@@ -148,5 +186,9 @@ function amssoft_fail2ban_write_auth_log(string $area, string $user, string $ip)
         $user
     );
 
-    @file_put_contents($path, $line, FILE_APPEND | LOCK_EX);
+    if (@file_put_contents($path, $line, FILE_APPEND | LOCK_EX) !== false) {
+        $written[$eventKey] = true;
+    } else {
+        error_log('[AMSFB] Não foi possível escrever no log de autenticação.');
+    }
 }
