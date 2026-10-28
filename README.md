@@ -1,8 +1,16 @@
 # AMS SOFT — Fail2Ban Manager para WHMCS
 
-Painel administrativo para Fail2Ban, com proteção nativa, análise assistida por IA, evidências por IP e controles de automação. Versão pública: **2.2.54**.
+Painel administrativo para Fail2Ban, com proteção nativa, análise assistida por IA, evidências por IP e controles de automação. Versão pública: **2.2.55**.
 
 Este projeto altera regras de segurança quando configurado para isso. Teste em homologação e mantenha acesso de recuperação antes de instalar ou atualizar. Não é uma garantia de detecção de todos os ataques.
+
+## Novidades da 2.2.55
+
+- Novo grupo opcional `session_lfi_probe` em **Proteção → Sondagem nativa**: reconhece apenas `/vuln.php?page=/tmp/sessions/sess_...`, com nome de sessão limitado e barras literais ou codificadas. Não transforma qualquer PHP, query ou 404 em ataque. Vem desmarcado por padrão; ative somente após conferir ausência de uso legítimo em todos os sites monitorados. Usa os controles nativos de tentativas, janela, duração e whitelist.
+- Validação de novos filtros recusa expressões iniciadas por um prefixo arbitrário antes do IP. Testes reproduzem captura truncada do endereço e exigem o peer real, incluindo IPv6 e campos forjados.
+- `scripts/legacy_peer_repair.py` fornece uma transformação pura e delimitada dos cabeçalhos de cinco filtros legados. Não é um instalador: não grava configuração nem recarrega jails. Uma aplicação operacional exige revisar os filtros existentes, comparar hashes, testar os ramos, preservar tickets e ações e conferir a cobertura após reload. Copiar esta versão não repara automaticamente filtros já instalados em `/etc/fail2ban`.
+
+Regras aprendidas e ajustes de um servidor, inclusive ampliações de fontes ou de cobertura de `/admin/config.php`, não são distribuídos como configuração pronta. A atualização não transfere bans, não reprocessa eventos antigos e não altera automaticamente os limites da IA. Atualize também a ponte privilegiada conforme as instruções abaixo antes de selecionar o novo grupo.
 
 ## Como funciona
 

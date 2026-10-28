@@ -18,7 +18,7 @@ final class NativeProbes
         'rdweb_probe'=>['/RDWeb','/RDWeb/Pages/en-US/login.aspx'],
         'exchange_auth_probe'=>['/owa/auth/errorFE.aspx','/ecp/Current/exporttool/microsoft.exchange.ediscovery.exporttool.application','/owa/auth/logon.aspx'],
     ];
-    public const GROUPS=[...self::DEFAULT_GROUPS,'vmware_probe','druid_probe','odoo_probe','cisco_vpn_probe','sonicwall_probe','citrix_probe',
+    public const GROUPS=[...self::DEFAULT_GROUPS,'session_lfi_probe','vmware_probe','druid_probe','odoo_probe','cisco_vpn_probe','sonicwall_probe','citrix_probe',
         'ivanti_probe','globalprotect_probe','rdweb_probe','exchange_auth_probe'];
     public const KEYS=['native_probe_enabled','native_probe_groups','native_probe_maxretry','native_probe_findtime','native_probe_bantime'];
     public static function changed(array $old,array $next): bool {

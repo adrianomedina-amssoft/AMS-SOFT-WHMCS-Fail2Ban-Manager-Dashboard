@@ -17,6 +17,9 @@ function check($value){global $checks;if(!$value)throw new \RuntimeException('Po
 function rejects($input,$current){try{Policy::validate($input,$current);}catch(\InvalidArgumentException $e){return true;}return false;}
 check(Policy::validate([],$defaults)===$defaults);
 check(in_array('php_cgi_probe',NativeProbes::GROUPS,true));
+check(in_array('session_lfi_probe',NativeProbes::GROUPS,true));
+check(!in_array('session_lfi_probe',NativeProbes::DEFAULT_GROUPS,true));
+check(Policy::validate(['native_probe_groups'=>'session_lfi_probe'],$defaults)['native_probe_groups']==='session_lfi_probe');
 check(Policy::validate(['native_probe_groups'=>'php_cgi_probe'],$defaults)['native_probe_groups']==='php_cgi_probe');
 check(Policy::validate(['native_probe_groups'=>'env'],$defaults)['native_probe_groups']==='env');
 check(rejects(['ai_application_probe_groups'=>"solr\nservlet",'ai_application_probe_min_apps'=>'3'],$defaults));

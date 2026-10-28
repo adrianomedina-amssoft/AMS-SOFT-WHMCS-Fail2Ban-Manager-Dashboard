@@ -1,5 +1,14 @@
 # Changelog público
 
+## 2.2.55
+
+- Novo grupo nativo opcional `session_lfi_probe`, com alvo e payload fechados, controle na UI e limites nativos existentes. Desativado por padrão em novas instalações.
+- Recusa antecipada de prefixos arbitrários antes do IP em novos filtros e regressões de captura incorreta, IPv4/IPv6 e campos forjados.
+- Transformação pura, de escopo finito, para revisão operacional de cabeçalhos de cinco filtros legados; aplicação não automática e sem configuração real de servidor no pacote.
+- Testes de assinatura, negativos, seleção do catálogo e preservação dos padrões existentes. Nenhuma mudança de schema, confiança ou orçamento da IA.
+
+Esta publicação contém código, testes sintéticos e documentação pública. Relatórios operacionais, PRDs, logs, identificadores reais de detecções e regras aprendidas de uma instalação permanecem privados.
+
 ## 2.2.54
 
 Esta publicação consolida o desenvolvimento posterior à versão pública 2.0.1. O resumo abaixo descreve funcionalidades; não reproduz auditorias nem estado de servidores.

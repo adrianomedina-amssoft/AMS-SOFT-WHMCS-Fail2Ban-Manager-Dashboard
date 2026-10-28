@@ -156,6 +156,8 @@ def validate_filter(text, evidence):
     patterns = cfg.get('Definition', 'failregex').splitlines()
     if not patterns or any(p.count('<HOST>') != 1 for p in patterns if p.strip()):
         raise FilterValidationError('filter_host', 'Each expression needs exactly one HOST')
+    if any(p.strip().startswith((r'^.*', r'^.+')) for p in patterns if p.strip()):
+        raise FilterValidationError('filter_peer', 'Arbitrary prefix before peer is forbidden')
     with tempfile.TemporaryDirectory(prefix='amsfb-validate-') as d:
         p = Path(d) / 'candidate.conf'
         p.write_text(text)
@@ -500,7 +502,7 @@ APPLICATION_TRAPS = {
     'rdweb_probe': ('/RDWeb', '/RDWeb/Pages/en-US/login.aspx'),
     'exchange_auth_probe': ('/owa/auth/errorFE.aspx', '/ecp/Current/exporttool/microsoft.exchange.ediscovery.exporttool.application', '/owa/auth/logon.aspx'),
 }
-PROBE_GROUPS = ('env', 'git', 'svn', 'wpconfig', 'credentials', 'wordpress', 'cms', 'traversal', 'query_traversal', 'phpunit', 'debug', 'db_admin', 'exchange_probe', 'gpon_probe', 'webshell_probe', 'php_cgi_probe', *APPLICATION_TRAPS)
+PROBE_GROUPS = ('env', 'git', 'svn', 'wpconfig', 'credentials', 'wordpress', 'cms', 'traversal', 'query_traversal', 'phpunit', 'debug', 'db_admin', 'exchange_probe', 'gpon_probe', 'webshell_probe', 'php_cgi_probe', 'session_lfi_probe', *APPLICATION_TRAPS)
 SENSITIVE_SOURCES = ('/var/log/apache2/access.log', '/var/log/apache2/access_whmcs.log', '/var/log/apache2/access_license_gateway.log')
 TRAVERSAL_SOURCES = ('/var/log/apache2/error.log', '/var/log/apache2/error_whmcs.log', '/var/log/apache2/error_license_gateway.log')
 TRAVERSAL_DOT = r'(?:\.|%2[eE]|%252[eE]|%%32%65)'
@@ -575,7 +577,7 @@ def sensitive_filter(groups, enabled=True):
         'db_admin': r'(?:phpmyadmin(?:[-_]?[0-9][a-z0-9._-]{0,32})?|php-myadmin|pma|myadmin)',
     }
     # Only the structured request target; no arbitrary regex from a caller.
-    path_groups=[g for g in PROBE_GROUPS if g in groups and g not in ('query_traversal','exchange_probe','gpon_probe','webshell_probe','php_cgi_probe') and g not in APPLICATION_TRAPS]
+    path_groups=[g for g in PROBE_GROUPS if g in groups and g not in ('query_traversal','exchange_probe','gpon_probe','webshell_probe','php_cgi_probe','session_lfi_probe') and g not in APPLICATION_TRAPS]
     targets=[]
     if path_groups:
         targets.append(r'/(?:[^ "?]*'+slash+r')?(?i:'+'|'.join(patterns[g] for g in path_groups)+r')(?:'+slash+r'[^ "?]*)?(?:%20){0,2}(?:\?[^ "\r\n]*)?')
@@ -605,6 +607,10 @@ def sensitive_filter(groups, enabled=True):
         targets.append(r'(?i:(?:'+root+r'|'+plugin+r')(?:\?[^ "\r\n]*)?)')
     if 'php_cgi_probe' in groups:
         targets.append(r'(?i:'+php_cgi_target_pattern()+')')
+    if 'session_lfi_probe' in groups:
+        # Audited absent endpoint; exact query and bounded private session name.
+        # No generic PHP/query authority, path-info or arbitrary sink.
+        targets.append(r'/vuln\.php\?page='+slash+'tmp'+slash+'sessions'+slash+r'sess_[A-Za-z0-9_-]{1,128}')
     # Literal root targets for absent applications only; no generic path groups,
     # normalization, case folding, suffix or UA/referrer authority.
     for group, paths in APPLICATION_TRAPS.items():

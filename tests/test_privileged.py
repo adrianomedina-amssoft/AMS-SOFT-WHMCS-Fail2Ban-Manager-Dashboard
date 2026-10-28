@@ -131,7 +131,7 @@ class PrivilegedTests(unittest.TestCase):
         HELPER['validate_filter'](text, [self.positive()])
 
     def test_broad_filter_rejected(self):
-        with self.assertRaisesRegex(ValueError, 'legitimate'):
+        with self.assertRaisesRegex(ValueError, 'Arbitrary prefix before peer'):
             HELPER['validate_filter']('[Definition]\nfailregex = ^.*<HOST>.*$\n', [self.positive()])
 
     def test_no_positive_rejected(self):
@@ -154,7 +154,7 @@ class PrivilegedTests(unittest.TestCase):
 
     def test_forged_peer_in_url_rejected(self):
         text = '[Definition]\nfailregex = ^.*"GET /probe\\?ip=<HOST> HTTP/1\\.1" 404\n'
-        with self.assertRaisesRegex(ValueError, 'different peer'):
+        with self.assertRaisesRegex(ValueError, 'Arbitrary prefix before peer'):
             HELPER['validate_filter'](text, [self.positive('/probe?ip=203.0.113.7')])
 
     def test_ipv6_positive(self):

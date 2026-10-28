@@ -18,7 +18,7 @@ if(in_array('--json',$argv,true)){
 }
 $checks=0;function trapCheck($ok,$why){global $checks;if(!$ok)throw new \RuntimeException($why);$checks++;}
 $defaults=Policy::values();
-trapCheck(count(NativeProbes::GROUPS)===26,'Catalog size');
+trapCheck(count(NativeProbes::GROUPS)===27,'Catalog size including optional session LFI');
 trapCheck(count(NativeProbes::DEFAULT_GROUPS)===16,'Default size');
 trapCheck($defaults['native_probe_groups']===implode("\n",NativeProbes::DEFAULT_GROUPS),'Default groups changed');
 foreach(NativeProbes::APPLICATION_TRAPS as $group=>$paths){
@@ -34,7 +34,7 @@ foreach(NativeProbes::APPLICATION_TRAPS as $group=>$paths){
     trapCheck(NativeProbes::sync($off)&&end(Privileged::$calls)['enabled']===0,'Disable payload missing');
 }
 $all=Policy::validate(['native_probe_groups'=>implode("\n",NativeProbes::GROUPS)],$defaults);
-trapCheck(count(explode("\n",$all['native_probe_groups']))===26,'Combined group selection');
+trapCheck(count(explode("\n",$all['native_probe_groups']))===27,'Combined group selection');
 trapCheck(Policy::validate([], $all)===$all,'Stored selection was silently reset');
 trapCheck(Policy::validate([], $defaults)===$defaults,'Defaults changed without selection');
 foreach(['druid_probe /web/login','.*','/druid/index.html'] as $bad){

@@ -25,7 +25,7 @@ function amssoft_fail2ban_config(): array
         'author'      => 'AMS SOFT',
         'authorurl' => 'https://www.amssoft.com.br',
         'language'    => 'portuguese-br',
-        'version'     => '2.2.54',
+        'version'     => '2.2.55',
         'fields'      => [
             'sudo_path'       => [
                 'FriendlyName' => 'Caminho sudo',
