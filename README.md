@@ -1,16 +1,33 @@
 # AMS SOFT — Fail2Ban Manager para WHMCS
 
-Painel administrativo para Fail2Ban, com proteção nativa, análise assistida por IA, evidências por IP e controles de automação. Versão pública: **2.2.55**.
+Painel administrativo para Fail2Ban, com proteção nativa, análise assistida por IA, evidências por IP e controles de automação. Versão pública: **2.2.58**.
 
 Este projeto altera regras de segurança quando configurado para isso. Teste em homologação e mantenha acesso de recuperação antes de instalar ou atualizar. Não é uma garantia de detecção de todos os ataques.
 
-## Novidades da 2.2.55
+## Novidades da 2.2.58
+
+- Grupo opcional `boaform_probe` em **Proteção → Sondagem nativa** para GET ao caminho literal `/boaform/adminformLogout//boaform/admin/login.asp`, com query opcional. A caixa e a barra dupla são exatas. Vem desmarcado por padrão; ative somente onde esse painel de roteador estiver ausente em todos os sites monitorados. Usa tentativas, janela, duração e whitelist nativas compartilhadas; **Tentativas = 1** permite bloquear na primeira ocorrência. Desmarcar preserva os bans existentes e a regra aprendida anterior, se houver.
+- Revisitação de campanhas exige evidência recente do próprio IP e decisão validada vinculada à tarefa. Um novo bucket do mesmo IP não reabre automaticamente um bucket antigo. Comparação de revisão, evidência, estado e backoff protege a atualização; o contador de entradas só aumenta se uma tarefa for efetivamente reaberta.
+- Regressões de alvo nativo fechado, IPv4/IPv6, headers forjados, opt-out e tarefas do mesmo IP separadas por mais de 14 horas.
+
+O código público não contém a reconciliação pontual de dados de uma instalação nem IDs de tarefas reais. Instalar a atualização não limpa filas, não altera conclusões históricas e não bane retroativamente os IPs de um replay.
+
+## Mudanças desde a 2.2.55
+
+- **SQL nativo:** `sql_injection` cobre sintaxes SQL fechadas nas queries de `/cart.php` e `/index.php`. `sql_obfuscated` acrescenta operadores em comentários executáveis MySQL, limitados às queries desses dois endpoints e de `/modules/addons/RSThemes/src/Api/clientApi.php`. O acesso normal à rota não é isca. Ambos são opcionais, configuráveis pela UI e não substituem a jail SQL legada.
+- **Isca administrativa:** `admin_config_probe` cobre somente `/admin/config.php` literal, com query opcional, onde esse alvo estiver ausente. Não inclui qualquer `config.php` nem o diretório administrativo personalizado do WHMCS.
+- **Fila:** saídas da memória passam a distinguir proteção vigente, consulta de cobertura indisponível e outros motivos. Intervalos antigos sem essa discriminação continuam desconhecidos. A recuperação local de `coverage_unavailable` usa a rechecagem periódica, exige evidência recente e proteção conhecida e não antecipa chamadas pagas.
+- **Observação local de SNI:** correlação opcional de AH02032 com um GET/HEAD 421 inequívoco de uma rota retirada, no mesmo IP e par canônico de logs. Payload, query, ambiguidade e histórico incompleto mantêm o fluxo normal; a opção não concede whitelist ao IP.
+
+Esses grupos usam os mesmos controles nativos de tentativas, janela, duração e whitelist; alterar os números afeta todos os grupos selecionados. A seleção e os controles permanecem na UI. Novos grupos não são habilitados automaticamente por copiar os arquivos.
+
+## Recursos anteriores da 2.2.55
 
 - Novo grupo opcional `session_lfi_probe` em **Proteção → Sondagem nativa**: reconhece apenas `/vuln.php?page=/tmp/sessions/sess_...`, com nome de sessão limitado e barras literais ou codificadas. Não transforma qualquer PHP, query ou 404 em ataque. Vem desmarcado por padrão; ative somente após conferir ausência de uso legítimo em todos os sites monitorados. Usa os controles nativos de tentativas, janela, duração e whitelist.
 - Validação de novos filtros recusa expressões iniciadas por um prefixo arbitrário antes do IP. Testes reproduzem captura truncada do endereço e exigem o peer real, incluindo IPv6 e campos forjados.
 - `scripts/legacy_peer_repair.py` fornece uma transformação pura e delimitada dos cabeçalhos de cinco filtros legados. Não é um instalador: não grava configuração nem recarrega jails. Uma aplicação operacional exige revisar os filtros existentes, comparar hashes, testar os ramos, preservar tickets e ações e conferir a cobertura após reload. Copiar esta versão não repara automaticamente filtros já instalados em `/etc/fail2ban`.
 
-Regras aprendidas e ajustes de um servidor, inclusive ampliações de fontes ou de cobertura de `/admin/config.php`, não são distribuídos como configuração pronta. A atualização não transfere bans, não reprocessa eventos antigos e não altera automaticamente os limites da IA. Atualize também a ponte privilegiada conforme as instruções abaixo antes de selecionar o novo grupo.
+Regras aprendidas e ajustes de um servidor, inclusive ampliações de fontes, não são distribuídos como configuração pronta. A atualização não transfere bans, não reprocessa eventos antigos e não altera automaticamente os limites da IA. Atualize também a ponte privilegiada conforme as instruções abaixo antes de selecionar os novos grupos. A versão 2.2.58 mantém o schema 37 e o protocolo 30 da ponte.
 
 ## Como funciona
 
@@ -73,6 +90,8 @@ Exemplos de suítes locais sem bootstrap do WHMCS, banco ou chamadas ao provedor
 
 ```bash
 php tests/query_probe.php
+php tests/campaign_revisit.php
+php tests/application_traps.php
 php tests/policy.php
 php tests/protection_view.php
 php tests/ai_settings.php
@@ -82,6 +101,8 @@ PYTHONDONTWRITEBYTECODE=1 python3 -m unittest discover -s tests -p 'test_*.py'
 ```
 
 Os testes Python precisam dos módulos Python do Fail2Ban. Use o interpretador compatível com a instalação da distribuição. Os testes JavaScript precisam de Node.js; ele não é necessário para servir o módulo.
+
+`tests/campaign_revisit_database.php` é um teste de integração separado: precisa de configuração local do WHMCS e acesso ao MySQL, usa tabelas temporárias da conexão e remove as fixtures ao terminar. Não distribui credenciais e não deve ser executado como se fosse um teste puro.
 
 **Não execute todos os arquivos de `tests/` ou `scripts/` indiscriminadamente em produção.** Há testes de integração que acessam banco, namespaces/firewall ou HTTP e comandos de manutenção que alteram estado. Use ambiente descartável e revise cada entrada. Scripts legados de reparo não fazem parte da instalação normal; a seleção de IDs auditados de uma instalação foi removida da distribuição pública e exige preparação local explícita.
 

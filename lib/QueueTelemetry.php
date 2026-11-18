@@ -31,6 +31,13 @@ final class QueueTelemetry
         if($previous&&($previous['metric_version']??1)!==$version)$previous=null;
         $entries=(int)Database::getConfig('ai_queue_entries_total','0');
         $expired=(int)Database::getConfig('ai_queue_expired_total','0');
+        $expiryTotals=[];foreach(['protected','coverage_unavailable','unclassified'] as $reason)
+            $expiryTotals[$reason]=(int)Database::getConfig('ai_queue_expired_'.$reason.'_total','0');
+        $expiryDelta=null;
+        if(isset($previous['expiry_totals'])){
+            $expiryDelta=[];foreach($expiryTotals as $reason=>$total)$expiryDelta[$reason]=$total-(int)($previous['expiry_totals'][$reason]??0);
+        }
+        $metrics+=['expiry_totals'=>$expiryTotals,'expiry_since_previous'=>$expiryDelta];
         $metrics+=['metric_version'=>$version,'finished_at'=>time(),'entries_total'=>$entries,'expired_total'=>$expired,
             'entries_since_previous'=>$previous?$entries-(int)$previous['entries_total']:null,
             'expired_since_previous'=>$previous?$expired-(int)$previous['expired_total']:null];
@@ -67,6 +74,8 @@ final class QueueTelemetry
         $local=array_sum(array_column($measured,'local_observed'));
         $net=$completed+$local-$entries;
         $health=$health??BehaviorStore::health();
+        $breakdown=self::expiryBreakdown($measured);
+        $result['expiry_breakdown']=$breakdown;
         if(!empty($health['awaiting_recheck']))return array_replace($result,['entries'=>$entries,'completed'=>$completed,
             'local_completed'=>$local,'expired'=>array_sum(array_column($measured,'expired_since_previous')),'net_completed'=>$net,
             'capacity'=>'awaiting_recheck','estimated_cycles'=>null]);
@@ -78,7 +87,23 @@ final class QueueTelemetry
         }
         return array_replace($result,['entries'=>$entries,'completed'=>$completed,
             'local_completed'=>$local,'expired'=>array_sum(array_column($measured,'expired_since_previous')),'net_completed'=>$net,
-            ...self::capacity($comparable,$health,$entries,$completed+$local,array_sum(array_column($measured,'expired_since_previous')))]);
+            ...self::capacity($comparable,$health,$entries,$completed+$local,
+                array_sum(array_column($measured,'expired_since_previous'))-($breakdown['protected']??0))]);
+    }
+
+    /** Unknown old intervals remain unknown; never fabricate a zero or subtract ambiguous expiry. */
+    public static function expiryBreakdown(array $cycles): ?array
+    {
+        if(!$cycles)return null;
+        $sum=['protected'=>0,'coverage_unavailable'=>0,'unclassified'=>0];
+        foreach($cycles as $row){
+            $parts=$row['expiry_since_previous']??null;
+            if(!is_array($parts)||array_diff(array_keys($sum),array_keys($parts))||count($parts)!==3)return null;
+            foreach($sum as $key=>$unused)if(!is_int($parts[$key])||$parts[$key]<0)return null;
+            if(array_sum($parts)!==($row['expired_since_previous']??null))return null;
+            foreach($sum as $key=>$unused)$sum[$key]+=$parts[$key];
+        }
+        return $sum;
     }
 
     /** Presentation only; no claims of capacity from an empty or expired queue. */

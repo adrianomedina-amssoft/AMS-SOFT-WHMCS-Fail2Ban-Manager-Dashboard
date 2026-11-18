@@ -52,7 +52,7 @@ final class BehaviorStore
             $path=rawurldecode(explode('?',$m[2],2)[0]);
             $path=preg_replace('/[a-f0-9]{16,}|\b\d+\b/i','{id}',$path);
             $query=rawurldecode(explode('?',$m[2],2)[1]??'');
-            $signature=preg_match('/union\s+(?:all\s+)?select|sleep\s*\(|benchmark\s*\(|or\s+1\s*=\s*1/i',$query)?' sql-probe':'';
+            $signature=(SqlInjection::fromLine($line)||preg_match('/union\s+(?:all\s+)?select|sleep\s*\(|benchmark\s*\(|or\s+1\s*=\s*1/i',$query))?' sql-probe':'';
             if(preg_match('~\.\./|/etc/passwd|(?:\$\(|;|\|)\s*(?:wget|curl|sh|bash)~i',$query))$signature.=' traversal-command';
             return hash('sha256',$m[1].' '.$path.' '.substr($m[3],0,1).$signature);
         }
@@ -465,8 +465,28 @@ final class BehaviorStore
                         ->whereColumn('s.pattern','mod_amssoft_fail2ban_rollups.pattern')
                         ->where('s.status','pending')->where('s.classification','ban')
                         ->where('s.confidence','>=',Policy::number('ai_auto_min_confidence'));
+                    if(RecentActivity::enabled()){
+                        // A newer bucket of the same IP/pattern cannot reopen this task.
+                        $q->whereColumn('s.task_id','mod_amssoft_fail2ban_rollups.id')
+                            ->whereExists(function($proof){
+                                $proof->selectRaw('1')->from(EvidenceLinks::TABLE.' as revisit_link')
+                                    ->join('mod_amssoft_fail2ban_detections as revisit_proof','revisit_proof.fingerprint','=','revisit_link.fingerprint')
+                                    ->whereColumn('revisit_link.suggestion_id','s.id')
+                                    ->where('revisit_link.validation_state','valid')->where('revisit_link.confidence','>=',Policy::number('ai_auto_min_confidence'))
+                                    ->where('revisit_proof.validation_state','valid')
+                                    ->whereColumn('revisit_proof.ip','s.ip')->whereColumn('revisit_proof.source_log','s.source_log')->whereColumn('revisit_proof.pattern','s.pattern')
+                                    ->where('revisit_proof.detected_at','>=',date('Y-m-d H:i:s',RecentActivity::cutoff()))
+                                    ->where('revisit_proof.detected_at','<=',date('Y-m-d H:i:s',time()+300));
+                            });
+                    }
                 });
-            if((int)Database::getConfig('schema_version','0')>=21)$candidates->whereExists(function($q){
+            if(RecentActivity::enabled()){
+                RecentActivity::query($candidates);
+                $candidates->whereNull('blocked_confirmed_at')
+                    ->where(fn($q)=>$q->whereNull('blocked_until_check_at')->orWhere('blocked_until_check_at','<=',date('Y-m-d H:i:s')))
+                    ->where(fn($q)=>$q->whereNull('decision_state')->orWhere('decision_state','!=','rejected'));
+            }
+            if((int)Database::getConfig('schema_version','0')>=21&&!RecentActivity::enabled())$candidates->whereExists(function($q){
                 if(EvidenceLinks::enabled()){
                     $q->selectRaw('1')->from('mod_amssoft_fail2ban_detections as own')
                         ->whereColumn('own.ip','mod_amssoft_fail2ban_rollups.ip')->whereColumn('own.source_log','mod_amssoft_fail2ban_rollups.source_log')
@@ -484,20 +504,40 @@ final class BehaviorStore
             });
             $candidates=$candidates->lockForUpdate()->get();
             foreach($candidates as $row) {
+                if(RecentActivity::enabled()&&!self::revisitEligible((array)$row))continue;
                 $previousMembers=json_decode($row->campaign_members??'[]',true)?:[];
                 $wasBelowThreshold=$row->campaign_signature===hash('sha256',$source."\0".$pattern."\0".'0'."\0".implode("\0",$previousMembers));
                 if($row->campaign_signature===$signature || ($row->campaign_signature && !$wasBelowThreshold && !array_diff($members,$previousMembers))
                     || ($row->last_revisit_at && strtotime($row->last_revisit_at)>time()-Policy::number('ai_campaign_revisit_minutes')*60)) {
                     $avoided++;continue;
                 }
-                Capsule::table('mod_amssoft_fail2ban_rollups')->where('id',$row->id)->where('revision',$row->revision)
-                    ->whereColumn('analyzed_revision','=','revision')->update(['analyzed_revision'=>0,
-                        'campaign_signature'=>$signature,'campaign_members'=>json_encode($members),'last_revisit_at'=>date('Y-m-d H:i:s')]);
-                if((int)Database::getConfig('schema_version','0')>=19)Database::incrementConfig('ai_queue_entries_total');
+                $update=Capsule::table('mod_amssoft_fail2ban_rollups')->where('id',$row->id)->where('revision',$row->revision)
+                    ->whereColumn('analyzed_revision','=','revision');
+                $values=['analyzed_revision'=>0,'campaign_signature'=>$signature,'campaign_members'=>json_encode($members),'last_revisit_at'=>date('Y-m-d H:i:s')];
+                if(RecentActivity::enabled()){
+                    foreach(['samples','last_event_at','processing_state','attempts','validation_attempts','retry_at','decision_state','blocked_confirmed_at','blocked_until_check_at','campaign_signature','last_revisit_at'] as $field)
+                        $update->where($field,$row->$field??null);
+                    $values['processing_state']=(int)$row->attempts>0?'retry':'pending';
+                }
+                $changed=$update->update($values);
+                if($changed&&(int)Database::getConfig('schema_version','0')>=19)Database::incrementConfig('ai_queue_entries_total');
             }
             }
         }
         if($avoided)Database::incrementConfig('ai_revisits_avoided',$avoided);
+    }
+
+    /** Own retained lines must still justify a revisit; metadata alone is insufficient. */
+    public static function revisitEligible(array $row,?int $now=null): bool
+    {
+        $now=$now??time();$cut=$now-Policy::number('ai_analysis_recent_minutes')*60;
+        if((int)($row['revision']??0)<1||(int)($row['analyzed_revision']??-1)!==(int)$row['revision']
+            ||in_array($row['processing_state']??'',['review','rejected'],true)||($row['decision_state']??'')==='rejected'
+            ||!empty($row['blocked_confirmed_at']))return false;
+        foreach(['retry_at','blocked_until_check_at'] as $field)if(!empty($row[$field])&&((strtotime($row[$field])?:PHP_INT_MAX)>$now))return false;
+        $last=strtotime($row['last_event_at']??'')?:0;
+        $latest=RecentActivity::latest($row,$now);
+        return $last>=$cut&&$last<=$now+300&&$latest>=$cut&&$latest<=$now+300;
     }
 
     public static function prune(): void
@@ -505,8 +545,7 @@ final class BehaviorStore
         if((int)Database::getConfig('schema_version','0')>=19) {
             $outside=Capsule::table('mod_amssoft_fail2ban_rollups')->whereColumn('revision','>','analyzed_revision')
                 ->whereNull('expired_reported_at')->where('bucket','<',date('Y-m-d H:i:s',time()-Policy::number('ai_behavior_hours')*3600));
-            $count=$outside->update(['expired_reported_at'=>date('Y-m-d H:i:s')]);
-            if($count){Database::incrementConfig('ai_queue_expired_total',$count);Database::logEvent('','','queue_outside_window','Tarefas sem conclusão fora da janela: '.$count);}
+            QueueExpiry::record($outside);
         }
         $expired=Capsule::table('mod_amssoft_fail2ban_rollups')->whereColumn('revision','>','analyzed_revision')
             ->where('bucket','<',date('Y-m-d H:i:s',time()-Policy::number('ai_rollup_retention_hours')*3600))->count();

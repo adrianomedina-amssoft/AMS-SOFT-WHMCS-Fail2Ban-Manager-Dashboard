@@ -90,6 +90,18 @@ tc(QueueTelemetry::summary(['ready'=>0,'awaiting_recheck'=>1])['capacity']==='aw
 $invalid=$base;$invalid['eligible_comparable']=false;QueueTelemetry::finish($invalid);
 tc(QueueTelemetry::summary($health)['capacity']==='insufficient_data','Incomparable cycle breaks trend');
 $engine=file_get_contents(dirname(__DIR__).'/lib/AutoBanEngine.php');
+Database::$cfg['ai_cycle_metrics']='[]';
+QueueTelemetry::finish($base);QueueTelemetry::finish($base);
+Database::$cfg['ai_queue_expired_total']=(int)Database::getConfig('ai_queue_expired_total','0')+1;
+Database::$cfg['ai_queue_expired_protected_total']=1;
+QueueTelemetry::finish($base);
+$protectedSummary=QueueTelemetry::summary($health);
+tc($protectedSummary['expiry_breakdown']['protected']===1,'Protected expiry reported distinctly');
+tc($protectedSummary['capacity']==='idle','Only proven protected expiry does not imply loss of necessary analysis');
+Database::$cfg['ai_queue_expired_total']++;
+Database::$cfg['ai_queue_expired_coverage_unavailable_total']=1;
+QueueTelemetry::finish($base);
+tc(QueueTelemetry::summary($health)['capacity']==='inconclusive_expiry','Local failure expiry remains conservative');
 tc(strpos($engine,'QueueCohort::capture')<strpos($engine,'while($calls<Policy::number'), 'Snapshot precedes worker selection');
 tc(str_contains($engine,"catch(\\Throwable \$ignored){\$metrics['measurement_error']='cohort_unavailable';}"),'Capture failure stays observational');
 tc(!str_contains($engine,'RecentActivity::crossedCutoff'),'Global history expiry query retired');

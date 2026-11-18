@@ -502,14 +502,14 @@ APPLICATION_TRAPS = {
     'rdweb_probe': ('/RDWeb', '/RDWeb/Pages/en-US/login.aspx'),
     'exchange_auth_probe': ('/owa/auth/errorFE.aspx', '/ecp/Current/exporttool/microsoft.exchange.ediscovery.exporttool.application', '/owa/auth/logon.aspx'),
 }
-PROBE_GROUPS = ('env', 'git', 'svn', 'wpconfig', 'credentials', 'wordpress', 'cms', 'traversal', 'query_traversal', 'phpunit', 'debug', 'db_admin', 'exchange_probe', 'gpon_probe', 'webshell_probe', 'php_cgi_probe', 'session_lfi_probe', *APPLICATION_TRAPS)
+PROBE_GROUPS = ('env', 'git', 'svn', 'wpconfig', 'credentials', 'wordpress', 'cms', 'traversal', 'query_traversal', 'phpunit', 'debug', 'db_admin', 'exchange_probe', 'gpon_probe', 'webshell_probe', 'php_cgi_probe', 'session_lfi_probe', 'sql_injection', 'sql_obfuscated', 'admin_config_probe', 'boaform_probe', *APPLICATION_TRAPS)
 SENSITIVE_SOURCES = ('/var/log/apache2/access.log', '/var/log/apache2/access_whmcs.log', '/var/log/apache2/access_license_gateway.log')
 TRAVERSAL_SOURCES = ('/var/log/apache2/error.log', '/var/log/apache2/error_whmcs.log', '/var/log/apache2/error_license_gateway.log')
 TRAVERSAL_DOT = r'(?:\.|%2[eE]|%252[eE]|%%32%65)'
 TRAVERSAL_SLASH = r'(?:/|%2[fF]|%252[fF])'
 
 
-def sql_query_pattern():
+def sql_legacy_query_pattern():
     # Byte-for-byte parity with SqlInjection::queryPattern().
     s=r'(?:[+ ]|%20|%2520){1,8}';o=r'(?:[+ ]|%20|%2520){0,8}'
     q=r'(?:[\x22\x27]|%22|%27|%2522|%2527)'
@@ -523,15 +523,35 @@ def sql_query_pattern():
     return '(?:'+union+'|'+extract+'|'+order+'|'+boolean+')'
 
 
+def sql_obfuscated_pattern():
+    slash=r'(?:/|%2f|%252f)';star=r'(?:\*|%2a|%252a)';bang=r'(?:!|%21|%2521)'
+    token=lambda word:slash+star+bang+word+star+slash
+    n=r'[0-9]{1,12}';eq=r'(?:=|%3d|%253d)'
+    lp=r'(?:\(|%28|%2528)';rp=r'(?:\)|%29|%2529)'
+    q=r'(?:[\x22\x27]|%22|%27|%2522|%2527)'
+    predicate=token('(?:and|or|where)')+'(?:'+token('not')+')?'+n+'(?:'+eq+n+'|'+token('between')+n+token('and')+n+')(?![0-9])'
+    value='(?:0x[0-9a-f]{1,32}|'+n+'|'+q+'[a-z0-9_]{1,80}'+q+')'
+    conditional=token('case')+token('when')+lp+n+eq+n+rp+token('then')+value
+    return '(?:'+predicate+'|'+conditional+')'
+
+
+def sql_query_pattern():
+    return '(?:'+sql_legacy_query_pattern()+'|'+sql_obfuscated_pattern()+')'
+
+
 def sql_target(target):
     return (isinstance(target,str) and len(target.encode('utf-8',errors='surrogatepass'))<=8192
             and target.startswith('/') and not re.search(r'[\x00-\x1f\x7f]',target)
             and '?' in target and re.search(sql_query_pattern(),target.split('?',1)[1],re.I) is not None)
 
 
-def sql_filter():
+def sql_request_target_pattern():
     # Only the two audited WHMCS root scripts, no UA/referrer/path authority.
-    target=r'/(?:cart|index)\.php\?(?=[^ "\r\n]{1,8192} HTTP/\d(?:\.\d)?" [1-5]\d\d (?:\d+|-)(?: |$))[^ "\r\n]*?(?i:'+sql_query_pattern()+r')[^ "\r\n]*'
+    return r'/(?:cart|index)\.php\?(?=[^ "\r\n]{1,8192} HTTP/\d(?:\.\d)?" [1-5]\d\d (?:\d+|-)(?: |$))[^ "\r\n]*?(?i:'+sql_legacy_query_pattern()+r')[^ "\r\n]*'
+
+
+def sql_filter():
+    target=sql_request_target_pattern()
     expression=r'^<HOST> - \S+ \[\s*\] "[A-Z]{3,12} '+target+r' HTTP/\d(?:\.\d)?" [1-5]\d\d (?:\d+|-)(?: |$)'
     return '[Definition]\nfailregex = '+expression.replace('%','%%')+'\nignoreregex =\n'
 
@@ -577,7 +597,7 @@ def sensitive_filter(groups, enabled=True):
         'db_admin': r'(?:phpmyadmin(?:[-_]?[0-9][a-z0-9._-]{0,32})?|php-myadmin|pma|myadmin)',
     }
     # Only the structured request target; no arbitrary regex from a caller.
-    path_groups=[g for g in PROBE_GROUPS if g in groups and g not in ('query_traversal','exchange_probe','gpon_probe','webshell_probe','php_cgi_probe','session_lfi_probe') and g not in APPLICATION_TRAPS]
+    path_groups=[g for g in PROBE_GROUPS if g in groups and g not in ('query_traversal','exchange_probe','gpon_probe','webshell_probe','php_cgi_probe','session_lfi_probe','sql_injection','sql_obfuscated','admin_config_probe','boaform_probe') and g not in APPLICATION_TRAPS]
     targets=[]
     if path_groups:
         targets.append(r'/(?:[^ "?]*'+slash+r')?(?i:'+'|'.join(patterns[g] for g in path_groups)+r')(?:'+slash+r'[^ "?]*)?(?:%20){0,2}(?:\?[^ "\r\n]*)?')
@@ -607,6 +627,15 @@ def sensitive_filter(groups, enabled=True):
         targets.append(r'(?i:(?:'+root+r'|'+plugin+r')(?:\?[^ "\r\n]*)?)')
     if 'php_cgi_probe' in groups:
         targets.append(r'(?i:'+php_cgi_target_pattern()+')')
+    if 'sql_injection' in groups:
+        targets.append(sql_request_target_pattern())
+    if 'sql_obfuscated' in groups:
+        targets.append(r'/(?:cart\.php|index\.php|modules/addons/RSThemes/src/Api/clientApi\.php)\?[^ "\r\n]*?(?i:'+sql_obfuscated_pattern()+r')[^ "\r\n]*')
+    if 'admin_config_probe' in groups:
+        targets.append(r'/admin/config\.php(?:\?[^ "\r\n]*)?')
+    if 'boaform_probe' in groups:
+        # Audited absent router endpoint: literal case/double slash and GET only.
+        targets.append(r'(?<="GET )/boaform/adminformLogout//boaform/admin/login\.asp(?:\?[^ "\r\n]*)?')
     if 'session_lfi_probe' in groups:
         # Audited absent endpoint; exact query and bounded private session name.
         # No generic PHP/query authority, path-info or arbitrary sink.

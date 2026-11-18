@@ -1,5 +1,25 @@
 # Changelog público
 
+## 2.2.58
+
+- Grupo nativo opcional `boaform_probe`, com GET e caminho literal restritos, seleção pela UI, whitelist e controles compartilhados. Uma ocorrência quando configurado com Tentativas = 1; desativado por padrão em novas instalações.
+- Revisitação de campanhas limitada à atividade recente, tarefa própria e prova validada. Tarefas de outros buckets não emprestam autoridade; comparação de estado preserva revisões, proteção e backoff.
+- Estado pending/retry coerente para tarefas reabertas e contagem apenas após atualização efetiva.
+- Testes de assinatura, negativos, IPv4/IPv6 e revisitação de dois buckets do mesmo IP. Reconciliações operacionais e identificadores de instalação não são distribuídos.
+
+## 2.2.57
+
+- Reconhecimento fechado de SQL ofuscado e precedência sobre o agrupamento genérico de sondagem PHP.
+- Grupos opcionais `sql_obfuscated` e `admin_config_probe`, com controles e ajuda pela UI, preservando a regra SQL legada.
+- Discriminação dos motivos de saída da memória da fila e recuperação local de adiamentos de cobertura com recência e proteção conhecida.
+- Regressões de sintaxe SQL, consulta de cobertura, contadores transacionais, rollback e idempotência. Sem aumento de orçamento ou cadência da IA.
+
+## 2.2.56
+
+- Grupo nativo opcional `sql_injection` para sintaxes SQL fechadas nas queries de `/cart.php` e `/index.php`.
+- Correlação opcional de AH02032/SNI com access421 inequívoco de rota retirada, sem whitelist por IP, status ou User-Agent.
+- Ajustes na observação local conservadora e testes de correlação, identidade e opt-out. Sem configuração real do servidor ou dados operacionais no pacote.
+
 ## 2.2.55
 
 - Novo grupo nativo opcional `session_lfi_probe`, com alvo e payload fechados, controle na UI e limites nativos existentes. Desativado por padrão em novas instalações.

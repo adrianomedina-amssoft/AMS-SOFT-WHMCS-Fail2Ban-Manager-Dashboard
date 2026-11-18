@@ -76,6 +76,15 @@ final class BlockedTasks
                 $values=['blocked_confirmed_at'=>date('Y-m-d H:i:s',$proof['observed_at']),
                     'blocked_until_check_at'=>date('Y-m-d H:i:s',$proof['until']),'blocked_by_json'=>json_encode($proof)];
             } else {
+                if(self::recoverable($row,$snapshot)){
+                    // CAS protects concurrent collection/validation; no acknowledgement or paid attempt.
+                    Capsule::table('mod_amssoft_fail2ban_rollups')->where('id',$row['id'])->where('revision',$row['revision'])
+                        ->where('analyzed_revision',$row['analyzed_revision'])
+                        ->whereColumn('revision','>','analyzed_revision')->where('processing_state','pending')->where('attempts',0)
+                        ->where(fn($q)=>$q->whereNull('decision_state')->orWhere('decision_state','!=','rejected'))
+                        ->where('failure_code','coverage_unavailable')->where('retry_at',$row['retry_at']??null)
+                        ->update(['retry_at'=>null,'failure_code'=>null,'failure_detail'=>null]);
+                }
                 if(!$row['blocked_confirmed_at'])continue;
                 $released++;
                 $values=['blocked_confirmed_at'=>null,'blocked_until_check_at'=>null,'blocked_by_json'=>null];
@@ -102,6 +111,16 @@ final class BlockedTasks
                 'blocked_until_check_at'=>date('Y-m-d H:i:s',$proof['until']),'blocked_by_json'=>json_encode($proof)]);
         }
         return $remaining;
+    }
+
+    /** A known local snapshot may release only a coverage deferral, never validator/provider work. */
+    public static function recoverable(array $row,array $snapshot): bool
+    {
+        if(Policy::number('ai_coverage_recheck_enabled')!==1||!DecisionProtection::enabled()
+            ||($row['failure_code']??'')!=='coverage_unavailable'||($row['processing_state']??'')!=='pending'
+            ||(int)($row['attempts']??0)!==0||($row['decision_state']??'')==='rejected'
+            ||(int)($row['revision']??0)<=(int)($row['analyzed_revision']??0)||!RecentActivity::fresh($row))return false;
+        return DecisionProtection::classify($row,$snapshot)['state']==='unprotected';
     }
 
     private static function scoped(array $ips): array

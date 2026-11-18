@@ -15,6 +15,28 @@ def hit(expression,record):
 def expression():return FailRegex(H['parse'](H['sql_filter']()).get('Definition','failregex').replace('%%','%'))
 
 class SqlInjectionTests(unittest.TestCase):
+    def test_native_group_parity_and_opt_out(self):
+        native=FailRegex(H['parse'](H['sensitive_filter'](['sql_injection'])).get('Definition','failregex').replace('%%','%'))
+        off=FailRegex(H['parse'](H['sensitive_filter'](['sql_injection'],False)).get('Definition','failregex').replace('%%','%'))
+        other=FailRegex(H['parse'](H['sensitive_filter'](['env'])).get('Definition','failregex').replace('%%','%'))
+        targets=[SQL,SQL.replace('/cart.php','/index.php'),SQL.replace('%','%25'),
+            '/index.php?'+quote("rp=/store/service' UNION ALL SELECT 'fixture',NULL-- x",safe='=&'),
+            '/index.php?'+quote("x=store' ORDER BY 1000-- -",safe='=&'),
+            '/index.php?'+quote("x=') AND ('cweigq'='cweigq''",safe='=&')]
+        for target in targets:
+            for ip in ('198.51.100.77','2001:db8::77'):
+                for status in (200,302,400,403,404,421,500):
+                    for method in ('GET','POST','HEAD'):
+                        record=line(target,status,ip,tail='"203.0.113.9" "[client 203.0.113.8:7]"').replace('"GET ','"'+method+' ')
+                        self.assertEqual(hit(native,record),ip)
+                        self.assertEqual(hit(expression(),record),ip)
+                        self.assertIsNone(hit(off,record));self.assertIsNone(hit(other,record))
+        for target in ('/','/index.php','/cart.php?a=add&domain=register','/index.php?q=union',
+                       '/index.php?q=UNION%20SELECT','/index.php?q=EXTRACTVALUE',SQL.replace('/cart.php','/callback.php')):
+            self.assertIsNone(hit(native,line(target,tail='"'+SQL+'" "'+SQL+'"')))
+        self.assertEqual(H['parse'](H['sql_filter']()).get('Definition','failregex'),
+            H['parse']((ROOT/'setup/fail2ban/filter.d/amsfb-apache-cart-sqli.conf').read_text()).get('Definition','failregex'))
+
     def test_parity_and_loaded_shape_positive_negative(self):
         queries=["x=UNION ALL SELECT 'token',NULL-- x","x=store' ORDER BY 1000-- -","x=') AND ('cweigq'='cweigq''"]
         targets=[SQL,SQL.replace('/cart.php','/index.php'),SQL.replace('%','%25')]

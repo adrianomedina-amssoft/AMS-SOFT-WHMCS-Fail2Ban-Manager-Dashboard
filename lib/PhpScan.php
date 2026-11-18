@@ -19,6 +19,7 @@ final class PhpScan
     public static function catalogPattern(string $pattern): bool {return hash_equals(self::pattern(),$pattern);}
     public static function grouped(string $pattern): bool {return self::enabled()&&self::catalogPattern($pattern);}
     public static function target(string $line,bool $context=false): ?string {
+        if(SqlInjection::fromLine($line))return null;
         // Complete combined access log only. UA, referrer and error text are not targets.
         if(strlen($line)>65536||!preg_match('~^\S+ - \S+ \[[^\]\r\n]+\] "(GET|HEAD) ([^ "\r\n]+) HTTP/\d(?:\.\d)?" (\d{3}) (?:\d+|-) "[^"\r\n]*" "[^"\r\n]*"$~D',$line,$m))return null;
         if(!in_array((int)$m[3],$context?[301,302,307,308,403,404]:[403,404],true))return null;

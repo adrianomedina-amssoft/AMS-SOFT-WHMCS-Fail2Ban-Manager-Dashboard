@@ -18,6 +18,19 @@ function rejects($input,$current){try{Policy::validate($input,$current);}catch(\
 check(Policy::validate([],$defaults)===$defaults);
 check(in_array('php_cgi_probe',NativeProbes::GROUPS,true));
 check(in_array('session_lfi_probe',NativeProbes::GROUPS,true));
+check(in_array('sql_injection',NativeProbes::GROUPS,true));
+check(!in_array('sql_injection',NativeProbes::DEFAULT_GROUPS,true));
+check(Policy::validate(['native_probe_groups'=>'sql_injection'],$defaults)['native_probe_groups']==='sql_injection');
+check($defaults['ai_retired_sni_correlation_enabled']==='0');
+check($defaults['ai_coverage_recheck_enabled']==='0');
+check(Policy::validate(['ai_coverage_recheck_enabled'=>'1'],$defaults)['ai_coverage_recheck_enabled']==='1');
+check(rejects(['ai_coverage_recheck_enabled'=>'2'],$defaults));
+foreach(['sql_obfuscated','admin_config_probe'] as $group){
+    check(!in_array($group,NativeProbes::DEFAULT_GROUPS,true));
+    check(Policy::validate(['native_probe_groups'=>$group],$defaults)['native_probe_groups']===$group);
+}
+check(Policy::validate(['ai_retired_sni_correlation_enabled'=>'1'],$defaults)['ai_retired_sni_correlation_enabled']==='1');
+check(rejects(['ai_retired_sni_correlation_enabled'=>'2'],$defaults));
 check(!in_array('session_lfi_probe',NativeProbes::DEFAULT_GROUPS,true));
 check(Policy::validate(['native_probe_groups'=>'session_lfi_probe'],$defaults)['native_probe_groups']==='session_lfi_probe');
 check(Policy::validate(['native_probe_groups'=>'php_cgi_probe'],$defaults)['native_probe_groups']==='php_cgi_probe');

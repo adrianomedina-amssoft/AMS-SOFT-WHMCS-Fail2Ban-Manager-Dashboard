@@ -6,6 +6,24 @@ final class SqlInjection
 {
     public static function queryPattern(): string
     {
+        return '(?:'.self::legacyPattern().'|'.self::obfuscatedPattern().')';
+    }
+    /** Bounded executable-comment operators, never a keyword alone. Keep bridge parity. */
+    public static function obfuscatedPattern(): string
+    {
+        $slash='(?:/|%2f|%252f)';$star='(?:\\*|%2a|%252a)';$bang='(?:!|%21|%2521)';
+        $token=fn($word)=>$slash.$star.$bang.$word.$star.$slash;
+        $n='[0-9]{1,12}';$eq='(?:=|%3d|%253d)';
+        $lp='(?:\\(|%28|%2528)';$rp='(?:\\)|%29|%2529)';
+        $q='(?:[\\x22\\x27]|%22|%27|%2522|%2527)';
+        $predicate=$token('(?:and|or|where)').'(?:'.$token('not').')?'.$n
+            .'(?:'.$eq.$n.'|'.$token('between').$n.$token('and').$n.')(?![0-9])';
+        $value='(?:0x[0-9a-f]{1,32}|'.$n.'|'.$q.'[a-z0-9_]{1,80}'.$q.')';
+        $conditional=$token('case').$token('when').$lp.$n.$eq.$n.$rp.$token('then').$value;
+        return '(?:'.$predicate.'|'.$conditional.')';
+    }
+    public static function legacyPattern(): string
+    {
         // Keep byte-for-byte parity with sql_query_pattern() in the bridge.
         $s='(?:[+ ]|%20|%2520){1,8}';$o='(?:[+ ]|%20|%2520){0,8}';
         $q='(?:[\x22\x27]|%22|%27|%2522|%2527)';

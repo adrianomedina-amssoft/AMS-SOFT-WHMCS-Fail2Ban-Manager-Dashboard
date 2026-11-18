@@ -9,6 +9,8 @@ final class AttackFamily
     public static function fromLine(string $line): ?string
     {
         if(PhpCgiProbe::fromLine($line))return 'php-cgi-injection';
+        // Raw closed proof survives a grouping normalizer rejecting encoded controls.
+        if(SqlInjection::fromLine($line))return 'sql-injection';
         $target=RequestEvidence::target($line);
         if($target===null)return null;
         return self::fromTarget($target);
